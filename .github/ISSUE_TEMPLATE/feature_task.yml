@@ -1,0 +1,40 @@
+name: 機能開発 / タスク (Feature / Task)
+description: 新機能の実装、基盤タスク、仕様改善の起票に使用します。
+title: "[Task] "
+labels: ["type:task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        仕様書 (`docs/SPECIFICATION.md`) を参照のうえ、タスク内容を記述してください。
+  - type: input
+    id: spec_section
+    attributes:
+      label: 関連仕様セクション
+      placeholder: "例: 3.3 ダウン・蘇生 / 5.1 PacketEvents HUD"
+    validations:
+      required: false
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要・目的
+      description: 何を実現するタスクか簡潔に記入してください。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: 受入条件 (Acceptance Criteria)
+      value: |
+        - [ ] 仕様どおりに動作すること
+        - [ ] Folia のリージョン / エンティティスレッド安全性を満たすこと
+        - [ ] 設定値（YAML）および多言語（ja_JP / en_US）に対応していること
+    validations:
+      required: true
+  - type: checkboxes
+    id: folia_check
+    attributes:
+      label: Folia / パケット設計チェック
+      options:
+        - label: ワールド・エンティティ操作は対象 RegionScheduler / EntityScheduler 上で実行する設計になっている
+        - label: 大量サーバーエンティティ生成を避け、演出は PacketEvents 経由を検討した

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 企画・要件定義・詳細仕様書 (SPECIFICATION.md)
+    url: https://github.com/ikafly144/DragonRaid/blob/master/docs/SPECIFICATION.md
+    about: 新規タスクやギミック提案の前に仕様書を確認してください。

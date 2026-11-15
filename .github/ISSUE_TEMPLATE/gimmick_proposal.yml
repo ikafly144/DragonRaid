@@ -1,0 +1,46 @@
+name: MMOギミック / カスタム報酬 提案
+description: エンダードラゴンの新ギミック、タイムライン調整、カスタム装備案を提案します。
+title: "[Gimmick] "
+labels: ["type:feature", "area:gimmick"]
+body:
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: 対象難易度
+      options:
+        - Normal
+        - Hard / Savage
+        - 両方 (Normal & Hard/Savage)
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: 対象フェーズ
+      options:
+        - Phase 1 (覚醒と黒曜石の包囲)
+        - Phase 2 (蒼穹の審判と光の塔)
+        - Phase 3 (蒼天の翼・空中機動 / Hard-Savage専用)
+        - Final Phase (終焉の狂宴)
+        - 全フェーズ / 共通
+    validations:
+      required: true
+  - type: textarea
+    id: mechanic
+    attributes:
+      label: ギミック概要と MC アクション連携
+      description: 発動条件・予兆・プレイヤーの解法（盾、弓、パール、水バケツ、一時ブロック、エリトラ＋メイス等）を記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: scaling
+    attributes:
+      label: 人数スケーリング & ソロフォールバック
+      description: 可変人数（1〜8人以上）およびソロ突入時の挙動を記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: visuals
+    attributes:
+      label: PacketEvents 予兆・HUD・効果音演出案
+      description: Display Entity / パーティクル / BossBar / ActionBar / Sound によるバニラ完全対応の表現案を記載してください。
