@@ -154,6 +154,9 @@ altar:
   hard-name: "<dark_red><bold>Hard / Savage 難易度</bold></dark_red>"
   hard-lore: "<gray>4フェーズ / 立体機動・複合ギミック・時間切れあり</gray>\n<gray>蘇生上限: ceil(N/2)回 | 蘇生猶予 45秒</gray>\n<yellow>クリックして召喚</yellow>"
   hard-locked: "<red>Normal 難易度を1回以上クリアすると解放されます。</red>"
+  hard-unavailable: "<prefix><yellow>Hard / Savage 難易度は Milestone 4 で実装予定です。</yellow>"
+  cost-line: "<gray>必要コスト: <aqua><cost></aqua></gray>"
+  cost-free: "<green>初回討伐のためコスト不要</green>"
   insufficient-cost: "<prefix><red>召喚に必要なアイテムが不足しています（必要: <cost>）。</red>"
   open-shop-button: "<gold>報酬交換ショップを開く</gold>"
 
