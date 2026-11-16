@@ -1,0 +1,196 @@
+# DragonRaid English (en_US) MiniMessage Language File
+
+prefix: "<dark_purple>[<light_purple>DragonRaid</light_purple>]</dark_purple> "
+
+command:
+  no-permission: "<prefix><red>You do not have permission to execute this command.</red>"
+  player-only: "<prefix><red>This command can only be executed by a player.</red>"
+  player-not-found: "<prefix><red>Player '<target>' was not found.</red>"
+  points-insufficient: "<prefix><red>Insufficient points for <target>.</red>"
+  points-load-failed: "<prefix><red>Failed to update points.</red>"
+  points-transaction-failed: "<prefix><red>Could not update points (<reason>, current balance: <balance>).</red>"
+  stats-load-failed: "<prefix><red>Failed to load stats.</red>"
+  help: "<prefix><gray>DragonRaid commands: <white>/dr shop, /dr stats [player], /dr ready, /dr start, /dr admin \\<region|start|reset|points|reload></white></gray>"
+  milestone-shop: "<prefix><yellow>Reward shop GUI is not yet available (scheduled for Milestone 4).</yellow>"
+  milestone-ready: "<prefix><yellow>Raid ready/encounter flow is not yet available (scheduled for Milestone 2).</yellow>"
+  milestone-start: "<prefix><yellow>Raid encounter flow is not yet available (scheduled for Milestone 2).</yellow>"
+  milestone-admin-start: "<prefix><yellow>Forced raid start (<difficulty>) is not yet available (scheduled for Milestone 2).</yellow>"
+  milestone-admin-reset: "<prefix><yellow>Raid encounter reset is not yet available (scheduled for Milestone 2).</yellow>"
+  invalid-usage: "<prefix><yellow>Usage: <usage></yellow>"
+  reload-success: "<prefix><green>Configuration and language files reloaded.</green>"
+  reload-failed: "<prefix><red>Failed to reload configuration: <error></red>"
+  ready-toggled: "<prefix><aqua>Ready status: <state></aqua>"
+  ready-state-true: "<green>Ready</green>"
+  ready-state-false: "<gray>Not Ready</gray>"
+  altar-only-mode: "<prefix><yellow>Currently, raids can only be started from the Exit Portal Altar.</yellow>"
+  start-triggered: "<prefix><gold>Started pull countdown for <difficulty> raid.</gold>"
+  already-running: "<prefix><red>A raid encounter is already in progress.</red>"
+  admin-reset: "<prefix><yellow>Raid encounter has been force-reset by an administrator.</yellow>"
+  region-info: "<prefix><aqua>Region [<region>]: <details></aqua>"
+  region-updated: "<prefix><green>Region [<region>] has been updated.</green>"
+  stats-header: "<dark_purple>━━━ <light_purple><player>'s Raid Stats</light_purple> ━━━</dark_purple>"
+  stats-clears: "<gray>Clears: <white>Normal <normal> / Hard <hard></white></gray>"
+  stats-best-time: "<gray>Best Time: <white>Normal <normal_time> / Hard <hard_time></white></gray>"
+  stats-points: "<gray>Points: <aqua><points></aqua></gray>"
+  points-updated: "<prefix><green>Updated <player>'s <currency> to <amount> (action: <action>).</green>"
+
+raid:
+  first-clear-init: "<prefix><light_purple>Initialized first End Dragon fight as DragonRaid (Normal). Enter the central arena to begin.</light_purple>"
+  pull-countdown-title: "<gold><bold>PULL IN <seconds></bold></gold>"
+  pull-countdown-subtitle: "<gray>Difficulty: <difficulty> | Players: <players></gray>"
+  pull-cancelled: "<prefix><yellow>Pull countdown cancelled because players returned to the safe zone.</yellow>"
+  raid-start-title: "<dark_purple><bold>RAID START</bold></dark_purple>"
+  raid-start-subtitle: "<light_purple><boss> (<difficulty>) — Party Size N=<players></light_purple>"
+  late-join-locked: "<prefix><yellow>A raid is currently in progress. Please wait in the safe zone until the attempt ends.</yellow>"
+  wipe-title: "<dark_red><bold>WIPE</bold></dark_red>"
+  wipe-subtitle: "<gray>Resetting the arena and returning everyone to the safe zone...</gray>"
+  victory-title: "<gold><bold>VICTORY!</bold></gold>"
+  victory-subtitle: "<yellow>Clear Time: <time> | Difficulty: <difficulty></yellow>"
+  victory-rewards: "<prefix><green>Rewards earned: <rewards></green>"
+  arena-protected: "<prefix><red>Original End terrain cannot be broken during the raid.</red>"
+  bed-blocked: "<prefix><red>Beds and respawn anchors cannot be used during the raid.</red>"
+  temp-block-limit: "<prefix><yellow>Temporary block placement limit (<limit>) reached.</yellow>"
+  item-loss-protected: "<prefix><aqua>Your items and experience were preserved by raid protection.</aqua>"
+
+revive:
+  downed-self-title: "<red><bold>DOWNED</bold></red>"
+  downed-self-subtitle: "<gray>Wait for an ally to revive you (hold sneak/right-click for 2.5s)</gray>"
+  downed-broadcast: "<prefix><red><player> is downed! Hold sneak near their soul marker to revive them.</red>"
+  void-rescued: "<prefix><yellow>Rescued from the void!</yellow>"
+  soul-marker-label: "<red>✦ <player> ✦</red>\n<yellow>Time Left: <seconds>s | Revive: <progress>%</yellow>"
+  soul-marker-label-no-timer: "<red>✦ <player> ✦</red>\n<yellow>Hold Sneak to Revive (<progress>%)</yellow>"
+  reviving-actionbar: "<green>Reviving <player>: [<bar>] <percent>%</green>"
+  revived-success: "<prefix><green><target> was revived by <reviver>! (Revives left: <remaining>)</green>"
+  no-revives-left: "<prefix><red>No revives remaining for this attempt.</red>"
+  expired-spectator: "<prefix><dark_red><player>'s revive timer expired — moved to spectator state.</dark_red>"
+
+boss:
+  normal:
+    name: "<light_purple>Ender Dragon, Aspect of the End</light_purple>"
+  hard:
+    name: "<dark_red><bold>[Savage] Ender Dragon, Aspect of Ruin</bold></dark_red>"
+
+bossbar:
+  main: "<boss> <gray>[<difficulty>]</gray> <dark_gray>|</dark_gray> <aqua><phase></aqua> <dark_gray>|</dark_gray> <white><hp_percent>%</white>"
+  cast: "<yellow>▶ <ability> <gray>[Cast <seconds>s]</gray></yellow>"
+
+actionbar:
+  status: "<gray>Status: <state> <dark_gray>|</dark_gray> Revives Left: <yellow><revives></yellow> <dark_gray>|</dark_gray> <extra></gray>"
+  state-alive: "<green>ALIVE</green>"
+  state-downed: "<red>DOWNED</red>"
+  state-spectator: "<dark_gray>SPECTATOR</dark_gray>"
+  just-guard-success: "<gold><bold>✦ JUST GUARD! Heavy blow mitigated and boss staggered!</bold></gold>"
+  mace-smash-stagger: "<aqua><bold>✦ MACE SMASH! Interrupted boss cast!</bold></aqua>"
+  abyss-talisman-saved: "<light_purple><bold>✦ Abyss Talisman activated and prevented fatal damage!</bold></light_purple>"
+
+phase:
+  p1:
+    name: "Phase 1: Awakening & Obsidian Siege"
+    announce: "<light_purple>Phase 1: Awakening & Obsidian Siege</light_purple>"
+  p2:
+    name: "Phase 2: Judgment of the Azure Sky"
+    announce: "<aqua>Phase 2: Judgment of the Azure Sky</aqua>"
+  p3:
+    name: "Phase 3: Wings of the Firmament"
+    announce: "<gold>Phase 3: Wings of the Firmament — Updrafts active!</gold>"
+  final:
+    name: "Final Phase: Banquet of Ruin"
+    announce: "<dark_red><bold>Final Phase: Banquet of Ruin</bold></dark_red>"
+
+ability:
+  tank_buster:
+    name: "Draconic Cleave"
+    warning: "<red>⚠ Tank Buster on <player>! Raise your shield!</red>"
+  stack:
+    name: "Void Convergence"
+    warning: "<yellow>⚠ Stack marker! Gather inside the target ring!</yellow>"
+    solo-warning: "<yellow>⚠ Heavy strike! Guard with a shield or mitigation!</yellow>"
+  spread:
+    name: "Starfall Scatter"
+    warning: "<gold>⚠ Spread markers! Keep distance from allies!</gold>"
+  meteor_towers:
+    name: "Towers of Judgment"
+    warning: "<aqua>⚠ Meteor Towers appeared! At least one player must soak each tower!</aqua>"
+  los_breath:
+    name: "Breath of Oblivion"
+    warning: "<dark_purple>⚠ Line-of-Sight Breath casting! Take cover behind obsidian pillars or walls!</dark_purple>"
+  crystals:
+    name: "End Crystal Resonance"
+    warning: "<light_purple>⚠ End Crystals spawned! Destroy them to halt dragon regeneration!</light_purple>"
+    tether-warning: "<red>⚠ Tethered Crystals spawned! Destroy matching pairs within <seconds>s!</red>"
+  donut_outer_aoe:
+    name: "Rings of the Void"
+    warning: "<red>⚠ Donut & Outer AoE combo! Watch the ground telegraphs!</red>"
+  knockback_roar:
+    name: "Roar of the End"
+    warning: "<yellow>⚠ Knockback Roar incoming! Brace against a pillar or ready water/pearls!</yellow>"
+  updraft_wind_field:
+    name: "Firmament Updraft"
+    warning: "<aqua>✦ Updraft wind fields appeared! Ride them with Elytra or Wind Charges!</aqua>"
+  celestial_crystals:
+    name: "Celestial Crystals"
+    warning: "<gold>⚠ Celestial Crystals high above! Smash with a Mace or shoot them down!</gold>"
+  hard_enrage:
+    name: "Cataclysm of Ruin"
+    warning: "<dark_red><bold>⚠ Enrage timer reached! Casting Cataclysm of Ruin!</bold></dark_red>"
+
+altar:
+  title: "<dark_purple>Altar of the End — Select Difficulty</dark_purple>"
+  normal-name: "<green><bold>Normal Difficulty</bold></green>"
+  normal-lore: "<gray>3 Phases / Ground-focused action</gray>\n<gray>Revives: N×1 | No downed timer</gray>\n<yellow>Click to summon</yellow>"
+  hard-name: "<dark_red><bold>Hard / Savage Difficulty</bold></dark_red>"
+  hard-lore: "<gray>4 Phases / Aerial phase, combo mechanics & Hard Enrage</gray>\n<gray>Revives: ceil(N/2) | 45s revive window</gray>\n<yellow>Click to summon</yellow>"
+  hard-locked: "<red>Clear Normal difficulty at least once to unlock.</red>"
+  insufficient-cost: "<prefix><red>Missing required summoning items (Need: <cost>).</red>"
+  open-shop-button: "<gold>Open Reward Shop</gold>"
+
+shop:
+  title: "<dark_purple>DragonRaid Reward Shop</dark_purple>"
+  cost-line: "<gray>Cost: <aqua><costs></aqua></gray>"
+  hard-clear-required: "<red>Requires Hard / Savage clear</red>"
+  click-to-buy: "<green>Click to exchange</green>"
+  insufficient-points: "<prefix><red>Insufficient points for this item.</red>"
+  inventory-full: "<prefix><red>Your inventory is full.</red>"
+  purchase-success: "<prefix><green>Exchanged for '<item>'!</green>"
+
+currency:
+  dragon_token:
+    name: "<light_purple>Dragon Token</light_purple>"
+  abyssal_scale:
+    name: "<dark_aqua>Abyssal Scale</dark_aqua>"
+  celestial_fragment:
+    name: "<gold>Celestial Fragment</gold>"
+
+gear:
+  dragonscale_shield:
+    name: "<light_purple><bold>Dragonscale Shield</bold></light_purple>"
+    lore: "<gray>Greatly increases Tank Buster damage mitigation.</gray>\n<aqua>Emits a shockwave on a successful Just Guard.</aqua>"
+  voidwing_elytra:
+    name: "<dark_purple><bold>Voidwing Elytra</bold></dark_purple>"
+    lore: "<gray>Boosts glide velocity and grants an updraft burst on cooldown.</gray>"
+  dragonslayer_greatsword:
+    name: "<gold><bold>Dragonslayer Greatsword</bold></gold>"
+    lore: "<gray>Deals bonus damage to raid bosses and End mobs.</gray>\n<aqua>Right-click to unleash a sweeping cleave.</aqua>"
+  dragonslayer_bow:
+    name: "<aqua><bold>Dragonslayer Bow</bold></aqua>"
+    lore: "<gray>Deals bonus ranged damage to End Crystals and cores.</gray>"
+  dragonslayer_mace:
+    name: "<gold><bold>Dragonslayer Mace</bold></gold>"
+    lore: "<gray>Amplifies Smash damage and extends boss stagger duration.</gray>"
+  abyss_talisman:
+    name: "<dark_purple><bold>Abyss Talisman</bold></dark_purple>"
+    lore: "<gray>Automatically rescues you from void fall or lethal damage once per cooldown.</gray>"
+
+enchant:
+  dragon_bane:
+    name: "<gold>Dragon Bane</gold>"
+    lore: "<gray>Increases damage dealt to raid bosses and End mobs.</gray>"
+  void_feather:
+    name: "<aqua>Void Feather</aqua>"
+    lore: "<gray>Enhances Elytra glide speed and updraft burst.</gray>"
+  bulwark_parry:
+    name: "<light_purple>Bulwark Parry</light_purple>"
+    lore: "<gray>Improves shield mitigation and widens the Just Guard window.</gray>"
+  abyss_ward:
+    name: "<dark_purple>Abyss Ward</dark_purple>"
+    lore: "<gray>Reduces the cooldown of Abyss Talisman.</gray>"

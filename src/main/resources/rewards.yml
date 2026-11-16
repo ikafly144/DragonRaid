@@ -1,0 +1,278 @@
+# DragonRaid Rewards, Virtual Currencies, Custom Gear & Shop Configuration
+
+currencies:
+  dragon_token:
+    name-key: currency.dragon_token.name
+    icon: AMETHYST_SHARD
+    max-balance: 99999
+  abyssal_scale:
+    name-key: currency.abyssal_scale.name
+    icon: PHANTOM_MEMBRANE
+    max-balance: 99999
+  celestial_fragment:
+    name-key: currency.celestial_fragment.name
+    icon: NETHER_STAR
+    max-balance: 99999
+
+clear-rewards:
+  normal:
+    points:
+      dragon_token: 10
+      abyssal_scale: 5
+    first-clear-bonus:
+      dragon_token: 15
+      abyssal_scale: 10
+    drops:
+      - type: CUSTOM_GEAR
+        id: dragonscale_shield
+        chance: 0.10
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+      - type: CUSTOM_GEAR
+        id: dragonslayer_bow
+        chance: 0.08
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+      - type: CUSTOM_ENCHANT_BOOK
+        id: dragon_bane
+        level: 1
+        chance: 0.15
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+
+  hard:
+    points:
+      dragon_token: 25
+      abyssal_scale: 12
+      celestial_fragment: 8
+    first-clear-bonus:
+      dragon_token: 35
+      abyssal_scale: 20
+      celestial_fragment: 15
+    drops:
+      - type: CUSTOM_GEAR
+        id: voidwing_elytra
+        chance: 0.12
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+      - type: CUSTOM_GEAR
+        id: dragonslayer_mace
+        chance: 0.10
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+      - type: CUSTOM_GEAR
+        id: abyss_talisman
+        chance: 0.08
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+      - type: CUSTOM_ENCHANT_BOOK
+        id: void_feather
+        level: 1
+        chance: 0.20
+        min-amount: 1
+        max-amount: 1
+        per-player: true
+
+custom-gear:
+  dragonscale_shield:
+    name-key: gear.dragonscale_shield.name
+    lore-key: gear.dragonscale_shield.lore
+    material: SHIELD
+    custom-model-data: 1001
+    stats:
+      tank-buster-reduction-bonus: 0.20
+      just-guard-shockwave-radius: 4.0
+      just-guard-shockwave-damage: 6.0
+      cooldown-seconds: 4.0
+
+  voidwing_elytra:
+    name-key: gear.voidwing_elytra.name
+    lore-key: gear.voidwing_elytra.lore
+    material: ELYTRA
+    custom-model-data: 1002
+    stats:
+      glide-speed-multiplier: 1.25
+      updraft-burst-velocity: 1.40
+      cooldown-seconds: 12.0
+
+  dragonslayer_greatsword:
+    name-key: gear.dragonslayer_greatsword.name
+    lore-key: gear.dragonslayer_greatsword.lore
+    material: NETHERITE_SWORD
+    custom-model-data: 1003
+    stats:
+      raid-damage-multiplier: 1.15
+      cleave-damage: 10.0
+      cleave-radius: 3.5
+      cooldown-seconds: 8.0
+
+  dragonslayer_bow:
+    name-key: gear.dragonslayer_bow.name
+    lore-key: gear.dragonslayer_bow.lore
+    material: BOW
+    custom-model-data: 1004
+    stats:
+      raid-damage-multiplier: 1.15
+      crystal-damage-multiplier: 1.30
+      piercing-shot-multiplier: 1.45
+      cooldown-seconds: 10.0
+
+  dragonslayer_mace:
+    name-key: gear.dragonslayer_mace.name
+    lore-key: gear.dragonslayer_mace.lore
+    material: MACE
+    custom-model-data: 1005
+    stats:
+      raid-damage-multiplier: 1.15
+      smash-bonus-multiplier: 1.25
+      extra-stagger-seconds: 1.0
+
+  abyss_talisman:
+    name-key: gear.abyss_talisman.name
+    lore-key: gear.abyss_talisman.lore
+    material: TOTEM_OF_UNDYING
+    custom-model-data: 1006
+    stats:
+      auto-rescue-heal-percent: 0.50
+      auto-rescue-invuln-seconds: 3.0
+      cooldown-seconds: 300.0
+
+custom-enchants:
+  dragon_bane:
+    name-key: enchant.dragon_bane.name
+    lore-key: enchant.dragon_bane.lore
+    max-level: 3
+    damage-bonus-per-level: 0.05
+
+  void_feather:
+    name-key: enchant.void_feather.name
+    lore-key: enchant.void_feather.lore
+    max-level: 2
+    boost-bonus-per-level: 0.12
+
+  bulwark_parry:
+    name-key: enchant.bulwark_parry.name
+    lore-key: enchant.bulwark_parry.lore
+    max-level: 2
+    mitigation-per-level: 0.08
+    extra-just-guard-ticks-per-level: 2
+
+  abyss_ward:
+    name-key: enchant.abyss_ward.name
+    lore-key: enchant.abyss_ward.lore
+    max-level: 1
+    cooldown-reduction-percent: 0.20
+
+shop:
+  title-key: shop.title
+  size: 54
+  items:
+    - id: buy_dragonscale_shield
+      slot: 10
+      type: CUSTOM_GEAR
+      target: dragonscale_shield
+      amount: 1
+      requires-hard-clear: false
+      costs:
+        dragon_token: 30
+        abyssal_scale: 15
+    - id: buy_dragonslayer_greatsword
+      slot: 11
+      type: CUSTOM_GEAR
+      target: dragonslayer_greatsword
+      amount: 1
+      requires-hard-clear: false
+      costs:
+        dragon_token: 40
+        abyssal_scale: 20
+    - id: buy_dragonslayer_bow
+      slot: 12
+      type: CUSTOM_GEAR
+      target: dragonslayer_bow
+      amount: 1
+      requires-hard-clear: false
+      costs:
+        dragon_token: 40
+        abyssal_scale: 20
+    - id: buy_voidwing_elytra
+      slot: 14
+      type: CUSTOM_GEAR
+      target: voidwing_elytra
+      amount: 1
+      requires-hard-clear: true
+      costs:
+        dragon_token: 60
+        celestial_fragment: 20
+    - id: buy_dragonslayer_mace
+      slot: 15
+      type: CUSTOM_GEAR
+      target: dragonslayer_mace
+      amount: 1
+      requires-hard-clear: true
+      costs:
+        dragon_token: 60
+        celestial_fragment: 25
+    - id: buy_abyss_talisman
+      slot: 16
+      type: CUSTOM_GEAR
+      target: abyss_talisman
+      amount: 1
+      requires-hard-clear: true
+      costs:
+        dragon_token: 75
+        abyssal_scale: 30
+        celestial_fragment: 30
+    - id: buy_dragon_bane_1
+      slot: 28
+      type: CUSTOM_ENCHANT_BOOK
+      target: dragon_bane
+      level: 1
+      amount: 1
+      requires-hard-clear: false
+      costs:
+        dragon_token: 20
+        abyssal_scale: 10
+    - id: buy_bulwark_parry_1
+      slot: 29
+      type: CUSTOM_ENCHANT_BOOK
+      target: bulwark_parry
+      level: 1
+      amount: 1
+      requires-hard-clear: false
+      costs:
+        dragon_token: 20
+        abyssal_scale: 10
+    - id: buy_void_feather_1
+      slot: 30
+      type: CUSTOM_ENCHANT_BOOK
+      target: void_feather
+      level: 1
+      amount: 1
+      requires-hard-clear: true
+      costs:
+        dragon_token: 30
+        celestial_fragment: 12
+    - id: buy_abyss_ward_1
+      slot: 31
+      type: CUSTOM_ENCHANT_BOOK
+      target: abyss_ward
+      level: 1
+      amount: 1
+      requires-hard-clear: true
+      costs:
+        dragon_token: 35
+        celestial_fragment: 15
+    - id: buy_end_crystal_bundle
+      slot: 34
+      type: VANILLA_ITEM
+      target: END_CRYSTAL
+      amount: 4
+      requires-hard-clear: false
+      costs:
+        dragon_token: 15
