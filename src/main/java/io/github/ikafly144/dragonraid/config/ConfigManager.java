@@ -3,6 +3,7 @@ package io.github.ikafly144.dragonraid.config;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -11,6 +12,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import org.bukkit.plugin.Plugin;
 
 /**
@@ -106,8 +108,17 @@ public final class ConfigManager {
      */
     public CompletableFuture<Void> updateRegionsAsync(RegionConfig regions, Executor executor) {
         Objects.requireNonNull(regions, "regions");
+        return updateRegionsAsync(ignored -> regions, executor);
+    }
+
+    /**
+     * Applies {@code updater} against the latest {@link RegionConfig} inside the synchronization lock,
+     * validates all configuration files, and persists {@code config.yml} asynchronously.
+     */
+    public CompletableFuture<Void> updateRegionsAsync(UnaryOperator<RegionConfig> updater, Executor executor) {
+        Objects.requireNonNull(updater, "updater");
         Objects.requireNonNull(executor, "executor");
-        return CompletableFuture.runAsync(() -> updateRegions(regions), executor);
+        return CompletableFuture.runAsync(() -> updateRegions(updater), executor);
     }
 
     /**
@@ -116,19 +127,52 @@ public final class ConfigManager {
      */
     public synchronized void updateRegions(RegionConfig regions) {
         Objects.requireNonNull(regions, "regions");
-        YamlConfigLoader.validateRegionConfig(regions, CONFIG_FILE);
+        updateRegions(ignored -> regions);
+    }
 
-        Path configPath = dataFolder.resolve(CONFIG_FILE);
-        String candidateYaml = YamlConfigLoader.renderRegionsPreservingComments(configPath, regions);
+    /**
+     * Atomically applies {@code updater} to the latest {@link RegionConfig}, validates the resulting
+     * {@code config.yml} and companion files, writes via temp-file swap, and updates the snapshot.
+     */
+    public synchronized void updateRegions(UnaryOperator<RegionConfig> updater) {
+        Objects.requireNonNull(updater, "updater");
+        Path configPath = dataFolder.resolve(CONFIG_FILE).toAbsolutePath().normalize();
+        RegionConfig latestRegions = this.snapshot != null
+                ? this.snapshot.pluginConfig().regions()
+                : YamlConfigLoader.loadPluginConfig(configPath).regions();
+        RegionConfig updatedRegions = Objects.requireNonNull(updater.apply(latestRegions), "updated regions");
+
+        YamlConfigLoader.validateRegionConfig(updatedRegions, CONFIG_FILE);
+        String candidateYaml = YamlConfigLoader.renderRegionsPreservingComments(configPath, updatedRegions);
         PluginConfig candidatePluginConfig = YamlConfigLoader.loadPluginConfigFromString(candidateYaml, CONFIG_FILE);
         ConfigSnapshot candidateSnapshot = buildValidatedSnapshot(candidatePluginConfig);
 
+        writeAtomically(configPath, candidateYaml);
+        this.snapshot = candidateSnapshot;
+    }
+
+    private static void writeAtomically(Path targetPath, String content) {
+        Path parentDir = targetPath.getParent();
+        Path tempFile = null;
         try {
-            Files.writeString(configPath, candidateYaml, StandardCharsets.UTF_8);
+            tempFile = Files.createTempFile(parentDir, CONFIG_FILE + ".", ".tmp");
+            Files.writeString(tempFile, content, StandardCharsets.UTF_8);
+            try {
+                Files.move(tempFile, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ex) {
+                Files.move(tempFile, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException ex) {
             throw new ConfigException(CONFIG_FILE, "regions", "Failed to save updated regions", ex);
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (IOException ignored) {
+                    // Best-effort cleanup of temp file.
+                }
+            }
         }
-        this.snapshot = candidateSnapshot;
     }
 
     private ConfigSnapshot buildValidatedSnapshot(PluginConfig pluginConfig) {

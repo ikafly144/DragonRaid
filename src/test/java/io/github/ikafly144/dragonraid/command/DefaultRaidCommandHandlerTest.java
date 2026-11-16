@@ -355,6 +355,31 @@ class DefaultRaidCommandHandlerTest {
         assertTrue(jaMsgs.get(0).contains("コマンド一覧"));
     }
 
+    @Test
+    void concurrentArenaAndSafeZoneUpdatesDoNotOverwriteEachOther() {
+        List<Runnable> asyncQueue = new ArrayList<>();
+        doReturn((Executor) asyncQueue::add).when(scheduler).asyncExecutor();
+        doAnswer(inv -> {
+            inv.getArgument(0, Runnable.class).run();
+            return mock(TaskHandle.class);
+        }).when(scheduler).runGlobal(any(Runnable.class));
+
+        World world = mock(World.class);
+        CommandSender admin = mock(CommandSender.class);
+        handler.adminRegion(admin, new Location(world, 40.0, 72.0, -15.0), RegionAction.SET_ARENA);
+        handler.adminRegion(admin, new Location(world, 220.0, 66.0, 30.0, 45.0f, -10.0f), RegionAction.SET_SAFEZONE);
+
+        assertEquals(2, asyncQueue.size());
+        asyncQueue.removeFirst().run();
+        asyncQueue.removeFirst().run();
+
+        RegionConfig updated = configManager.pluginConfig().regions();
+        assertEquals(40.0, updated.arena().center().x(), 1e-6);
+        assertEquals(-15.0, updated.arena().center().z(), 1e-6);
+        assertEquals(220.0, updated.safeZone().spawnPoint().x(), 1e-6);
+        assertEquals(45.0f, updated.safeZone().spawnPoint().yaw(), 1e-6);
+    }
+
     private static List<String> captureMessages(CommandSender sender) {
         ArgumentCaptor<Component> captor = ArgumentCaptor.forClass(Component.class);
         verify(sender, atLeastOnce()).sendMessage(captor.capture());

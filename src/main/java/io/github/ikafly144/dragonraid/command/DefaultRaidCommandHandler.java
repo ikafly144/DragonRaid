@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
@@ -199,16 +200,30 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                     onPlayerOnly(sender);
                     return;
                 }
-                ArenaRegion updatedArena = recenterArena(current.arena(), location);
-                persistRegions(sender, "arena", new RegionConfig(updatedArena, current.safeZone(), current.voidYThreshold()));
+                double x = location.getX();
+                double y = location.getY();
+                double z = location.getZ();
+                persistRegions(sender, "arena", latest -> new RegionConfig(
+                        recenterArena(latest.arena(), x, y, z),
+                        latest.safeZone(),
+                        latest.voidYThreshold()
+                ));
             }
             case SET_SAFEZONE -> {
                 if (location == null) {
                     onPlayerOnly(sender);
                     return;
                 }
-                SafeZoneRegion updatedSafeZone = recenterSafeZone(current.safeZone(), location);
-                persistRegions(sender, "safe-zone", new RegionConfig(current.arena(), updatedSafeZone, current.voidYThreshold()));
+                double x = location.getX();
+                double y = location.getY();
+                double z = location.getZ();
+                float yaw = location.getYaw();
+                float pitch = location.getPitch();
+                persistRegions(sender, "safe-zone", latest -> new RegionConfig(
+                        latest.arena(),
+                        recenterSafeZone(latest.safeZone(), x, y, z, yaw, pitch),
+                        latest.voidYThreshold()
+                ));
             }
         }
     }
@@ -438,8 +453,8 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         }
     }
 
-    private void persistRegions(CommandSender sender, String regionName, RegionConfig updated) {
-        configManager.updateRegionsAsync(updated, scheduler.asyncExecutor())
+    private void persistRegions(CommandSender sender, String regionName, UnaryOperator<RegionConfig> updater) {
+        configManager.updateRegionsAsync(updater, scheduler.asyncExecutor())
                 .whenComplete((ignored, error) -> replyOnSenderThread(sender, () -> {
                     if (error == null) {
                         messageService.send(sender, "command.region-updated",
@@ -470,8 +485,8 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         }
     }
 
-    private static ArenaRegion recenterArena(ArenaRegion current, Location location) {
-        Point3D newCenter = new Point3D(location.getX(), location.getY(), location.getZ());
+    private static ArenaRegion recenterArena(ArenaRegion current, double x, double y, double z) {
+        Point3D newCenter = new Point3D(x, y, z);
         Point3D newMin = shiftPoint(current.min(), current.center(), newCenter);
         Point3D newMax = shiftPoint(current.max(), current.center(), newCenter);
         int minY = current.minY();
@@ -483,17 +498,12 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         return new ArenaRegion(current.shape(), newCenter, current.radius(), newMin, newMax, minY, maxY);
     }
 
-    private static SafeZoneRegion recenterSafeZone(SafeZoneRegion current, Location location) {
-        Point3D newCenter = new Point3D(location.getX(), location.getY(), location.getZ());
+    private static SafeZoneRegion recenterSafeZone(
+            SafeZoneRegion current, double x, double y, double z, float yaw, float pitch) {
+        Point3D newCenter = new Point3D(x, y, z);
         Point3D newMin = shiftPoint(current.min(), current.center(), newCenter);
         Point3D newMax = shiftPoint(current.max(), current.center(), newCenter);
-        SpawnPoint newSpawn = new SpawnPoint(
-            location.getX(),
-            location.getY(),
-            location.getZ(),
-            location.getYaw(),
-            location.getPitch()
-        );
+        SpawnPoint newSpawn = new SpawnPoint(x, y, z, yaw, pitch);
         int minY = current.minY();
         int maxY = current.maxY();
         if (current.shape() == Shape.CUBOID) {

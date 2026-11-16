@@ -319,4 +319,55 @@ class ConfigManagerTest {
         assertEquals(2, scaling.spreadTargets(2));
         assertEquals(4, scaling.spreadTargets(10));
     }
+
+    @Test
+    void updateRegions_preservesColumnZeroCommentsInsideRegionsAndDoesNotDuplicateKeys(@TempDir Path tempDir)
+            throws IOException {
+        ConfigManager manager = newManager(tempDir);
+        manager.initialize();
+
+        Path configFile = tempDir.resolve("config.yml");
+        String original = Files.readString(configFile, StandardCharsets.UTF_8);
+        String withColZeroComment = original
+                .replace("  safe-zone:", "# waiting area at column 0\n  safe-zone:")
+                .replace("scaling:", "# Next top-level section header\nscaling:");
+        Files.writeString(configFile, withColZeroComment, StandardCharsets.UTF_8);
+
+        RegionConfig current = manager.pluginConfig().regions();
+        RegionConfig.ArenaRegion updatedArena = new RegionConfig.ArenaRegion(
+                RegionConfig.Shape.CYLINDER,
+                new RegionConfig.Point3D(25.0, 64.0, 25.0),
+                140.0,
+                current.arena().min(),
+                current.arena().max(),
+                current.arena().minY(),
+                current.arena().maxY()
+        );
+        manager.updateRegions(new RegionConfig(updatedArena, current.safeZone(), -8.0));
+
+        String saved = Files.readString(configFile, StandardCharsets.UTF_8);
+        assertTrue(saved.contains("# waiting area at column 0"));
+        assertTrue(saved.contains("# Next top-level section header"));
+        // Verify safe-zone and void-y-threshold appear exactly once (no duplicate section tail left behind)
+        assertEquals(1, saved.split("(?m)^  safe-zone:$", -1).length - 1);
+        assertEquals(1, saved.split("(?m)^  void-y-threshold:", -1).length - 1);
+
+        manager.reload();
+        assertEquals(140.0, manager.pluginConfig().regions().arena().radius(), 1e-6);
+        assertEquals(-8.0, manager.pluginConfig().regions().voidYThreshold(), 1e-6);
+    }
+
+    @Test
+    void spawnPointFloatOverflow_isRejectedOnLoad(@TempDir Path tempDir) throws IOException {
+        ConfigManager manager = newManager(tempDir);
+        manager.initialize();
+
+        Path configFile = tempDir.resolve("config.yml");
+        String original = Files.readString(configFile, StandardCharsets.UTF_8);
+        Files.writeString(configFile, original.replace("yaw: 90.0", "yaw: 1e100"), StandardCharsets.UTF_8);
+
+        ConfigException ex = assertThrows(ConfigException.class, manager::reload);
+        assertEquals("config.yml", ex.fileName());
+        assertTrue(ex.path().contains("spawn-point"));
+    }
 }

@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,7 +51,10 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
     private final ReentrantLock writeLock = new ReentrantLock(true);
     private final AtomicBoolean closing = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
-    private final Set<CompletableFuture<?>> pendingFutures = ConcurrentHashMap.newKeySet();
+    private final Set<PendingTask> pendingTasks = ConcurrentHashMap.newKeySet();
+
+    private record PendingTask(CompletableFuture<Void> internalDone, CompletableFuture<?> publicFuture) {
+    }
 
     public SqlitePlayerDataRepository(Path databasePath, Executor asyncExecutor) {
         this(databasePath, DEFAULT_POOL_SIZE, asyncExecutor, DEFAULT_CLOSE_DRAIN_TIMEOUT);
@@ -428,28 +432,35 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
         if (!closing.compareAndSet(false, true)) {
             return;
         }
+        List<PendingTask> timedOut = List.of();
         try {
-            drainPendingFutures();
+            drainPendingTasks();
         } finally {
             closed.set(true);
-            for (CompletableFuture<?> leftover : List.copyOf(pendingFutures)) {
-                pendingFutures.remove(leftover);
-                leftover.completeExceptionally(
-                    new CancellationException("SqlitePlayerDataRepository closed before completion")
-                );
+            timedOut = List.copyOf(pendingTasks);
+            for (PendingTask leftover : timedOut) {
+                pendingTasks.remove(leftover);
+                leftover.internalDone().complete(null);
             }
             dataSource.close();
         }
+        for (PendingTask leftover : timedOut) {
+            ForkJoinPool.commonPool().execute(() -> leftover.publicFuture().completeExceptionally(
+                new CancellationException("SqlitePlayerDataRepository closed before completion")
+            ));
+        }
     }
 
-    private void drainPendingFutures() {
+    private void drainPendingTasks() {
         long deadline = System.nanoTime() + closeDrainTimeoutNanos;
-        while (!pendingFutures.isEmpty()) {
+        while (!pendingTasks.isEmpty()) {
             long remainingNanos = deadline - System.nanoTime();
             if (remainingNanos <= 0L) {
                 break;
             }
-            CompletableFuture<?>[] snapshot = pendingFutures.toArray(CompletableFuture[]::new);
+            CompletableFuture<?>[] snapshot = pendingTasks.stream()
+                .map(PendingTask::internalDone)
+                .toArray(CompletableFuture[]::new);
             if (snapshot.length == 0) {
                 break;
             }
@@ -461,7 +472,7 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
             } catch (TimeoutException ex) {
                 break;
             } catch (ExecutionException ex) {
-                // Individual task failures are already propagated on each task's CompletableFuture.
+                // Individual task failures are propagated on each public future.
             }
         }
     }
@@ -654,30 +665,37 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
     private <T> CompletableFuture<T> supplyAsync(java.util.function.Supplier<T> supplier) {
         ensureAccepting();
-        CompletableFuture<T> future = new CompletableFuture<>();
-        pendingFutures.add(future);
+        CompletableFuture<Void> internalDone = new CompletableFuture<>();
+        CompletableFuture<T> publicFuture = new CompletableFuture<>();
+        PendingTask task = new PendingTask(internalDone, publicFuture);
+        pendingTasks.add(task);
         if (closing.get()) {
-            pendingFutures.remove(future);
+            pendingTasks.remove(task);
             throw new IllegalStateException("SqlitePlayerDataRepository is already closed");
         }
-        future.whenComplete((ignored, error) -> pendingFutures.remove(future));
+        internalDone.whenComplete((ignored, error) -> pendingTasks.remove(task));
         try {
             asyncExecutor.execute(() -> {
-                if (future.isDone()) {
+                if (internalDone.isDone() || publicFuture.isDone()) {
+                    internalDone.complete(null);
                     return;
                 }
                 try {
-                    future.complete(supplier.get());
+                    T result = supplier.get();
+                    internalDone.complete(null);
+                    publicFuture.complete(result);
                 } catch (Throwable ex) {
-                    future.completeExceptionally(ex);
+                    internalDone.complete(null);
+                    publicFuture.completeExceptionally(ex);
                 }
             });
         } catch (Throwable ex) {
-            pendingFutures.remove(future);
-            future.completeExceptionally(ex);
+            pendingTasks.remove(task);
+            internalDone.complete(null);
+            publicFuture.completeExceptionally(ex);
             throw ex;
         }
-        return future;
+        return publicFuture;
     }
 
     private CompletableFuture<Void> runAsync(Runnable runnable) {

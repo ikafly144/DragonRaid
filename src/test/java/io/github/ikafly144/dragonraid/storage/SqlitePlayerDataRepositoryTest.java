@@ -378,19 +378,24 @@ class SqlitePlayerDataRepositoryTest {
     }
 
     @Test
-    void closeTimesOutAndFailsDroppedAsyncTasksCleanly() {
+    void closeTimesOutAndFailsDroppedAsyncTasksCleanlyWithoutCallbackDeadlock() {
         Path dbFile = tempDir.resolve("drop.db");
         Executor droppingExecutor = task -> {
             // Intentionally drop queued tasks without running them.
         };
         SqlitePlayerDataRepository repo = new SqlitePlayerDataRepository(
             dbFile, 1, droppingExecutor, Duration.ofMillis(80));
-        UUID uuid = UUID.randomUUID();
+        UUID firstUuid = UUID.randomUUID();
+        UUID secondUuid = UUID.randomUUID();
 
-        CompletableFuture<PointTransactionResult> dropped = repo.addPoints(uuid, "Dropped", 25L);
+        CompletableFuture<PointTransactionResult> first = repo.addPoints(firstUuid, "First", 25L);
+        CompletableFuture<PointTransactionResult> second = repo.addPoints(secondUuid, "Second", 50L);
+        // Simulate a synchronous dependent waiting on another unexecuted future.
+        first.whenComplete((ignored, err) -> second.handle((v, e) -> null).join());
+
         repo.close();
 
-        assertTrue(dropped.isCompletedExceptionally());
-        assertThrows(CancellationException.class, dropped::join);
+        assertThrows(CancellationException.class, () -> first.get(2, TimeUnit.SECONDS));
+        assertThrows(CancellationException.class, () -> second.get(2, TimeUnit.SECONDS));
     }
 }

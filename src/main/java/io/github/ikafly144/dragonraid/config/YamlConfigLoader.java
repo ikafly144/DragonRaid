@@ -167,13 +167,20 @@ final class YamlConfigLoader {
         int end = rawLines.length;
         for (int i = start + 1; i < rawLines.length; i++) {
             String line = rawLines[i];
-            if (!line.isBlank() && !Character.isWhitespace(line.charAt(0))) {
+            // Stop only at the next top-level key; column-0 comments inside regions remain within the block.
+            if (!line.isBlank() && !Character.isWhitespace(line.charAt(0)) && !line.startsWith("#")) {
                 end = i;
                 break;
             }
         }
-        while (end > start + 1 && rawLines[end - 1].isBlank()) {
-            end--;
+        // Keep trailing blank lines and column-0 header comments belonging to the next top-level section outside.
+        while (end > start + 1) {
+            String prev = rawLines[end - 1];
+            if (prev.isBlank() || (!Character.isWhitespace(prev.charAt(0)) && prev.startsWith("#"))) {
+                end--;
+            } else {
+                break;
+            }
         }
 
         Map<String, List<String>> sectionComments = extractKeyComments(rawLines, start + 1, end);
@@ -539,6 +546,7 @@ final class YamlConfigLoader {
                     ConfigValidation.requireDouble(spNode, fileName, "z"),
                     (float) ConfigValidation.requireDouble(spNode, fileName, "yaw"),
                     (float) ConfigValidation.requireDouble(spNode, fileName, "pitch"));
+            validateSpawnPoint(spawnPoint, fileName, ConfigValidation.fullPath(spNode));
             RegionConfig.SafeZoneRegion safeZone = new RegionConfig.SafeZoneRegion(
                     safeGeo.shape(), safeGeo.center(), safeGeo.radius(),
                     safeGeo.min(), safeGeo.max(), safeGeo.minY(), safeGeo.maxY(), spawnPoint);
