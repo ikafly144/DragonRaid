@@ -61,6 +61,10 @@ public record RegionConfig(
         public boolean contains(double x, double y, double z) {
             return RegionConfig.containsGeometry(shape, center, radius, min, max, minY, maxY, x, y, z);
         }
+
+        public boolean containsHorizontal(double x, double z) {
+            return RegionConfig.containsHorizontalGeometry(shape, center, radius, min, max, x, z);
+        }
     }
 
     /**
@@ -79,6 +83,10 @@ public record RegionConfig(
     ) {
         public boolean contains(double x, double y, double z) {
             return RegionConfig.containsGeometry(shape, center, radius, min, max, minY, maxY, x, y, z);
+        }
+
+        public boolean containsHorizontal(double x, double z) {
+            return RegionConfig.containsHorizontalGeometry(shape, center, radius, min, max, x, z);
         }
     }
 
@@ -103,6 +111,23 @@ public record RegionConfig(
         }
         return x >= min.x() && x <= max.x()
                 && y >= min.y() && y <= max.y()
+                && z >= min.z() && z <= max.z();
+    }
+
+    private static boolean containsHorizontalGeometry(
+            Shape shape,
+            Point3D center,
+            double radius,
+            Point3D min,
+            Point3D max,
+            double x,
+            double z) {
+        if (shape == Shape.CYLINDER) {
+            double dx = x - center.x();
+            double dz = z - center.z();
+            return (dx * dx + dz * dz) <= (radius * radius);
+        }
+        return x >= min.x() && x <= max.x()
                 && z >= min.z() && z <= max.z();
     }
 }

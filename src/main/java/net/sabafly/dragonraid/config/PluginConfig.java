@@ -154,7 +154,8 @@ public record PluginConfig(
             @Setting("heal-percent") double healPercent,
             @Setting("void-rescue-y-offset") double voidRescueYOffset,
             @Setting("wipe-delay-seconds") int wipeDelaySeconds,
-            @Setting("wipe-if-all-leave-arena") boolean wipeIfAllLeaveArena
+            @Setting("wipe-if-all-leave-arena") boolean wipeIfAllLeaveArena,
+            @Setting("down-on-disconnect") boolean downOnDisconnect
     ) {
     }
 

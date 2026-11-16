@@ -208,6 +208,16 @@ class DragonRaidCommandRegistrarTest {
         assertThrows(CommandSyntaxException.class,
             () -> dispatcher.execute("dr admin region invalid", playerSource));
 
+        dispatcher.execute("dr admin region set-arena-radius 150", playerSource);
+        dispatcher.execute("dr admin region set-void-y -16.5", playerSource);
+        dispatcher.execute("dr admin region set-arena-bounds -100 0 -100 100 256 100", playerSource);
+        dispatcher.execute("dr admin region set-safezone-bounds 90 45 -10 110 65 10", playerSource);
+
+        verify(handler).adminSetArenaRadius(admin, 150.0);
+        verify(handler).adminSetVoidY(admin, -16.5);
+        verify(handler).adminSetArenaBounds(admin, -100.0, 0.0, -100.0, 100.0, 256.0, 100.0);
+        verify(handler).adminSetSafeZoneBounds(admin, 90.0, 45.0, -10.0, 110.0, 65.0, 10.0);
+
         Player nonAdmin = playerWithPermissions("Steve", RaidPermissions.USE);
         assertThrows(CommandSyntaxException.class,
             () -> dispatcher.execute("dr admin region info", sourceOf(nonAdmin)));

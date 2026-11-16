@@ -22,6 +22,9 @@ command:
   ready-toggled: "<prefix><aqua>準備状態: <state></aqua>"
   ready-state-true: "<green>準備完了</green>"
   ready-state-false: "<gray>未準備</gray>"
+  ready-not-available: "<prefix><yellow>レイド進行中は準備状態を切り替えられません。</yellow>"
+  start-no-players: "<prefix><red>エンドワールドに開始可能なプレイヤーが見つかりません。</red>"
+  region-invalid-arg: "<prefix><red>リージョンパラメータが不正です: <details></red>"
   altar-only-mode: "<prefix><yellow>現在、帰還ポータル祭壇からのみ開始できます。</yellow>"
   start-triggered: "<prefix><gold><difficulty> レイドの開始カウントダウンを開始しました。</gold>"
   already-running: "<prefix><red>現在レイドが進行中です。</red>"
@@ -50,6 +53,10 @@ raid:
   arena-protected: "<prefix><red>戦闘中は元から存在するエンドの地形を破壊できません。</red>"
   bed-blocked: "<prefix><red>レイド戦闘中はベッドやリスポーンアンカーを使用できません。</red>"
   temp-block-limit: "<prefix><yellow>一時ブロックの設置上限（<limit>個）に達しました。</yellow>"
+  temp-block-disabled: "<prefix><red>レイド戦闘中は一時ブロックの設置が禁止されています。</red>"
+  water-bucket-blocked: "<prefix><red>レイド戦闘中は水バケツの使用が禁止されています。</red>"
+  ender-pearl-blocked: "<prefix><red>レイド戦闘中はエンダーパールの使用が禁止されています。</red>"
+  wind-charge-blocked: "<prefix><red>レイド戦闘中はウィンドチャージの使用が禁止されています。</red>"
   item-loss-protected: "<prefix><aqua>レイド保護により装備・所持品は保持されました。</aqua>"
 
 revive:
@@ -63,6 +70,7 @@ revive:
   revived-success: "<prefix><green><target> が <reviver> によって蘇生されました！（残り蘇生回数: <remaining>）</green>"
   no-revives-left: "<prefix><red>この試行の蘇生回数上限に達しています。</red>"
   expired-spectator: "<prefix><dark_red><player> は蘇生制限時間を超過し、観戦状態へ移行しました。</dark_red>"
+  downed-action-blocked: "<red>ダウン状態のため行動できません。味方の蘇生を待ってください。</red>"
 
 boss:
   normal:

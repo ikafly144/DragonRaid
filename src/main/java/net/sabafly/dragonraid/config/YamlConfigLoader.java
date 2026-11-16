@@ -797,9 +797,12 @@ final class YamlConfigLoader {
                     ConfigValidation.requireInt(rev, fileName, "wipe-delay-seconds"),
                     fileName, "revive.wipe-delay-seconds");
             boolean wipeAllLeave = ConfigValidation.requireBoolean(rev, fileName, "wipe-if-all-leave-arena");
+            ConfigurationNode downOnDisconnectNode = rev.node("down-on-disconnect");
+            boolean downOnDisconnect = !downOnDisconnectNode.virtual()
+                    && ConfigValidation.requireBoolean(downOnDisconnectNode, fileName);
             return new PluginConfig.ReviveSettings(
                     channelSec, interactRad, requireSneak, allowRightClick,
-                    invulSec, healPct, voidRescueOffset, wipeDelay, wipeAllLeave);
+                    invulSec, healPct, voidRescueOffset, wipeDelay, wipeAllLeave, downOnDisconnect);
         }
 
         private PluginConfig.ProtectionSettings readProtection(ConfigurationNode root, String fileName) {

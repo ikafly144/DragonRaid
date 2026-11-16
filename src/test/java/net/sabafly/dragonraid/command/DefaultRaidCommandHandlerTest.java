@@ -380,6 +380,38 @@ class DefaultRaidCommandHandlerTest {
         assertEquals(45.0f, updated.safeZone().spawnPoint().yaw(), 1e-6);
     }
 
+    @Test
+    void extendedRegionCommandsAndEncounterDelegationWork() {
+        CommandSender admin = mock(CommandSender.class);
+        handler.adminSetArenaRadius(admin, 160.0);
+        handler.adminSetVoidY(admin, -20.0);
+        assertEquals(160.0, configManager.pluginConfig().regions().arena().radius(), 1e-6);
+        assertEquals(-20.0, configManager.pluginConfig().regions().voidYThreshold(), 1e-6);
+
+        handler.adminSetArenaBounds(admin, -90.0, 10.0, -90.0, 90.0, 220.0, 90.0);
+        assertEquals(RegionConfig.Shape.CUBOID, configManager.pluginConfig().regions().arena().shape());
+        assertEquals(-90.0, configManager.pluginConfig().regions().arena().min().x(), 1e-6);
+
+        handler.adminSetSafeZoneBounds(admin, 80.0, 40.0, -12.0, 120.0, 70.0, 12.0);
+        assertEquals(RegionConfig.Shape.CUBOID, configManager.pluginConfig().regions().safeZone().shape());
+        assertEquals(80.0, configManager.pluginConfig().regions().safeZone().min().x(), 1e-6);
+
+        net.sabafly.dragonraid.encounter.RaidEncounterManager enc =
+                mock(net.sabafly.dragonraid.encounter.RaidEncounterManager.class);
+        DefaultRaidCommandHandler wired = new DefaultRaidCommandHandler(
+                configManager, messageService, scheduler, repository, Logger.getLogger("WiredTest"), enc);
+        Player player = mock(Player.class);
+        wired.ready(player);
+        wired.start(player);
+        wired.adminStart(admin, Difficulty.HARD);
+        wired.adminReset(admin);
+
+        verify(enc).toggleReady(player);
+        verify(enc).triggerStart(player);
+        verify(enc).adminStart(admin, net.sabafly.dragonraid.config.BossConfig.Difficulty.HARD);
+        verify(enc).adminReset(admin);
+    }
+
     private static List<String> captureMessages(CommandSender sender) {
         ArgumentCaptor<Component> captor = ArgumentCaptor.forClass(Component.class);
         verify(sender, atLeastOnce()).sendMessage(captor.capture());

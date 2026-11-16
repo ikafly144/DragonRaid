@@ -7,12 +7,21 @@ import net.sabafly.dragonraid.command.DragonRaidCommandRegistrar;
 import net.sabafly.dragonraid.command.RaidCommandHandler;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.PluginConfig;
+import net.sabafly.dragonraid.encounter.DefaultRaidEncounterManager;
+import net.sabafly.dragonraid.encounter.RaidEncounterManager;
+import net.sabafly.dragonraid.encounter.RaidPlayerLifecycleListener;
 import net.sabafly.dragonraid.i18n.MessageService;
 import net.sabafly.dragonraid.permission.RaidPermissions;
+import net.sabafly.dragonraid.protection.ArenaProtectionListener;
+import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
+import net.sabafly.dragonraid.region.DefaultRaidRegionService;
+import net.sabafly.dragonraid.region.RaidRegionService;
 import net.sabafly.dragonraid.scheduler.FoliaRaidScheduler;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
+import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
+import net.sabafly.dragonraid.visual.SoulMarkerService;
 import java.nio.file.Path;
 import java.util.logging.Level;
 import org.bukkit.entity.Player;
@@ -28,6 +37,10 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private MessageService messageService;
     private RaidScheduler raidScheduler;
     private PlayerDataRepository playerDataRepository;
+    private RaidRegionService regionService;
+    private TemporaryBlockTracker temporaryBlockTracker;
+    private SoulMarkerService soulMarkerService;
+    private RaidEncounterManager encounterManager;
 
     @Override
     public void onEnable() {
@@ -69,12 +82,41 @@ public final class DragonRaidPlugin extends JavaPlugin {
         try {
             RaidPermissions.registerDefaults(getServer().getPluginManager());
 
+            this.regionService = new DefaultRaidRegionService(configManager, raidScheduler);
+            this.temporaryBlockTracker = new TemporaryBlockTracker();
+            this.soulMarkerService = new PacketEventsSoulMarkerService(configManager, messageService, getLogger());
+            this.encounterManager = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                raidScheduler,
+                regionService,
+                temporaryBlockTracker,
+                soulMarkerService,
+                getLogger()
+            );
+
+            getServer().getPluginManager().registerEvents(
+                new ArenaProtectionListener(
+                    configManager,
+                    regionService,
+                    temporaryBlockTracker,
+                    messageService,
+                    encounterManager::isProtectionActive
+                ),
+                this
+            );
+            getServer().getPluginManager().registerEvents(
+                new RaidPlayerLifecycleListener(encounterManager, messageService),
+                this
+            );
+
             RaidCommandHandler commandHandler = new DefaultRaidCommandHandler(
                 configManager,
                 messageService,
                 raidScheduler,
                 playerDataRepository,
-                getLogger()
+                getLogger(),
+                encounterManager
             );
             new DragonRaidCommandRegistrar(
                 commandHandler,
@@ -93,6 +135,13 @@ public final class DragonRaidPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (encounterManager != null) {
+            try {
+                encounterManager.shutdown();
+            } catch (RuntimeException ex) {
+                getLogger().log(Level.WARNING, "Failed to shut down raid encounter manager", ex);
+            }
+        }
         // Close repository first so queued async DB writes flush before asyncScheduler tasks are cancelled.
         if (playerDataRepository != null) {
             try {
@@ -144,6 +193,33 @@ public final class DragonRaidPlugin extends JavaPlugin {
      */
     public PlayerDataRepository playerDataRepository() {
         return playerDataRepository;
+    }
+
+    /**
+     * Returns the raid region boundary service.
+     *
+     * @return active {@link RaidRegionService}
+     */
+    public RaidRegionService regionService() {
+        return regionService;
+    }
+
+    /**
+     * Returns the temporary block and fluid tracker.
+     *
+     * @return active {@link TemporaryBlockTracker}
+     */
+    public TemporaryBlockTracker temporaryBlockTracker() {
+        return temporaryBlockTracker;
+    }
+
+    /**
+     * Returns the encounter lifecycle manager.
+     *
+     * @return active {@link RaidEncounterManager}
+     */
+    public RaidEncounterManager encounterManager() {
+        return encounterManager;
     }
 
     private void logPacketEventsStatus() {
