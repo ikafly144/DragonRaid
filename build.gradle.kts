@@ -4,6 +4,7 @@ plugins {
     java
     alias(libs.plugins.shadow)
     alias(libs.plugins.resource.factory.paper)
+    alias(libs.plugins.run.paper)
 }
 
 group = "net.sabafly.dragonraid"
@@ -92,5 +93,19 @@ tasks {
 
     assemble {
         dependsOn(shadowJar)
+    }
+
+    runPaper.folia.registerTask {
+        minecraftVersion("26.3")
+        runDirectory.set(layout.projectDirectory.dir("run/folia"))
+        pluginJars.from(shadowJar.flatMap { it.archiveFile })
+        downloadPlugins {
+            github(
+                "retrooper",
+                "packetevents",
+                "v${libs.versions.packetevents.get()}",
+                "packetevents-spigot-${libs.versions.packetevents.get()}.jar"
+            )
+        }
     }
 }

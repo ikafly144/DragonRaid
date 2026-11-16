@@ -12,6 +12,7 @@ junit-platform = "1.14.4"
 mockito = "5.24.0"
 shadow = "9.6.1"
 resource-factory = "1.4.0"
+run-paper = "3.1.0"
 
 [libraries]
 folia-api = { group = "dev.folia", name = "folia-api", version.ref = "folia-api" }
@@ -27,3 +28,4 @@ mockito-junit-jupiter = { group = "org.mockito", name = "mockito-junit-jupiter",
 [plugins]
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 resource-factory-paper = { id = "xyz.jpenilla.resource-factory-paper-convention", version.ref = "resource-factory" }
+run-paper = { id = "xyz.jpenilla.run-paper", version.ref = "run-paper" }
