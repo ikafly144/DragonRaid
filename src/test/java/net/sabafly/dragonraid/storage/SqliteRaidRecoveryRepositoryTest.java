@@ -133,4 +133,41 @@ class SqliteRaidRecoveryRepositoryTest {
         assertEquals(List.of(newBlock), repo.loadPendingBlockRollbacksSync());
         assertEquals(Map.of(playerId, newCleanup), repo.loadPendingPlayerCleanupsSync());
     }
+
+    @Test
+    void failedSyncReplaceDoesNotAdvanceEpoch_andRejectedDeleteCleansPendingOps() {
+        List<Runnable> manualQueue = new java.util.ArrayList<>();
+        database = new SqliteDatabase(tempDir.resolve("failed-sync.db"), 2, task -> {
+            if (manualQueue.isEmpty()) {
+                manualQueue.add(task);
+            } else {
+                throw new java.util.concurrent.RejectedExecutionException("Simulated pool rejection");
+            }
+        });
+        SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(database, 10L);
+
+        UUID worldId = UUID.randomUUID();
+        BlockPosKey k1 = new BlockPosKey(worldId, 1, 64, 1);
+        PendingBlockRollback existing = new PendingBlockRollback(worldId, 1, 64, 1, "minecraft:stone");
+        repo.replacePendingBlockRollbacksSync(List.of(existing));
+
+        // 1st async delete queued before failed sync replace
+        CompletableFuture<Void> queuedDelete = repo.deletePendingBlockRollbacksAsync(List.of(k1));
+        // Duplicate primary key in replace forces SQLException rollback -> must NOT advance epoch
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> repo.replacePendingBlockRollbacksSync(List.of(existing, existing)));
+
+        // Flushing queuedDelete should still apply because epoch did not advance on rolled-back replace
+        manualQueue.getFirst().run();
+        queuedDelete.join();
+        assertTrue(repo.loadPendingBlockRollbacksSync().isEmpty());
+
+        // 2nd async delete hits RejectedExecutionException -> returned future fails exceptionally AND does not leak op
+        CompletableFuture<Void> rejectedDelete = repo.deletePendingBlockRollbacksAsync(List.of(k1));
+        assertTrue(rejectedDelete.isCompletedExceptionally());
+        long startNanos = System.nanoTime();
+        repo.replacePendingBlockRollbacksSync(List.of(existing));
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+        assertTrue(elapsedMs < 500L, "Rejected async delete must not stall sync replace");
+    }
 }

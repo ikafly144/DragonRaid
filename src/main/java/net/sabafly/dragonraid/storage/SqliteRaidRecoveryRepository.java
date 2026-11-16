@@ -106,7 +106,7 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
         drainFutures(pendingBlockOps);
         List<PendingBlockRollback> copy = List.copyOf(entries);
         database.withWriteTransaction((conn, tx) -> {
-            blockRollbackEpoch.incrementAndGet();
+            tx.onCommit(blockRollbackEpoch::incrementAndGet);
             try (Statement clear = conn.createStatement()) {
                 clear.execute("DELETE FROM pending_block_rollbacks");
             }
@@ -141,30 +141,35 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
         long expectedEpoch = blockRollbackEpoch.get();
         CompletableFuture<Void> op = new CompletableFuture<>();
         pendingBlockOps.add(op);
-        database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
-            if (blockRollbackEpoch.get() != expectedEpoch) {
-                return null;
-            }
-            String sql = "DELETE FROM pending_block_rollbacks WHERE world_id = ? AND x = ? AND y = ? AND z = ?";
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                for (BlockPosKey key : copy) {
-                    ps.setString(1, key.worldId().toString());
-                    ps.setInt(2, key.x());
-                    ps.setInt(3, key.y());
-                    ps.setInt(4, key.z());
-                    ps.addBatch();
+        try {
+            database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
+                if (blockRollbackEpoch.get() != expectedEpoch) {
+                    return null;
                 }
-                ps.executeBatch();
-            }
-            return null;
-        })).whenComplete((ok, err) -> {
+                String sql = "DELETE FROM pending_block_rollbacks WHERE world_id = ? AND x = ? AND y = ? AND z = ?";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (BlockPosKey key : copy) {
+                        ps.setString(1, key.worldId().toString());
+                        ps.setInt(2, key.x());
+                        ps.setInt(3, key.y());
+                        ps.setInt(4, key.z());
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                return null;
+            })).whenComplete((ok, err) -> {
+                pendingBlockOps.remove(op);
+                if (err != null) {
+                    op.completeExceptionally(err);
+                } else {
+                    op.complete(null);
+                }
+            });
+        } catch (Throwable ex) {
             pendingBlockOps.remove(op);
-            if (err != null) {
-                op.completeExceptionally(err);
-            } else {
-                op.complete(null);
-            }
-        });
+            op.completeExceptionally(ex);
+        }
         return op;
     }
 
@@ -228,7 +233,7 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
         drainFutures(playerCleanupChains.values());
         List<PendingPlayerCleanup> copy = List.copyOf(cleanups);
         database.withWriteTransaction((conn, tx) -> {
-            playerCleanupEpoch.incrementAndGet();
+            tx.onCommit(playerCleanupEpoch::incrementAndGet);
             try (Statement clear = conn.createStatement()) {
                 clear.execute("DELETE FROM pending_player_cleanups");
             }

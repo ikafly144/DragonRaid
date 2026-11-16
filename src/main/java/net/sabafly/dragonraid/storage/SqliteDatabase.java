@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -46,9 +47,25 @@ public final class SqliteDatabase implements AutoCloseable {
 
     public static final class TransactionContext {
         private boolean rollbackOnly;
+        private final List<Runnable> afterCommitHooks = new ArrayList<>();
 
         public void markRollbackOnly() {
             this.rollbackOnly = true;
+        }
+
+        /**
+         * Registers a hook to execute after {@link Connection#commit()} succeeds while the
+         * single-writer lock is still held. Not invoked if the transaction rolls back or fails.
+         */
+        public void onCommit(Runnable hook) {
+            Objects.requireNonNull(hook, "hook");
+            afterCommitHooks.add(hook);
+        }
+
+        private void runAfterCommit() {
+            for (Runnable hook : afterCommitHooks) {
+                hook.run();
+            }
         }
     }
 
@@ -176,6 +193,7 @@ public final class SqliteDatabase implements AutoCloseable {
                     conn.rollback();
                 } else {
                     conn.commit();
+                    tx.runAfterCommit();
                 }
                 return result;
             } catch (Throwable ex) {

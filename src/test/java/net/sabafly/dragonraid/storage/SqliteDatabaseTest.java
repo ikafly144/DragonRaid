@@ -1,5 +1,8 @@
 package net.sabafly.dragonraid.storage;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
@@ -10,6 +13,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -63,6 +67,32 @@ class SqliteDatabaseTest {
         } finally {
             db.close();
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void transactionOnCommitHooks_runOnlyWhenTransactionCommits() {
+        Path dbPath = tempDir.resolve("commit-hooks.db");
+        try (SqliteDatabase db = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            AtomicInteger committed = new AtomicInteger(0);
+            db.withWriteTransaction((conn, tx) -> {
+                tx.onCommit(committed::incrementAndGet);
+                return null;
+            });
+            assertEquals(1, committed.get());
+
+            db.withWriteTransaction((conn, tx) -> {
+                tx.onCommit(committed::incrementAndGet);
+                tx.markRollbackOnly();
+                return null;
+            });
+            assertEquals(1, committed.get());
+
+            assertThrows(IllegalStateException.class, () -> db.withWriteTransaction((conn, tx) -> {
+                tx.onCommit(committed::incrementAndGet);
+                throw new IllegalStateException("fail tx");
+            }));
+            assertEquals(1, committed.get());
         }
     }
 

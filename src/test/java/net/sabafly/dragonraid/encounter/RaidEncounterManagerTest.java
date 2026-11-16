@@ -923,10 +923,14 @@ class RaidEncounterManagerTest {
             assertEquals(RaidState.ACTIVE, mgr.state());
 
             tracker.tryRecordPlayerPlacement(new Location(endWorld, 8, 65, 8), alice.getUniqueId(), origData, 64, 512);
-            // Admin reset kicks off async region rollback (queued, not yet executed)
+            // Admin reset kicks off async region rollback -> stays ENDING & blocks new pull while pending
             mgr.adminReset(alice);
             assertEquals(1, pendingRegionRollbacks.size());
+            assertEquals(RaidState.ENDING, mgr.state());
             assertFalse(mgr.canModifyArenaRegion());
+
+            mgr.adminStart(alice, BossConfig.Difficulty.HARD);
+            assertEquals(RaidState.ENDING, mgr.state());
 
             // Shutdown happens BEFORE the region task executes -> block must be persisted to SQLite
             mgr.shutdown();
@@ -934,6 +938,177 @@ class RaidEncounterManagerTest {
             assertEquals(1, persisted.size());
             assertEquals(8, persisted.getFirst().x());
         }
+    }
+
+    @Test
+    void deferredBlockRollback_blocksStartWhilePendingThenTransitionsToIdleOnCompletion() {
+        List<Runnable> pendingRegionRollbacks = new ArrayList<>();
+        RaidScheduler deferredRegionScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredRegionScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredRegionScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredRegionScheduler.runAtEntityLater(any(), any(), anyLong())).thenReturn(TaskHandle.retired());
+        lenient().when(deferredRegionScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            capturedGlobalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredRegionScheduler.runGlobalLater(any(), anyLong())).thenAnswer(inv -> {
+            capturedDelayedTasks.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredRegionScheduler.runAtRegion(any(), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            pendingRegionRollbacks.add(inv.getArgument(3));
+            return TaskHandle.retired();
+        });
+
+        BlockData origData = mock(BlockData.class);
+        when(origData.clone()).thenReturn(origData);
+        TemporaryBlockTracker tracker = new TemporaryBlockTracker(d -> "minecraft:air", s -> origData);
+        org.bukkit.block.Block worldBlock = mock(org.bukkit.block.Block.class);
+        when(endWorld.getBlockAt(9, 65, 9)).thenReturn(worldBlock);
+
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                deferredRegionScheduler,
+                regionService,
+                tracker,
+                soulMarkerService,
+                null,
+                Logger.getLogger("DeferredRollbackTest"),
+                () -> endWorld,
+                () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id),
+                nowMillis::get,
+                w -> livingDragonPresent.get());
+
+        Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+        mgr.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        Runnable countdown = capturedGlobalTimers.getLast();
+        for (int i = 0; i < configManager.pluginConfig().encounter().pullCountdownSeconds(); i++) {
+            countdown.run();
+        }
+        assertEquals(RaidState.ACTIVE, mgr.state());
+
+        tracker.tryRecordPlayerPlacement(new Location(endWorld, 9, 65, 9), alice.getUniqueId(), origData, 64, 512);
+        mgr.adminReset(alice);
+        assertEquals(RaidState.ENDING, mgr.state());
+
+        // Executing the deferred region rollback clears pending blocks and transitions ENDING -> IDLE
+        pendingRegionRollbacks.removeFirst().run();
+        assertEquals(RaidState.IDLE, mgr.state());
+        assertTrue(mgr.canModifyArenaRegion());
+
+        mgr.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        assertEquals(RaidState.COUNTDOWN, mgr.state());
+    }
+
+    @Test
+    void staleCountdownAfterReset_doesNotCancelOrHijackNewCountdown() {
+        Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+        manager.adminStart(alice, BossConfig.Difficulty.HARD);
+        Runnable oldHardCountdown = capturedGlobalTimers.getLast();
+        int secs = configManager.pluginConfig().encounter().pullCountdownSeconds();
+        for (int i = 0; i < secs - 1; i++) {
+            oldHardCountdown.run();
+        }
+        assertEquals(RaidState.COUNTDOWN, manager.state());
+
+        // Reset and start a fresh NORMAL countdown
+        manager.adminReset(alice);
+        assertEquals(RaidState.IDLE, manager.state());
+        manager.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        Runnable newNormalCountdown = capturedGlobalTimers.getLast();
+        assertEquals(RaidState.COUNTDOWN, manager.state());
+
+        // Stale final tick of old HARD countdown must NOT lockInAndActivate NORMAL countdown with HARD
+        oldHardCountdown.run();
+        assertEquals(RaidState.COUNTDOWN, manager.state());
+
+        // Completing the NORMAL countdown activates with NORMAL difficulty
+        for (int i = 0; i < secs; i++) {
+            newNormalCountdown.run();
+        }
+        assertEquals(RaidState.ACTIVE, manager.state());
+        assertEquals(BossConfig.Difficulty.NORMAL, manager.activeScaling().orElseThrow().difficulty());
+    }
+
+    @Test
+    void lastSurvivorDownedIntoWiping_stillReceivesDownedFlagsMovementPinAndDamageGuard() {
+        List<Runnable> queuedEntityTasks = new ArrayList<>();
+        RaidScheduler queuedScheduler = mock(RaidScheduler.class);
+        lenient().when(queuedScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+        lenient().when(queuedScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+        lenient().when(queuedScheduler.runAtEntityLater(any(), any(), anyLong())).thenReturn(TaskHandle.retired());
+        lenient().when(queuedScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            capturedGlobalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(queuedScheduler.runGlobalLater(any(), anyLong())).thenAnswer(inv -> {
+            capturedDelayedTasks.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                queuedScheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                null,
+                Logger.getLogger("LastDownWipingTest"),
+                () -> endWorld,
+                () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id),
+                nowMillis::get,
+                w -> livingDragonPresent.get());
+
+        Player solo = addPlayer("Solo", new Location(endWorld, 0.0, 64.0, 0.0));
+        mgr.adminStart(solo, BossConfig.Difficulty.NORMAL);
+        Runnable countdown = capturedGlobalTimers.getLast();
+        for (int i = 0; i < configManager.pluginConfig().encounter().pullCountdownSeconds(); i++) {
+            countdown.run();
+        }
+        while (!queuedEntityTasks.isEmpty()) {
+            queuedEntityTasks.removeFirst().run();
+        }
+        assertEquals(RaidState.ACTIVE, mgr.state());
+
+        // Lethal hit downs the only survivor -> immediate transition to WIPING BEFORE runAtEntity flushes
+        mgr.onPlayerDamage(solo, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        assertEquals(RaidState.WIPING, mgr.state());
+
+        // Flushing queued entity task during WIPING must STILL apply invulnerable/invisible/collidable=false
+        while (!queuedEntityTasks.isEmpty()) {
+            queuedEntityTasks.removeFirst().run();
+        }
+        verify(solo).setInvulnerable(true);
+        verify(solo).setInvisible(true);
+        verify(solo).setCollidable(false);
+
+        // During WIPING, further damage is still cancelled and X/Y/Z movement remains pinned
+        EntityDamageEvent wipeDamage = mockDamageEvent(10.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK);
+        mgr.onPlayerDamage(solo, wipeDamage);
+        verify(wipeDamage).setCancelled(true);
+
+        Location movedTo = new Location(endWorld, 5.0, 64.0, 5.0, 90.0f, 15.0f);
+        org.bukkit.event.player.PlayerMoveEvent moveEvent = new org.bukkit.event.player.PlayerMoveEvent(
+                solo, new Location(endWorld, 0.0, 64.0, 0.0), movedTo);
+        mgr.onPlayerMove(moveEvent);
+        assertEquals(0.0, moveEvent.getTo().getX(), 1e-6);
+        assertEquals(90.0f, moveEvent.getTo().getYaw(), 1e-4);
     }
 
     private void startActiveEncounter(Player initiator, BossConfig.Difficulty difficulty) {
