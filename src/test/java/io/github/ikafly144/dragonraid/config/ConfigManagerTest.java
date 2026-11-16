@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -183,5 +184,51 @@ class ConfigManagerTest {
         assertEquals("config.yml", ex.fileName());
         assertEquals("regions.arena.radius", ex.path());
         assertEquals(originalContent, Files.readString(configFile, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void updateRegionsAsync_preservesYamlCommentsAndValidatesAsync(@TempDir Path tempDir) throws IOException {
+        ConfigManager manager = newManager(tempDir);
+        manager.initialize();
+
+        Path configFile = tempDir.resolve("config.yml");
+        String original = Files.readString(configFile, StandardCharsets.UTF_8);
+        String withComment = original.replace("void-y-threshold:", "# Preserve region threshold comment\n  void-y-threshold:");
+        Files.writeString(configFile, withComment, StandardCharsets.UTF_8);
+
+        RegionConfig current = manager.pluginConfig().regions();
+        RegionConfig.ArenaRegion updatedArena = new RegionConfig.ArenaRegion(
+                RegionConfig.Shape.CYLINDER,
+                new RegionConfig.Point3D(5.0, 64.0, -5.0),
+                135.0,
+                current.arena().min(),
+                current.arena().max(),
+                current.arena().minY(),
+                current.arena().maxY()
+        );
+        RegionConfig updated = new RegionConfig(updatedArena, current.safeZone(), -12.0);
+        manager.updateRegionsAsync(updated, Runnable::run).join();
+
+        String saved = Files.readString(configFile, StandardCharsets.UTF_8);
+        assertTrue(saved.contains("# DragonRaid Main Configuration"));
+        assertTrue(saved.contains("# Preserve region threshold comment"));
+        assertEquals(135.0, manager.pluginConfig().regions().arena().radius(), 1e-6);
+        assertEquals(-12.0, manager.pluginConfig().regions().voidYThreshold(), 1e-6);
+
+        RegionConfig.ArenaRegion invalidArena = new RegionConfig.ArenaRegion(
+                RegionConfig.Shape.CYLINDER,
+                updatedArena.center(),
+                0.0,
+                updatedArena.min(),
+                updatedArena.max(),
+                updatedArena.minY(),
+                updatedArena.maxY()
+        );
+        RegionConfig invalid = new RegionConfig(invalidArena, current.safeZone(), -12.0);
+        CompletionException thrown = assertThrows(
+                CompletionException.class,
+                () -> manager.updateRegionsAsync(invalid, Runnable::run).join());
+        assertInstanceOf(ConfigException.class, thrown.getCause());
+        assertEquals(saved, Files.readString(configFile, StandardCharsets.UTF_8));
     }
 }

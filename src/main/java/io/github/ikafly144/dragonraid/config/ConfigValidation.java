@@ -1,147 +1,165 @@
 package io.github.ikafly144.dragonraid.config;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import org.bukkit.configuration.ConfigurationSection;
+import java.util.Objects;
+import org.spongepowered.configurate.ConfigurationNode;
 
 /**
- * Shared validation and extraction helpers for YAML configuration loading.
+ * Shared validation helpers for reading Configurate {@link ConfigurationNode} trees into strongly-typed configs.
  */
 final class ConfigValidation {
 
     private ConfigValidation() {
     }
 
-    static ConfigurationSection requireSection(ConfigurationSection root, String path, String fileName) {
-        ConfigurationSection section = root.getConfigurationSection(path);
-        if (section == null) {
-            throw new ConfigException(fileName, fullPath(root, path), "Missing required section");
+    static ConfigurationNode requireNode(ConfigurationNode parent, String fileName, String key) {
+        ConfigurationNode child = parent.node(key);
+        if (child.virtual() || !child.isMap()) {
+            throw new ConfigException(fileName, fullPath(child), "Missing or invalid configuration section");
         }
-        return section;
+        return child;
     }
 
-    static String requireString(ConfigurationSection root, String path, String fileName) {
-        String value = root.getString(path);
-        if (value == null || value.isBlank()) {
-            throw new ConfigException(fileName, fullPath(root, path), "Missing or blank required string");
+    static List<? extends ConfigurationNode> requireList(ConfigurationNode parent, String fileName, String key) {
+        ConfigurationNode child = parent.node(key);
+        if (child.virtual() || !child.isList()) {
+            throw new ConfigException(fileName, fullPath(child), "Missing or invalid list");
+        }
+        return child.childrenList();
+    }
+
+    static String requireString(ConfigurationNode parent, String fileName, String key) {
+        return requireString(parent.node(key), fileName);
+    }
+
+    static String requireString(ConfigurationNode node, String fileName) {
+        Object raw = node.rawScalar();
+        if (node.virtual() || node.isMap() || node.isList() || raw == null) {
+            throw new ConfigException(fileName, fullPath(node), "Missing or blank string value");
+        }
+        String value = String.valueOf(raw);
+        if (value.isBlank()) {
+            throw new ConfigException(fileName, fullPath(node), "Missing or blank string value");
         }
         return value;
     }
 
-    static List<String> requireStringList(ConfigurationSection root, String path, String fileName) {
-        List<String> list = root.getStringList(path);
-        if (list.isEmpty()) {
-            throw new ConfigException(fileName, fullPath(root, path), "Missing or empty required string list");
+    static List<String> requireStringList(ConfigurationNode parent, String fileName, String key) {
+        List<? extends ConfigurationNode> nodes = requireList(parent, fileName, key);
+        List<String> result = new ArrayList<>(nodes.size());
+        for (ConfigurationNode item : nodes) {
+            Object raw = item.rawScalar();
+            if (raw == null || String.valueOf(raw).isBlank()) {
+                throw new ConfigException(fileName, fullPath(item), "List entry must be a non-blank string");
+            }
+            result.add(String.valueOf(raw));
         }
-        return List.copyOf(list);
+        return List.copyOf(result);
     }
 
-    static List<Map<?, ?>> requireMapList(ConfigurationSection root, String path, String fileName) {
-        List<Map<?, ?>> list = root.getMapList(path);
-        if (list.isEmpty()) {
-            throw new ConfigException(fileName, fullPath(root, path), "Missing or empty required list");
-        }
-        return list;
+    static int requireInt(ConfigurationNode parent, String fileName, String key) {
+        return requireInt(parent.node(key), fileName);
     }
 
-    static int requireInt(ConfigurationSection root, String path, String fileName) {
-        if (!root.isInt(path) && !root.isLong(path)) {
-            throw new ConfigException(fileName, fullPath(root, path), "Expected integer value");
+    static int requireInt(ConfigurationNode node, String fileName) {
+        Object raw = node.rawScalar();
+        if (node.virtual() || !(raw instanceof Number number) || raw instanceof Float || raw instanceof Double) {
+            throw new ConfigException(fileName, fullPath(node), "Missing integer value");
         }
-        return root.getInt(path);
+        return number.intValue();
     }
 
-    static double requireDouble(ConfigurationSection root, String path, String fileName) {
-        if (!root.isDouble(path) && !root.isInt(path) && !root.isLong(path)) {
-            throw new ConfigException(fileName, fullPath(root, path), "Expected numeric value");
-        }
-        return root.getDouble(path);
+    static double requireDouble(ConfigurationNode parent, String fileName, String key) {
+        return requireDouble(parent.node(key), fileName);
     }
 
-    static boolean requireBoolean(ConfigurationSection root, String path, String fileName) {
-        if (!root.isBoolean(path)) {
-            throw new ConfigException(fileName, fullPath(root, path), "Expected boolean value");
+    static double requireDouble(ConfigurationNode node, String fileName) {
+        Object raw = node.rawScalar();
+        if (node.virtual() || !(raw instanceof Number number)) {
+            throw new ConfigException(fileName, fullPath(node), "Missing numeric value");
         }
-        return root.getBoolean(path);
+        double value = number.doubleValue();
+        if (!Double.isFinite(value)) {
+            throw new ConfigException(fileName, fullPath(node), "Numeric value must be finite");
+        }
+        return value;
     }
 
-    static int requirePositive(int value, String path, String fileName) {
+    static boolean requireBoolean(ConfigurationNode parent, String fileName, String key) {
+        return requireBoolean(parent.node(key), fileName);
+    }
+
+    static boolean requireBoolean(ConfigurationNode node, String fileName) {
+        Object raw = node.rawScalar();
+        if (node.virtual() || !(raw instanceof Boolean bool)) {
+            throw new ConfigException(fileName, fullPath(node), "Missing boolean value");
+        }
+        return bool;
+    }
+
+    static int requirePositive(int value, String fileName, String path) {
         if (value <= 0) {
-            throw new ConfigException(fileName, path, "Value must be > 0, got " + value);
+            throw new ConfigException(fileName, path, "Value must be > 0 (got " + value + ")");
         }
         return value;
     }
 
-    static int requireNonNegative(int value, String path, String fileName) {
-        if (value < 0) {
-            throw new ConfigException(fileName, path, "Value must be >= 0, got " + value);
-        }
-        return value;
-    }
-
-    static double requirePositive(double value, String path, String fileName) {
+    static double requirePositive(double value, String fileName, String path) {
         if (!Double.isFinite(value) || value <= 0.0) {
-            throw new ConfigException(fileName, path, "Value must be finite and > 0, got " + value);
+            throw new ConfigException(fileName, path, "Value must be > 0 (got " + value + ")");
         }
         return value;
     }
 
-    static double requireNonNegative(double value, String path, String fileName) {
+    static int requireNonNegative(int value, String fileName, String path) {
+        if (value < 0) {
+            throw new ConfigException(fileName, path, "Value must be >= 0 (got " + value + ")");
+        }
+        return value;
+    }
+
+    static double requireNonNegative(double value, String fileName, String path) {
         if (!Double.isFinite(value) || value < 0.0) {
-            throw new ConfigException(fileName, path, "Value must be finite and >= 0, got " + value);
+            throw new ConfigException(fileName, path, "Value must be >= 0 (got " + value + ")");
         }
         return value;
     }
 
-    static double requireUnitRatio(double value, String path, String fileName) {
+    static double requireUnitRatio(double value, String fileName, String path) {
         if (!Double.isFinite(value) || value < 0.0 || value > 1.0) {
-            throw new ConfigException(fileName, path, "Ratio must be in [0.0, 1.0], got " + value);
+            throw new ConfigException(fileName, path, "Ratio must be within [0.0, 1.0] (got " + value + ")");
         }
         return value;
     }
 
-    static <E extends Enum<E>> E parseEnum(Class<E> enumType, String raw, String path, String fileName) {
-        if (raw == null || raw.isBlank()) {
-            throw new ConfigException(fileName, path, "Missing enum value for " + enumType.getSimpleName());
-        }
+    static <E extends Enum<E>> E parseEnum(Class<E> enumType, String raw, String fileName, String path) {
+        Objects.requireNonNull(enumType, "enumType");
+        String normalized = raw.trim().toUpperCase(Locale.ROOT);
         try {
-            return Enum.valueOf(enumType, raw.trim().toUpperCase(Locale.ROOT));
+            return Enum.valueOf(enumType, normalized);
         } catch (IllegalArgumentException ex) {
-            throw new ConfigException(fileName, path,
-                    "Invalid " + enumType.getSimpleName() + " value: '" + raw + "'", ex);
+            throw new ConfigException(
+                    fileName,
+                    path,
+                    "Unsupported " + enumType.getSimpleName() + " value: '" + raw + "'",
+                    ex);
         }
     }
 
-    static String mapString(Map<?, ?> map, String key, String path, String fileName) {
-        Object val = map.get(key);
-        if (val == null || val.toString().isBlank()) {
-            throw new ConfigException(fileName, path + "." + key, "Missing or blank string");
+    static String fullPath(ConfigurationNode node) {
+        StringBuilder sb = new StringBuilder();
+        for (Object segment : node.path()) {
+            if (sb.length() > 0) {
+                sb.append('.');
+            }
+            sb.append(segment);
         }
-        return val.toString();
+        return sb.toString();
     }
 
-    static int mapInt(Map<?, ?> map, String key, String path, String fileName) {
-        Object val = map.get(key);
-        if (!(val instanceof Number num)) {
-            throw new ConfigException(fileName, path + "." + key, "Expected integer value");
-        }
-        return num.intValue();
-    }
-
-    static double mapDouble(Map<?, ?> map, String key, String path, String fileName) {
-        Object val = map.get(key);
-        if (!(val instanceof Number num)) {
-            throw new ConfigException(fileName, path + "." + key, "Expected numeric value");
-        }
-        return num.doubleValue();
-    }
-
-    static String fullPath(ConfigurationSection section, String child) {
-        String current = section.getCurrentPath();
-        if (current == null || current.isEmpty()) {
-            return child;
-        }
-        return current + "." + child;
+    static String fullPath(String prefix, String child) {
+        return prefix == null || prefix.isEmpty() ? child : prefix + "." + child;
     }
 }

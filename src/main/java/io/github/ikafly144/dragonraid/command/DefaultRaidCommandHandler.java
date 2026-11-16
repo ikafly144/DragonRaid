@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -314,17 +315,19 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     @Override
     public void adminReload(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
-        try {
+        CompletableFuture.runAsync(() -> {
             configManager.reload();
             messageService.reload();
-            messageService.send(sender, "command.reload-success");
-        } catch (RuntimeException ex) {
-            logger.log(Level.WARNING, "Failed to reload DragonRaid configuration", ex);
-            String detail = ex.getMessage() == null || ex.getMessage().isBlank()
-                ? ex.getClass().getSimpleName()
-                : ex.getMessage();
-            messageService.send(sender, "command.reload-failed", Placeholder.unparsed("error", detail));
-        }
+        }, scheduler.asyncExecutor()).whenComplete((ignored, error) -> replyOnSenderThread(sender, () -> {
+            if (error == null) {
+                messageService.send(sender, "command.reload-success");
+            } else {
+                Throwable cause = unwrapCause(error);
+                logger.log(Level.WARNING, "Failed to reload DragonRaid configuration", cause);
+                messageService.send(sender, "command.reload-failed",
+                        Placeholder.unparsed("error", formatErrorDetail(cause)));
+            }
+        }));
     }
 
     @Override
@@ -443,14 +446,27 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     }
 
     private void persistRegions(CommandSender sender, String regionName, RegionConfig updated) {
-        try {
-            configManager.updateRegions(updated);
-            messageService.send(sender, "command.region-updated", Placeholder.unparsed("region", regionName));
-        } catch (RuntimeException ex) {
-            logger.log(Level.WARNING, "Failed to update region " + regionName, ex);
-            String detail = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
-            messageService.send(sender, "command.reload-failed", Placeholder.unparsed("error", detail));
-        }
+        configManager.updateRegionsAsync(updated, scheduler.asyncExecutor())
+                .whenComplete((ignored, error) -> replyOnSenderThread(sender, () -> {
+                    if (error == null) {
+                        messageService.send(sender, "command.region-updated",
+                                Placeholder.unparsed("region", regionName));
+                    } else {
+                        Throwable cause = unwrapCause(error);
+                        logger.log(Level.WARNING, "Failed to update region " + regionName, cause);
+                        messageService.send(sender, "command.reload-failed",
+                                Placeholder.unparsed("error", formatErrorDetail(cause)));
+                    }
+                }));
+    }
+
+    private static Throwable unwrapCause(Throwable error) {
+        return error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
+    }
+
+    private static String formatErrorDetail(Throwable error) {
+        String message = error.getMessage();
+        return message == null || message.isBlank() ? error.getClass().getSimpleName() : message;
     }
 
     private void replyOnSenderThread(CommandSender sender, Runnable action) {
@@ -521,7 +537,10 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         );
     }
 
-    private static Point3D shiftPoint(Point3D point, Point3D oldOrigin, Point3D newOrigin) {
+    private static @Nullable Point3D shiftPoint(@Nullable Point3D point, Point3D oldOrigin, Point3D newOrigin) {
+        if (point == null) {
+            return null;
+        }
         return new Point3D(
             newOrigin.x() + (point.x() - oldOrigin.x()),
             newOrigin.y() + (point.y() - oldOrigin.y()),
@@ -530,55 +549,27 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     }
 
     private static String formatArena(ArenaRegion arena) {
-        if (arena.shape() == Shape.CYLINDER) {
-            return String.format(
-                Locale.ROOT,
-                "CYLINDER center=(%.1f, %.1f, %.1f) r=%.1f y=[%d..%d]",
-                arena.center().x(),
-                arena.center().y(),
-                arena.center().z(),
+        return formatGeometry(
+                arena.shape(),
+                arena.center(),
                 arena.radius(),
+                arena.min(),
+                arena.max(),
                 arena.minY(),
                 arena.maxY()
-            );
-        }
-        return String.format(
-            Locale.ROOT,
-            "CUBOID min=(%.1f, %.1f, %.1f) max=(%.1f, %.1f, %.1f)",
-            arena.min().x(),
-            arena.min().y(),
-            arena.min().z(),
-            arena.max().x(),
-            arena.max().y(),
-            arena.max().z()
         );
     }
 
     private static String formatSafeZone(SafeZoneRegion safeZone, double voidY) {
-        String base;
-        if (safeZone.shape() == Shape.CYLINDER) {
-            base = String.format(
-                Locale.ROOT,
-                "CYLINDER center=(%.1f, %.1f, %.1f) r=%.1f y=[%d..%d]",
-                safeZone.center().x(),
-                safeZone.center().y(),
-                safeZone.center().z(),
+        String base = formatGeometry(
+                safeZone.shape(),
+                safeZone.center(),
                 safeZone.radius(),
+                safeZone.min(),
+                safeZone.max(),
                 safeZone.minY(),
                 safeZone.maxY()
-            );
-        } else {
-            base = String.format(
-                Locale.ROOT,
-                "CUBOID min=(%.1f, %.1f, %.1f) max=(%.1f, %.1f, %.1f)",
-                safeZone.min().x(),
-                safeZone.min().y(),
-                safeZone.min().z(),
-                safeZone.max().x(),
-                safeZone.max().y(),
-                safeZone.max().z()
-            );
-        }
+        );
         return base + String.format(
             Locale.ROOT,
             " spawn=(%.1f, %.1f, %.1f) voidY=%.1f",
@@ -586,6 +577,38 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             safeZone.spawnPoint().y(),
             safeZone.spawnPoint().z(),
             voidY
+        );
+    }
+
+    private static String formatGeometry(
+            Shape shape,
+            Point3D center,
+            double radius,
+            Point3D min,
+            Point3D max,
+            int minY,
+            int maxY) {
+        if (shape == Shape.CYLINDER) {
+            return String.format(
+                Locale.ROOT,
+                "CYLINDER center=(%.1f, %.1f, %.1f) r=%.1f y=[%d..%d]",
+                center.x(),
+                center.y(),
+                center.z(),
+                radius,
+                minY,
+                maxY
+            );
+        }
+        return String.format(
+            Locale.ROOT,
+            "CUBOID min=(%.1f, %.1f, %.1f) max=(%.1f, %.1f, %.1f)",
+            min.x(),
+            min.y(),
+            min.z(),
+            max.x(),
+            max.y(),
+            max.z()
         );
     }
 

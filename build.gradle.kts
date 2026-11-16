@@ -1,6 +1,9 @@
+import xyz.jpenilla.resourcefactory.paper.PaperPluginYaml
+
 plugins {
     java
     alias(libs.plugins.shadow)
+    alias(libs.plugins.resource.factory.paper)
 }
 
 group = "io.github.ikafly144"
@@ -23,6 +26,9 @@ dependencies {
     compileOnly(libs.folia.api)
     compileOnly(libs.packetevents.spigot)
 
+    implementation(libs.configurate.yaml) {
+        exclude(group = "org.yaml", module = "snakeyaml")
+    }
     implementation(libs.sqlite.jdbc)
     implementation(libs.hikaricp) {
         exclude(group = "org.slf4j")
@@ -36,6 +42,26 @@ dependencies {
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
+paperPluginYaml {
+    name = "DragonRaid"
+    version = project.version.toString()
+    main = "io.github.ikafly144.dragonraid.DragonRaidPlugin"
+    apiVersion = "26.3"
+    foliaSupported = true
+    description = project.description
+    authors.add("ikafly144")
+
+    dependencies {
+        server {
+            register("packetevents") {
+                load = PaperPluginYaml.Load.BEFORE
+                required = true
+                joinClasspath = true
+            }
+        }
+    }
+}
+
 tasks {
     withType<JavaCompile>().configureEach {
         options.encoding = "UTF-8"
@@ -43,12 +69,7 @@ tasks {
     }
 
     processResources {
-        val props = mapOf("version" to project.version.toString())
-        inputs.properties(props)
         filteringCharset = "UTF-8"
-        filesMatching("paper-plugin.yml") {
-            expand(props)
-        }
     }
 
     test {
@@ -62,10 +83,10 @@ tasks {
     shadowJar {
         archiveClassifier.set("")
         mergeServiceFiles()
-        filesMatching("META-INF/services/**") {
-            duplicatesStrategy = DuplicatesStrategy.INCLUDE
-        }
         relocate("com.zaxxer.hikari", "io.github.ikafly144.dragonraid.libs.hikari")
+        relocate("org.spongepowered.configurate", "io.github.ikafly144.dragonraid.libs.configurate")
+        relocate("io.leangen.geantyref", "io.github.ikafly144.dragonraid.libs.geantyref")
+        relocate("net.kyori.option", "io.github.ikafly144.dragonraid.libs.option")
     }
 
     assemble {

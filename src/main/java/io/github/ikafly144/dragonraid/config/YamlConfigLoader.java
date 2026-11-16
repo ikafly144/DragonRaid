@@ -1,126 +1,344 @@
 package io.github.ikafly144.dragonraid.config;
 
-import static io.github.ikafly144.dragonraid.config.ConfigValidation.*;
-
 import java.io.IOException;
+import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.InvalidConfigurationException;
-import org.bukkit.configuration.file.YamlConfiguration;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Supplier;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.spongepowered.configurate.CommentedConfigurationNode;
+import org.spongepowered.configurate.ConfigurateException;
+import org.spongepowered.configurate.ConfigurationNode;
+import org.spongepowered.configurate.NodePath;
+import org.spongepowered.configurate.serialize.SerializationException;
+import org.spongepowered.configurate.serialize.TypeSerializer;
+import org.spongepowered.configurate.serialize.TypeSerializerCollection;
+import org.spongepowered.configurate.yaml.NodeStyle;
+import org.spongepowered.configurate.yaml.YamlConfigurationLoader;
 
 /**
- * Loads and validates YAML configuration files into immutable config records.
+ * Loads, validates, and serializes DragonRaid YAML configuration files via SpongePowered Configurate.
  */
 final class YamlConfigLoader {
+
+    private static final ThreadLocal<String> CURRENT_FILE = new ThreadLocal<>();
+
+    static final TypeSerializerCollection SERIALIZERS = TypeSerializerCollection.defaults().childBuilder()
+            .register(RegionConfig.class, new RegionConfigSerializer())
+            .register(PluginConfig.AltarSettings.class, new AltarSettingsSerializer())
+            .register(PluginConfig.class, new PluginConfigSerializer())
+            .register(BossConfig.AbilitySettings.class, new AbilitySettingsSerializer())
+            .register(BossConfig.class, new BossConfigSerializer())
+            .register(RewardsConfig.class, new RewardsConfigSerializer())
+            .build();
 
     private YamlConfigLoader() {
     }
 
-    static YamlConfiguration loadYaml(Path path) {
-        if (!Files.exists(path)) {
-            throw new ConfigException(path.getFileName().toString(), "", "Configuration file does not exist: " + path);
-        }
+    static YamlConfigurationLoader buildLoader(Path path) {
+        return YamlConfigurationLoader.builder()
+                .path(path)
+                .nodeStyle(NodeStyle.BLOCK)
+                .indent(2)
+                .defaultOptions(opts -> opts.serializers(SERIALIZERS))
+                .build();
+    }
+
+    static CommentedConfigurationNode loadNode(Path path) {
+        return loadNode(path, buildLoader(path));
+    }
+
+    static CommentedConfigurationNode loadNode(Path path, YamlConfigurationLoader loader) {
         String fileName = path.getFileName().toString();
+        if (!Files.exists(path)) {
+            throw new ConfigException(fileName, "", "Configuration file does not exist: " + path);
+        }
         try {
-            String raw = Files.readString(path, StandardCharsets.UTF_8);
-            YamlConfiguration yaml = new YamlConfiguration();
-            yaml.loadFromString(raw);
-            return yaml;
-        } catch (IOException | InvalidConfigurationException ex) {
-            throw new ConfigException(fileName, "", "Failed to parse YAML: " + ex.getMessage(), ex);
+            return loader.load();
+        } catch (ConfigurateException ex) {
+            throw new ConfigException(
+                    fileName,
+                    formatNodePath(ex.path()),
+                    "Failed to parse YAML configuration: " + ex.getMessage(),
+                    ex);
         }
     }
 
     static PluginConfig loadPluginConfig(Path path) {
-        String file = path.getFileName().toString();
-        YamlConfiguration root = loadYaml(path);
-
-        var language = parseLanguage(requireSection(root, "language", file), file);
-        var database = parseDatabase(requireSection(root, "database", file), file);
-        var world = parseWorld(requireSection(root, "world", file), file);
-        var regions = parseRegions(requireSection(root, "regions", file), file);
-        var scaling = parseScaling(requireSection(root, "scaling", file), file);
-        var encounter = parseEncounter(requireSection(root, "encounter", file), file);
-        var revive = parseRevive(requireSection(root, "revive", file), file);
-        var protection = parseProtection(requireSection(root, "protection", file), file);
-        var visuals = parseVisuals(requireSection(root, "visuals", file), file);
-
-        return new PluginConfig(language, database, world, regions, scaling, encounter, revive, protection, visuals);
+        String fileName = path.getFileName().toString();
+        CommentedConfigurationNode root = loadNode(path);
+        return withFileName(fileName, () -> getTyped(root, PluginConfig.class, fileName));
     }
 
     static BossConfig loadBossConfig(Path path, BossConfig.Difficulty expectedDifficulty) {
-        String file = path.getFileName().toString();
-        YamlConfiguration root = loadYaml(path);
-
-        BossConfig.Difficulty difficulty = parseEnum(
-                BossConfig.Difficulty.class,
-                requireString(root, "difficulty", file),
-                "difficulty",
-                file
-        );
-        if (expectedDifficulty != null && difficulty != expectedDifficulty) {
-            throw new ConfigException(file, "difficulty",
-                    "Expected difficulty " + expectedDifficulty + " but found " + difficulty);
+        String fileName = path.getFileName().toString();
+        CommentedConfigurationNode root = loadNode(path);
+        BossConfig config = withFileName(fileName, () -> getTyped(root, BossConfig.class, fileName));
+        if (config.difficulty() != expectedDifficulty) {
+            throw new ConfigException(
+                    fileName,
+                    "difficulty",
+                    "Expected difficulty " + expectedDifficulty + " but found " + config.difficulty());
         }
-
-        String displayNameKey = requireString(root, "display-name-key", file);
-        double baseHp = requirePositive(requireDouble(root, "base-hp", file), "base-hp", file);
-        double baseAttack = requireNonNegative(requireDouble(root, "base-attack-damage", file), "base-attack-damage", file);
-
-        var revive = parseBossRevive(requireSection(root, "revive", file), file);
-        var enrage = parseEnrage(requireSection(root, "enrage", file), file);
-        var abilities = parseAbilities(requireSection(root, "abilities", file), file);
-        var phases = parsePhases(root, abilities, file);
-
-        return new BossConfig(difficulty, displayNameKey, baseHp, baseAttack, revive, enrage, abilities, phases);
+        return config;
     }
 
     static RewardsConfig loadRewardsConfig(Path path) {
-        String file = path.getFileName().toString();
-        YamlConfiguration root = loadYaml(path);
-
-        var currencies = parseCurrencies(requireSection(root, "currencies", file), file);
-        var clearRewards = parseClearRewards(requireSection(root, "clear-rewards", file), currencies, file);
-        var customGear = parseCustomGear(requireSection(root, "custom-gear", file), file);
-        var customEnchants = parseCustomEnchants(requireSection(root, "custom-enchants", file), file);
-        var shop = parseShop(requireSection(root, "shop", file), currencies, customGear, customEnchants, file);
-
-        return new RewardsConfig(currencies, clearRewards, customGear, customEnchants, shop);
+        String fileName = path.getFileName().toString();
+        CommentedConfigurationNode root = loadNode(path);
+        return withFileName(fileName, () -> getTyped(root, RewardsConfig.class, fileName));
     }
 
-    private static PluginConfig.LanguageSettings parseLanguage(ConfigurationSection sec, String file) {
-        String defaultLocale = requireString(sec, "default", file);
-        boolean perPlayer = requireBoolean(sec, "per-player-locale", file);
-        List<String> supported = requireStringList(sec, "supported", file);
-        if (!supported.contains(defaultLocale)) {
-            throw new ConfigException(file, "language.default",
-                    "Default locale '" + defaultLocale + "' must be included in language.supported");
+    /**
+     * Serializes updated {@link RegionConfig} through Configurate while preserving all existing
+     * YAML comments and non-region sections in {@code config.yml}.
+     */
+    static void saveRegionsPreservingComments(Path configPath, RegionConfig regions) {
+        String fileName = configPath.getFileName().toString();
+        if (!Files.exists(configPath)) {
+            throw new ConfigException(fileName, "regions", "Configuration file does not exist: " + configPath);
         }
-        return new PluginConfig.LanguageSettings(defaultLocale, perPlayer, supported);
+        try {
+            String original = Files.readString(configPath, StandardCharsets.UTF_8);
+            String lineSeparator = original.contains("\r\n") ? "\r\n" : "\n";
+
+            YamlConfigurationLoader.Builder stringBuilder = YamlConfigurationLoader.builder()
+                    .nodeStyle(NodeStyle.BLOCK)
+                    .indent(2)
+                    .defaultOptions(opts -> opts.serializers(SERIALIZERS));
+            CommentedConfigurationNode wrapper = CommentedConfigurationNode.root(stringBuilder.defaultOptions());
+            wrapper.node("regions").set(RegionConfig.class, regions);
+            String renderedBlock = stringBuilder.buildAndSaveString(wrapper).stripTrailing();
+
+            String updated = spliceRegionsSection(original, renderedBlock, lineSeparator);
+            Files.writeString(configPath, updated, StandardCharsets.UTF_8);
+        } catch (IOException ex) {
+            throw new ConfigException(fileName, "regions", "Failed to save updated regions", ex);
+        }
     }
 
-    private static PluginConfig.DatabaseSettings parseDatabase(ConfigurationSection sec, String file) {
-        String type = requireString(sec, "type", file);
-        String dbFile = requireString(sec, "file", file);
-        int poolSize = requirePositive(requireInt(sec, "pool-size", file), "database.pool-size", file);
-        return new PluginConfig.DatabaseSettings(type, dbFile, poolSize);
+    private static String spliceRegionsSection(String original, String renderedBlock, String lineSeparator) {
+        String[] rawLines = original.split("\r?\n", -1);
+        int start = -1;
+        for (int i = 0; i < rawLines.length; i++) {
+            String line = rawLines[i];
+            if (line.equals("regions:") || line.startsWith("regions: ")) {
+                start = i;
+                break;
+            }
+        }
+        if (start < 0) {
+            String trimmed = original.stripTrailing();
+            return trimmed + lineSeparator + lineSeparator
+                    + renderedBlock.replace("\n", lineSeparator) + lineSeparator;
+        }
+
+        int end = rawLines.length;
+        for (int i = start + 1; i < rawLines.length; i++) {
+            String line = rawLines[i];
+            if (!line.isBlank() && !Character.isWhitespace(line.charAt(0))) {
+                end = i;
+                break;
+            }
+        }
+        while (end > start + 1 && rawLines[end - 1].isBlank()) {
+            end--;
+        }
+
+        Map<String, List<String>> sectionComments = extractKeyComments(rawLines, start + 1, end);
+        List<String> renderedWithComments = applyKeyComments(renderedBlock.split("\r?\n"), sectionComments);
+
+        List<String> merged = new ArrayList<>(rawLines.length);
+        for (int i = 0; i < start; i++) {
+            merged.add(rawLines[i]);
+        }
+        merged.addAll(renderedWithComments);
+        for (int i = end; i < rawLines.length; i++) {
+            merged.add(rawLines[i]);
+        }
+        String joined = String.join(lineSeparator, merged);
+        if (!joined.endsWith(lineSeparator)) {
+            joined += lineSeparator;
+        }
+        return joined;
     }
 
-    private static PluginConfig.WorldSettings parseWorld(ConfigurationSection sec, String file) {
-        return new PluginConfig.WorldSettings(
-                requireString(sec, "end-world-name", file),
-                requireBoolean(sec, "replace-first-dragon", file),
-                requireBoolean(sec, "preserve-vanilla-progression", file)
-        );
+    private static Map<String, List<String>> extractKeyComments(String[] lines, int from, int to) {
+        Map<String, List<String>> commentsByPath = new LinkedHashMap<>();
+        List<String> stack = new ArrayList<>();
+        List<Integer> indents = new ArrayList<>();
+        List<String> pending = new ArrayList<>();
+
+        for (int i = from; i < to; i++) {
+            String line = lines[i];
+            String trimmed = line.stripLeading();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                if (trimmed.startsWith("#")) {
+                    pending.add(line);
+                }
+                continue;
+            }
+            int indent = line.length() - trimmed.length();
+            String path = updatePathStack(trimmed, indent, indents, stack);
+            if (path != null) {
+                if (!pending.isEmpty()) {
+                    commentsByPath.put(path, List.copyOf(pending));
+                    pending.clear();
+                }
+            } else {
+                pending.clear();
+            }
+        }
+        return commentsByPath;
+    }
+
+    private static List<String> applyKeyComments(String[] renderedLines, Map<String, List<String>> commentsByPath) {
+        if (commentsByPath.isEmpty()) {
+            return List.of(renderedLines);
+        }
+        List<String> out = new ArrayList<>(renderedLines.length + commentsByPath.size());
+        List<String> stack = new ArrayList<>();
+        List<Integer> indents = new ArrayList<>();
+
+        for (String line : renderedLines) {
+            String trimmed = line.stripLeading();
+            int indent = line.length() - trimmed.length();
+            if (indent > 0) {
+                String path = updatePathStack(trimmed, indent, indents, stack);
+                if (path != null) {
+                    List<String> savedComments = commentsByPath.get(path);
+                    if (savedComments != null) {
+                        out.addAll(savedComments);
+                    }
+                }
+            }
+            out.add(line);
+        }
+        return out;
+    }
+
+    private static @Nullable String updatePathStack(
+            String trimmedLine, int indent, List<Integer> indents, List<String> stack) {
+        int colon = trimmedLine.indexOf(':');
+        if (colon <= 0 || trimmedLine.startsWith("-")) {
+            return null;
+        }
+        String key = trimmedLine.substring(0, colon).trim();
+        while (!indents.isEmpty() && indents.getLast() >= indent) {
+            indents.removeLast();
+            stack.removeLast();
+        }
+        indents.add(indent);
+        stack.add(key);
+        return String.join(".", stack);
+    }
+
+    static void validateRegionConfig(RegionConfig regions, String fileName) {
+        Objects.requireNonNull(regions, "regions");
+        if (!Double.isFinite(regions.voidYThreshold())) {
+            throw new ConfigException(fileName, "regions.void-y-threshold", "void-y-threshold must be finite");
+        }
+        RegionConfig.ArenaRegion arena = regions.arena();
+        if (arena == null) {
+            throw new ConfigException(fileName, "regions.arena", "Missing arena region");
+        }
+        validateGeometry(
+                arena.shape(), arena.center(), arena.radius(), arena.min(), arena.max(),
+                arena.minY(), arena.maxY(), fileName, "regions.arena");
+
+        RegionConfig.SafeZoneRegion safeZone = regions.safeZone();
+        if (safeZone == null) {
+            throw new ConfigException(fileName, "regions.safe-zone", "Missing safe-zone region");
+        }
+        validateGeometry(
+                safeZone.shape(), safeZone.center(), safeZone.radius(), safeZone.min(), safeZone.max(),
+                safeZone.minY(), safeZone.maxY(), fileName, "regions.safe-zone");
+        if (safeZone.spawnPoint() == null) {
+            throw new ConfigException(fileName, "regions.safe-zone.spawn-point", "Missing safe-zone spawn-point");
+        }
+        validateSpawnPoint(safeZone.spawnPoint(), fileName, "regions.safe-zone.spawn-point");
+    }
+
+    private static <T> T getTyped(ConfigurationNode node, Class<T> type, String fileName) {
+        try {
+            T result = node.get(type);
+            if (result == null) {
+                throw new ConfigException(fileName, ConfigValidation.fullPath(node), "Missing " + type.getSimpleName());
+            }
+            return result;
+        } catch (SerializationException ex) {
+            throw new ConfigException(
+                    fileName,
+                    formatNodePath(ex.path()),
+                    "Failed to deserialize " + type.getSimpleName() + ": " + ex.getMessage(),
+                    ex);
+        }
+    }
+
+    private static <T> T withFileName(String fileName, Supplier<T> action) {
+        String previous = CURRENT_FILE.get();
+        CURRENT_FILE.set(fileName);
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) {
+                CURRENT_FILE.remove();
+            } else {
+                CURRENT_FILE.set(previous);
+            }
+        }
+    }
+
+    private static String activeFileName(String fallback) {
+        String active = CURRENT_FILE.get();
+        return active != null ? active : fallback;
+    }
+
+    private static String formatNodePath(@Nullable NodePath path) {
+        if (path == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Object segment : path) {
+            if (sb.length() > 0) {
+                sb.append('.');
+            }
+            sb.append(segment);
+        }
+        return sb.toString();
+    }
+
+    private static RegionConfig.Point3D readPoint3D(ConfigurationNode node, String fileName) {
+        if (node.virtual() || !node.isMap()) {
+            throw new ConfigException(fileName, ConfigValidation.fullPath(node), "Missing 3D coordinate section");
+        }
+        double x = ConfigValidation.requireDouble(node, fileName, "x");
+        double y = ConfigValidation.requireDouble(node, fileName, "y");
+        double z = ConfigValidation.requireDouble(node, fileName, "z");
+        return new RegionConfig.Point3D(x, y, z);
+    }
+
+    private static void validatePoint3D(RegionConfig.Point3D point, String fileName, String path) {
+        if (point == null || !Double.isFinite(point.x()) || !Double.isFinite(point.y()) || !Double.isFinite(point.z())) {
+            throw new ConfigException(fileName, path, "Point coordinates must be finite");
+        }
+    }
+
+    private static void validateSpawnPoint(RegionConfig.SpawnPoint sp, String fileName, String path) {
+        if (!Double.isFinite(sp.x()) || !Double.isFinite(sp.y()) || !Double.isFinite(sp.z())
+                || !Float.isFinite(sp.yaw()) || !Float.isFinite(sp.pitch())) {
+            throw new ConfigException(fileName, path, "Spawn-point coordinates and angles must be finite");
+        }
     }
 
     private record ParsedGeometry(
@@ -134,103 +352,59 @@ final class YamlConfigLoader {
     ) {
     }
 
-    private static RegionConfig parseRegions(ConfigurationSection sec, String file) {
-        ParsedGeometry arenaGeo = parseGeometry(
-                requireSection(sec, "arena", file),
-                "regions.arena",
-                new RegionConfig.Point3D(0.0, 64.0, 0.0),
-                file);
-        var arena = new RegionConfig.ArenaRegion(
-                arenaGeo.shape(), arenaGeo.center(), arenaGeo.radius(),
-                arenaGeo.min(), arenaGeo.max(), arenaGeo.minY(), arenaGeo.maxY());
+    private static ParsedGeometry readGeometry(ConfigurationNode node, String fileName) {
+        String shapeRaw = ConfigValidation.requireString(node, fileName, "shape");
+        RegionConfig.Shape shape = ConfigValidation.parseEnum(
+                RegionConfig.Shape.class, shapeRaw, fileName, ConfigValidation.fullPath(node.node("shape")));
 
-        var safeSec = requireSection(sec, "safe-zone", file);
-        ParsedGeometry safeGeo = parseGeometry(
-                safeSec,
-                "regions.safe-zone",
-                new RegionConfig.Point3D(100.5, 50.0, 0.5),
-                file);
-        var spawnSec = requireSection(safeSec, "spawn-point", file);
-        var spawnPoint = new RegionConfig.SpawnPoint(
-                requireDouble(spawnSec, "x", file),
-                requireDouble(spawnSec, "y", file),
-                requireDouble(spawnSec, "z", file),
-                (float) requireDouble(spawnSec, "yaw", file),
-                (float) requireDouble(spawnSec, "pitch", file)
-        );
-        var safeZone = new RegionConfig.SafeZoneRegion(
-                safeGeo.shape(), safeGeo.center(), safeGeo.radius(),
-                safeGeo.min(), safeGeo.max(), safeGeo.minY(), safeGeo.maxY(), spawnPoint);
+        RegionConfig.Point3D center = null;
+        double radius = 0.0;
+        RegionConfig.Point3D min = null;
+        RegionConfig.Point3D max = null;
+        int minY;
+        int maxY;
 
-        double voidY = requireDouble(sec, "void-y-threshold", file);
-        RegionConfig regions = new RegionConfig(arena, safeZone, voidY);
-        validateRegionConfig(regions, file);
-        return regions;
-    }
-
-    private static ParsedGeometry parseGeometry(
-            ConfigurationSection sec,
-            String basePath,
-            RegionConfig.Point3D fallbackCenter,
-            String file) {
-        RegionConfig.Shape shape = parseEnum(
-                RegionConfig.Shape.class, requireString(sec, "shape", file), basePath + ".shape", file);
-        double radius = shape == RegionConfig.Shape.CYLINDER
-                ? requirePositive(requireDouble(sec, "radius", file), basePath + ".radius", file)
-                : Math.max(0.0, sec.getDouble("radius", 0.0));
-
-        boolean hasExplicitCenter = sec.isConfigurationSection("center");
-        RegionConfig.Point3D center = hasExplicitCenter
-                ? parsePoint3D(requireSection(sec, "center", file), file)
-                : fallbackCenter;
-
-        RegionConfig.Point3D min = sec.isConfigurationSection("min")
-                ? parsePoint3D(requireSection(sec, "min", file), file)
-                : new RegionConfig.Point3D(center.x() - radius, 0.0, center.z() - radius);
-        RegionConfig.Point3D max = sec.isConfigurationSection("max")
-                ? parsePoint3D(requireSection(sec, "max", file), file)
-                : new RegionConfig.Point3D(center.x() + radius, 256.0, center.z() + radius);
-
-        if (!hasExplicitCenter && shape == RegionConfig.Shape.CUBOID) {
-            center = new RegionConfig.Point3D(
-                    (min.x() + max.x()) / 2.0,
-                    (min.y() + max.y()) / 2.0,
-                    (min.z() + max.z()) / 2.0);
+        if (shape == RegionConfig.Shape.CYLINDER) {
+            center = readPoint3D(ConfigValidation.requireNode(node, fileName, "center"), fileName);
+            radius = ConfigValidation.requirePositive(
+                    ConfigValidation.requireDouble(node, fileName, "radius"),
+                    fileName,
+                    ConfigValidation.fullPath(node.node("radius")));
+            minY = ConfigValidation.requireInt(node, fileName, "min-y");
+            maxY = ConfigValidation.requireInt(node, fileName, "max-y");
+            min = !node.node("min").virtual()
+                    ? readPoint3D(node.node("min"), fileName)
+                    : new RegionConfig.Point3D(center.x() - radius, minY, center.z() - radius);
+            max = !node.node("max").virtual()
+                    ? readPoint3D(node.node("max"), fileName)
+                    : new RegionConfig.Point3D(center.x() + radius, maxY, center.z() + radius);
+        } else {
+            min = readPoint3D(ConfigValidation.requireNode(node, fileName, "min"), fileName);
+            max = readPoint3D(ConfigValidation.requireNode(node, fileName, "max"), fileName);
+            if (!node.node("center").virtual()) {
+                center = readPoint3D(node.node("center"), fileName);
+            } else {
+                center = new RegionConfig.Point3D(
+                        (min.x() + max.x()) / 2.0,
+                        (min.y() + max.y()) / 2.0,
+                        (min.z() + max.z()) / 2.0);
+            }
+            if (!node.node("radius").virtual()) {
+                radius = ConfigValidation.requireNonNegative(
+                        ConfigValidation.requireDouble(node, fileName, "radius"),
+                        fileName,
+                        ConfigValidation.fullPath(node.node("radius")));
+            }
+            minY = node.node("min-y").virtual()
+                    ? (int) Math.floor(min.y())
+                    : ConfigValidation.requireInt(node, fileName, "min-y");
+            maxY = node.node("max-y").virtual()
+                    ? (int) Math.ceil(max.y())
+                    : ConfigValidation.requireInt(node, fileName, "max-y");
         }
 
-        int minY = sec.isInt("min-y") ? sec.getInt("min-y") : (int) Math.floor(min.y());
-        int maxY = sec.isInt("max-y") ? sec.getInt("max-y") : (int) Math.ceil(max.y());
+        validateGeometry(shape, center, radius, min, max, minY, maxY, fileName, ConfigValidation.fullPath(node));
         return new ParsedGeometry(shape, center, radius, min, max, minY, maxY);
-    }
-
-    static void validateRegionConfig(RegionConfig regions, String file) {
-        if (regions == null || regions.arena() == null || regions.safeZone() == null) {
-            throw new ConfigException(file, "regions", "RegionConfig, arena, and safeZone must not be null");
-        }
-        if (!Double.isFinite(regions.voidYThreshold())) {
-            throw new ConfigException(file, "regions.void-y-threshold", "voidYThreshold must be finite");
-        }
-
-        var arena = regions.arena();
-        validateGeometry(
-                arena.shape(), arena.center(), arena.radius(),
-                arena.min(), arena.max(), arena.minY(), arena.maxY(),
-                "regions.arena", file);
-
-        var safe = regions.safeZone();
-        validateGeometry(
-                safe.shape(), safe.center(), safe.radius(),
-                safe.min(), safe.max(), safe.minY(), safe.maxY(),
-                "regions.safe-zone", file);
-        var spawn = safe.spawnPoint();
-        if (spawn == null
-                || !Double.isFinite(spawn.x())
-                || !Double.isFinite(spawn.y())
-                || !Double.isFinite(spawn.z())
-                || !Float.isFinite(spawn.yaw())
-                || !Float.isFinite(spawn.pitch())) {
-            throw new ConfigException(file, "regions.safe-zone.spawn-point", "Spawn point coordinates must be finite");
-        }
     }
 
     private static void validateGeometry(
@@ -241,438 +415,918 @@ final class YamlConfigLoader {
             RegionConfig.Point3D max,
             int minY,
             int maxY,
-            String path,
-            String file) {
-        if (shape == null || center == null || min == null || max == null) {
-            throw new ConfigException(file, path, "Shape, center, min, and max must not be null");
-        }
-        validateFinitePoint(center, path + ".center", file);
-        validateFinitePoint(min, path + ".min", file);
-        validateFinitePoint(max, path + ".max", file);
-        if (minY > maxY) {
-            throw new ConfigException(file, path, "min-y must be <= max-y");
+            String fileName,
+            String prefix) {
+        if (shape == null) {
+            throw new ConfigException(fileName, ConfigValidation.fullPath(prefix, "shape"), "Missing region shape");
         }
         if (shape == RegionConfig.Shape.CYLINDER) {
-            requirePositive(radius, path + ".radius", file);
-        } else if (min.x() > max.x() || min.y() > max.y() || min.z() > max.z()) {
-            throw new ConfigException(file, path, "Cuboid min coordinates must be <= max coordinates");
+            validatePoint3D(center, fileName, ConfigValidation.fullPath(prefix, "center"));
+            ConfigValidation.requirePositive(radius, fileName, ConfigValidation.fullPath(prefix, "radius"));
+            if (minY > maxY) {
+                throw new ConfigException(
+                        fileName,
+                        ConfigValidation.fullPath(prefix, "min-y"),
+                        "min-y (" + minY + ") must be <= max-y (" + maxY + ")");
+            }
+        } else {
+            validatePoint3D(min, fileName, ConfigValidation.fullPath(prefix, "min"));
+            validatePoint3D(max, fileName, ConfigValidation.fullPath(prefix, "max"));
+            if (min.x() > max.x() || min.y() > max.y() || min.z() > max.z()) {
+                throw new ConfigException(
+                        fileName,
+                        ConfigValidation.fullPath(prefix, "min"),
+                        "Cuboid min coordinates must be <= max coordinates");
+            }
+            if (center != null) {
+                validatePoint3D(center, fileName, ConfigValidation.fullPath(prefix, "center"));
+            }
+            ConfigValidation.requireNonNegative(radius, fileName, ConfigValidation.fullPath(prefix, "radius"));
+            if (minY > maxY) {
+                throw new ConfigException(
+                        fileName,
+                        ConfigValidation.fullPath(prefix, "min-y"),
+                        "min-y (" + minY + ") must be <= max-y (" + maxY + ")");
+            }
         }
     }
 
-    private static void validateFinitePoint(RegionConfig.Point3D point, String path, String file) {
-        if (!Double.isFinite(point.x()) || !Double.isFinite(point.y()) || !Double.isFinite(point.z())) {
-            throw new ConfigException(file, path, "Point coordinates must be finite");
+    /**
+     * Writes region geometry in place without wiping parent nodes so existing YAML comments remain intact.
+     */
+    private static void writeGeometry(
+            ConfigurationNode node,
+            RegionConfig.Shape shape,
+            RegionConfig.Point3D center,
+            double radius,
+            RegionConfig.Point3D min,
+            RegionConfig.Point3D max,
+            int minY,
+            int maxY) throws SerializationException {
+        node.node("shape").set(shape.name());
+        if (shape == RegionConfig.Shape.CYLINDER) {
+            writePoint3D(node.node("center"), center);
+            node.node("radius").set(radius);
+            if (min != null) {
+                writePoint3D(node.node("min"), min);
+            } else {
+                node.removeChild("min");
+            }
+            if (max != null) {
+                writePoint3D(node.node("max"), max);
+            } else {
+                node.removeChild("max");
+            }
+            node.node("min-y").set(minY);
+            node.node("max-y").set(maxY);
+        } else {
+            writePoint3D(node.node("min"), min);
+            writePoint3D(node.node("max"), max);
+            node.removeChild("center");
+            node.removeChild("radius");
+            node.removeChild("min-y");
+            node.removeChild("max-y");
         }
     }
 
-    private static RegionConfig.Point3D parsePoint3D(ConfigurationSection sec, String file) {
-        return new RegionConfig.Point3D(
-                requireDouble(sec, "x", file),
-                requireDouble(sec, "y", file),
-                requireDouble(sec, "z", file)
-        );
+    private static void writePoint3D(ConfigurationNode node, RegionConfig.Point3D point) throws SerializationException {
+        node.node("x").set(point.x());
+        node.node("y").set(point.y());
+        node.node("z").set(point.z());
     }
 
-    private static PluginConfig.ScalingSettings parseScaling(ConfigurationSection sec, String file) {
-        int minPlayers = requirePositive(requireInt(sec, "min-players", file), "scaling.min-players", file);
-        int maxPlayers = requireInt(sec, "max-players", file);
-        if (maxPlayers > 0 && maxPlayers < minPlayers) {
-            throw new ConfigException(file, "scaling.max-players", "max-players must be >= min-players");
+    private static final class RegionConfigSerializer implements TypeSerializer<RegionConfig> {
+
+        @Override
+        public RegionConfig deserialize(Type type, ConfigurationNode node) {
+            String fileName = activeFileName(ConfigManager.CONFIG_FILE);
+            if (node.virtual() || !node.isMap()) {
+                throw new ConfigException(fileName, ConfigValidation.fullPath(node), "Missing regions section");
+            }
+            ConfigurationNode arenaNode = ConfigValidation.requireNode(node, fileName, "arena");
+            ParsedGeometry arenaGeo = readGeometry(arenaNode, fileName);
+            RegionConfig.ArenaRegion arena = new RegionConfig.ArenaRegion(
+                    arenaGeo.shape(), arenaGeo.center(), arenaGeo.radius(),
+                    arenaGeo.min(), arenaGeo.max(), arenaGeo.minY(), arenaGeo.maxY());
+
+            ConfigurationNode safeNode = ConfigValidation.requireNode(node, fileName, "safe-zone");
+            ParsedGeometry safeGeo = readGeometry(safeNode, fileName);
+            ConfigurationNode spNode = ConfigValidation.requireNode(safeNode, fileName, "spawn-point");
+            RegionConfig.SpawnPoint spawnPoint = new RegionConfig.SpawnPoint(
+                    ConfigValidation.requireDouble(spNode, fileName, "x"),
+                    ConfigValidation.requireDouble(spNode, fileName, "y"),
+                    ConfigValidation.requireDouble(spNode, fileName, "z"),
+                    (float) ConfigValidation.requireDouble(spNode, fileName, "yaw"),
+                    (float) ConfigValidation.requireDouble(spNode, fileName, "pitch"));
+            RegionConfig.SafeZoneRegion safeZone = new RegionConfig.SafeZoneRegion(
+                    safeGeo.shape(), safeGeo.center(), safeGeo.radius(),
+                    safeGeo.min(), safeGeo.max(), safeGeo.minY(), safeGeo.maxY(), spawnPoint);
+
+            double voidYThreshold = ConfigValidation.requireDouble(node, fileName, "void-y-threshold");
+            return new RegionConfig(arena, safeZone, voidYThreshold);
         }
-        boolean enforceMax = requireBoolean(sec, "enforce-max-players", file);
-        double hpAlpha = requireNonNegative(requireDouble(sec, "hp-alpha", file), "scaling.hp-alpha", file);
-        double objAlpha = requireNonNegative(requireDouble(sec, "object-hp-alpha", file), "scaling.object-hp-alpha", file);
 
-        var gimSec = requireSection(sec, "gimmick", file);
-        int towerMin = requirePositive(requireInt(gimSec, "tower-min", file), "scaling.gimmick.tower-min", file);
-        int towerMax = requirePositive(requireInt(gimSec, "tower-max", file), "scaling.gimmick.tower-max", file);
-        if (towerMin > towerMax) {
-            throw new ConfigException(file, "scaling.gimmick", "tower-min must be <= tower-max");
+        @Override
+        public void serialize(Type type, @Nullable RegionConfig regions, ConfigurationNode node)
+                throws SerializationException {
+            if (regions == null) {
+                return;
+            }
+            RegionConfig.ArenaRegion arena = regions.arena();
+            writeGeometry(
+                    node.node("arena"),
+                    arena.shape(), arena.center(), arena.radius(),
+                    arena.min(), arena.max(), arena.minY(), arena.maxY());
+
+            RegionConfig.SafeZoneRegion safeZone = regions.safeZone();
+            ConfigurationNode safeNode = node.node("safe-zone");
+            writeGeometry(
+                    safeNode,
+                    safeZone.shape(), safeZone.center(), safeZone.radius(),
+                    safeZone.min(), safeZone.max(), safeZone.minY(), safeZone.maxY());
+
+            RegionConfig.SpawnPoint sp = safeZone.spawnPoint();
+            ConfigurationNode spNode = safeNode.node("spawn-point");
+            spNode.node("x").set(sp.x());
+            spNode.node("y").set(sp.y());
+            spNode.node("z").set(sp.z());
+            spNode.node("yaw").set(sp.yaw());
+            spNode.node("pitch").set(sp.pitch());
+
+            node.node("void-y-threshold").set(regions.voidYThreshold());
         }
-        int spreadMin = requirePositive(requireInt(gimSec, "spread-min", file), "scaling.gimmick.spread-min", file);
-        int spreadMax = requirePositive(requireInt(gimSec, "spread-max", file), "scaling.gimmick.spread-max", file);
-        if (spreadMin > spreadMax) {
-            throw new ConfigException(file, "scaling.gimmick", "spread-min must be <= spread-max");
+    }
+
+    private static final class AltarSettingsSerializer implements TypeSerializer<PluginConfig.AltarSettings> {
+
+        @Override
+        public PluginConfig.AltarSettings deserialize(Type type, ConfigurationNode node) {
+            String fileName = activeFileName(ConfigManager.CONFIG_FILE);
+            if (node.virtual() || !node.isMap()) {
+                throw new ConfigException(fileName, ConfigValidation.fullPath(node), "Missing altar section");
+            }
+            RegionConfig.Point3D location = readPoint3D(
+                    ConfigValidation.requireNode(node, fileName, "location"), fileName);
+            double interactRadius = ConfigValidation.requirePositive(
+                    ConfigValidation.requireDouble(node, fileName, "interact-radius"),
+                    fileName,
+                    ConfigValidation.fullPath(node.node("interact-radius")));
+            boolean unlockHard = ConfigValidation.requireBoolean(node, fileName, "unlock-hard-after-normal-clear");
+
+            ConfigurationNode costsNode = ConfigValidation.requireNode(node, fileName, "summon-costs");
+            List<PluginConfig.ItemCost> normalCosts = readItemCosts(costsNode, fileName, "normal");
+            List<PluginConfig.ItemCost> hardCosts = readItemCosts(costsNode, fileName, "hard");
+            return new PluginConfig.AltarSettings(location, interactRadius, unlockHard, normalCosts, hardCosts);
         }
-        int crystalBase = requirePositive(requireInt(gimSec, "crystal-base", file), "scaling.gimmick.crystal-base", file);
-        int crystalMax = requirePositive(requireInt(gimSec, "crystal-max", file), "scaling.gimmick.crystal-max", file);
-        if (crystalBase > crystalMax) {
-            throw new ConfigException(file, "scaling.gimmick", "crystal-base must be <= crystal-max");
+
+        private List<PluginConfig.ItemCost> readItemCosts(
+                ConfigurationNode costsNode, String fileName, String key) {
+            List<? extends ConfigurationNode> items = ConfigValidation.requireList(costsNode, fileName, key);
+            List<PluginConfig.ItemCost> parsed = new ArrayList<>(items.size());
+            for (ConfigurationNode item : items) {
+                if (!item.isMap()) {
+                    throw new ConfigException(fileName, ConfigValidation.fullPath(item), "Item cost entry must be a map");
+                }
+                String material = ConfigValidation.requireString(item, fileName, "material");
+                int amount = ConfigValidation.requirePositive(
+                        ConfigValidation.requireInt(item, fileName, "amount"),
+                        fileName,
+                        ConfigValidation.fullPath(item.node("amount")));
+                parsed.add(new PluginConfig.ItemCost(material, amount));
+            }
+            return List.copyOf(parsed);
         }
-        var gimmick = new PluginConfig.GimmickScaling(
-                requireNonNegative(requireInt(gimSec, "tower-base", file), "scaling.gimmick.tower-base", file),
-                requireNonNegative(requireDouble(gimSec, "tower-per-players", file), "scaling.gimmick.tower-per-players", file),
-                towerMin,
-                towerMax,
-                requireUnitRatio(requireDouble(gimSec, "spread-ratio", file), "scaling.gimmick.spread-ratio", file),
-                spreadMin,
-                spreadMax,
-                crystalBase,
-                requireNonNegative(requireDouble(gimSec, "crystal-per-additional-player", file), "scaling.gimmick.crystal-per-additional-player", file),
-                crystalMax
-        );
 
-        var soloSec = requireSection(sec, "solo-fallback", file);
-        var solo = new PluginConfig.SoloFallbackSettings(
-                requireBoolean(soloSec, "enabled", file),
-                requirePositive(requireDouble(soloSec, "stack-damage-multiplier", file), "scaling.solo-fallback.stack-damage-multiplier", file),
-                requireNonNegative(requireDouble(soloSec, "simultaneous-crystal-grace-seconds", file), "scaling.solo-fallback.simultaneous-crystal-grace-seconds", file),
-                requireBoolean(soloSec, "allow-vanilla-totem", file)
-        );
-
-        return new PluginConfig.ScalingSettings(minPlayers, maxPlayers, enforceMax, hpAlpha, objAlpha, gimmick, solo);
-    }
-
-    private static PluginConfig.EncounterSettings parseEncounter(ConfigurationSection sec, String file) {
-        int countdown = requireNonNegative(requireInt(sec, "pull-countdown-seconds", file), "encounter.pull-countdown-seconds", file);
-        boolean autoStart = requireBoolean(sec, "auto-start-on-arena-enter", file);
-        boolean altarOnly = requireBoolean(sec, "altar-gui-only", file);
-        boolean lockLate = requireBoolean(sec, "lock-late-joiners-to-safe-zone", file);
-
-        var altarSec = requireSection(sec, "altar", file);
-        var location = parsePoint3D(requireSection(altarSec, "location", file), file);
-        double interactRadius = requirePositive(requireDouble(altarSec, "interact-radius", file), "encounter.altar.interact-radius", file);
-        boolean unlockHard = requireBoolean(altarSec, "unlock-hard-after-normal-clear", file);
-        var costsSec = requireSection(altarSec, "summon-costs", file);
-        var normalCosts = parseItemCosts(costsSec, "normal", file);
-        var hardCosts = parseItemCosts(costsSec, "hard", file);
-
-        var altar = new PluginConfig.AltarSettings(location, interactRadius, unlockHard, normalCosts, hardCosts);
-        return new PluginConfig.EncounterSettings(countdown, autoStart, altarOnly, lockLate, altar);
-    }
-
-    private static List<PluginConfig.ItemCost> parseItemCosts(ConfigurationSection sec, String key, String file) {
-        List<Map<?, ?>> rawList = sec.getMapList(key);
-        List<PluginConfig.ItemCost> result = new ArrayList<>(rawList.size());
-        String basePath = fullPath(sec, key);
-        for (int i = 0; i < rawList.size(); i++) {
-            Map<?, ?> item = rawList.get(i);
-            String mat = mapString(item, "material", basePath + "[" + i + "]", file);
-            int amount = requirePositive(mapInt(item, "amount", basePath + "[" + i + "]", file), basePath + "[" + i + "].amount", file);
-            result.add(new PluginConfig.ItemCost(mat, amount));
+        @Override
+        public void serialize(Type type, PluginConfig.@Nullable AltarSettings obj, ConfigurationNode node)
+                throws SerializationException {
+            throw new SerializationException(node, type, "AltarSettings serialization is not supported");
         }
-        return List.copyOf(result);
     }
 
-    private static PluginConfig.ReviveSettings parseRevive(ConfigurationSection sec, String file) {
-        return new PluginConfig.ReviveSettings(
-                requirePositive(requireDouble(sec, "channel-seconds", file), "revive.channel-seconds", file),
-                requirePositive(requireDouble(sec, "interact-radius", file), "revive.interact-radius", file),
-                requireBoolean(sec, "require-sneak", file),
-                requireBoolean(sec, "allow-right-click-hold", file),
-                requireNonNegative(requireDouble(sec, "invulnerability-seconds", file), "revive.invulnerability-seconds", file),
-                requireUnitRatio(requireDouble(sec, "heal-percent", file), "revive.heal-percent", file),
-                requireNonNegative(requireDouble(sec, "void-rescue-y-offset", file), "revive.void-rescue-y-offset", file),
-                requireNonNegative(requireInt(sec, "wipe-delay-seconds", file), "revive.wipe-delay-seconds", file),
-                requireBoolean(sec, "wipe-if-all-leave-arena", file)
-        );
+    private static final class PluginConfigSerializer implements TypeSerializer<PluginConfig> {
+
+        @Override
+        public PluginConfig deserialize(Type type, ConfigurationNode root) throws SerializationException {
+            String fileName = activeFileName(ConfigManager.CONFIG_FILE);
+            PluginConfig.LanguageSettings language = readLanguage(root, fileName);
+            PluginConfig.DatabaseSettings database = readDatabase(root, fileName);
+            PluginConfig.WorldSettings world = readWorld(root, fileName);
+            RegionConfig regions = root.node("regions").get(RegionConfig.class);
+            if (regions == null) {
+                throw new ConfigException(fileName, "regions", "Missing regions section");
+            }
+            PluginConfig.ScalingSettings scaling = readScaling(root, fileName);
+            PluginConfig.EncounterSettings encounter = readEncounter(root, fileName);
+            PluginConfig.ReviveSettings revive = readRevive(root, fileName);
+            PluginConfig.ProtectionSettings protection = readProtection(root, fileName);
+            PluginConfig.VisualSettings visuals = readVisuals(root, fileName);
+            return new PluginConfig(language, database, world, regions, scaling, encounter, revive, protection, visuals);
+        }
+
+        private PluginConfig.LanguageSettings readLanguage(ConfigurationNode root, String fileName) {
+            ConfigurationNode lang = ConfigValidation.requireNode(root, fileName, "language");
+            String defaultLocale = ConfigValidation.requireString(lang, fileName, "default");
+            boolean perPlayer = ConfigValidation.requireBoolean(lang, fileName, "per-player-locale");
+            List<String> supported = ConfigValidation.requireStringList(lang, fileName, "supported");
+            if (supported.isEmpty()) {
+                throw new ConfigException(fileName, "language.supported", "Supported locales list cannot be empty");
+            }
+            if (!supported.contains(defaultLocale)) {
+                throw new ConfigException(
+                        fileName,
+                        "language.default",
+                        "Default locale '" + defaultLocale + "' is missing from language.supported");
+            }
+            return new PluginConfig.LanguageSettings(defaultLocale, perPlayer, supported);
+        }
+
+        private PluginConfig.DatabaseSettings readDatabase(ConfigurationNode root, String fileName) {
+            ConfigurationNode db = ConfigValidation.requireNode(root, fileName, "database");
+            String dbType = ConfigValidation.requireString(db, fileName, "type");
+            if (!"SQLITE".equalsIgnoreCase(dbType)) {
+                throw new ConfigException(fileName, "database.type", "Unsupported database type: " + dbType);
+            }
+            String file = ConfigValidation.requireString(db, fileName, "file");
+            int poolSize = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(db, fileName, "pool-size"), fileName, "database.pool-size");
+            return new PluginConfig.DatabaseSettings(dbType, file, poolSize);
+        }
+
+        private PluginConfig.WorldSettings readWorld(ConfigurationNode root, String fileName) {
+            ConfigurationNode world = ConfigValidation.requireNode(root, fileName, "world");
+            return new PluginConfig.WorldSettings(
+                    ConfigValidation.requireString(world, fileName, "end-world-name"),
+                    ConfigValidation.requireBoolean(world, fileName, "replace-first-dragon"),
+                    ConfigValidation.requireBoolean(world, fileName, "preserve-vanilla-progression"));
+        }
+
+        private PluginConfig.ScalingSettings readScaling(ConfigurationNode root, String fileName) {
+            ConfigurationNode scaling = ConfigValidation.requireNode(root, fileName, "scaling");
+            int minPlayers = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(scaling, fileName, "min-players"), fileName, "scaling.min-players");
+            int maxPlayers = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(scaling, fileName, "max-players"), fileName, "scaling.max-players");
+            if (maxPlayers < minPlayers) {
+                throw new ConfigException(
+                        fileName,
+                        "scaling.max-players",
+                        "max-players (" + maxPlayers + ") must be >= min-players (" + minPlayers + ")");
+            }
+            boolean enforceMax = ConfigValidation.requireBoolean(scaling, fileName, "enforce-max-players");
+            double hpAlpha = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireDouble(scaling, fileName, "hp-alpha"), fileName, "scaling.hp-alpha");
+            double objectHpAlpha = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireDouble(scaling, fileName, "object-hp-alpha"),
+                    fileName,
+                    "scaling.object-hp-alpha");
+
+            ConfigurationNode gimmickNode = ConfigValidation.requireNode(scaling, fileName, "gimmick");
+            int towerBase = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "tower-base"),
+                    fileName, "scaling.gimmick.tower-base");
+            double towerPerPlayers = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireDouble(gimmickNode, fileName, "tower-per-players"),
+                    fileName, "scaling.gimmick.tower-per-players");
+            int towerMin = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "tower-min"),
+                    fileName, "scaling.gimmick.tower-min");
+            int towerMax = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "tower-max"),
+                    fileName, "scaling.gimmick.tower-max");
+            if (towerMax < towerMin) {
+                throw new ConfigException(fileName, "scaling.gimmick.tower-max", "tower-max must be >= tower-min");
+            }
+            double spreadRatio = ConfigValidation.requireUnitRatio(
+                    ConfigValidation.requireDouble(gimmickNode, fileName, "spread-ratio"),
+                    fileName, "scaling.gimmick.spread-ratio");
+            int spreadMin = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "spread-min"),
+                    fileName, "scaling.gimmick.spread-min");
+            int spreadMax = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "spread-max"),
+                    fileName, "scaling.gimmick.spread-max");
+            if (spreadMax < spreadMin) {
+                throw new ConfigException(fileName, "scaling.gimmick.spread-max", "spread-max must be >= spread-min");
+            }
+            int crystalBase = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "crystal-base"),
+                    fileName, "scaling.gimmick.crystal-base");
+            double crystalPerAdd = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireDouble(gimmickNode, fileName, "crystal-per-additional-player"),
+                    fileName, "scaling.gimmick.crystal-per-additional-player");
+            int crystalMax = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(gimmickNode, fileName, "crystal-max"),
+                    fileName, "scaling.gimmick.crystal-max");
+            if (crystalMax < crystalBase) {
+                throw new ConfigException(
+                        fileName, "scaling.gimmick.crystal-max", "crystal-max must be >= crystal-base");
+            }
+            PluginConfig.GimmickScaling gimmick = new PluginConfig.GimmickScaling(
+                    towerBase, towerPerPlayers, towerMin, towerMax,
+                    spreadRatio, spreadMin, spreadMax,
+                    crystalBase, crystalPerAdd, crystalMax);
+
+            ConfigurationNode soloNode = ConfigValidation.requireNode(scaling, fileName, "solo-fallback");
+            PluginConfig.SoloFallbackSettings solo = new PluginConfig.SoloFallbackSettings(
+                    ConfigValidation.requireBoolean(soloNode, fileName, "enabled"),
+                    ConfigValidation.requirePositive(
+                            ConfigValidation.requireDouble(soloNode, fileName, "stack-damage-multiplier"),
+                            fileName, "scaling.solo-fallback.stack-damage-multiplier"),
+                    ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireDouble(soloNode, fileName, "simultaneous-crystal-grace-seconds"),
+                            fileName, "scaling.solo-fallback.simultaneous-crystal-grace-seconds"),
+                    ConfigValidation.requireBoolean(soloNode, fileName, "allow-vanilla-totem"));
+
+            return new PluginConfig.ScalingSettings(
+                    minPlayers, maxPlayers, enforceMax, hpAlpha, objectHpAlpha, gimmick, solo);
+        }
+
+        private PluginConfig.EncounterSettings readEncounter(ConfigurationNode root, String fileName)
+                throws SerializationException {
+            ConfigurationNode enc = ConfigValidation.requireNode(root, fileName, "encounter");
+            int pullCountdown = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(enc, fileName, "pull-countdown-seconds"),
+                    fileName, "encounter.pull-countdown-seconds");
+            boolean autoStart = ConfigValidation.requireBoolean(enc, fileName, "auto-start-on-arena-enter");
+            boolean altarGuiOnly = ConfigValidation.requireBoolean(enc, fileName, "altar-gui-only");
+            boolean lockLate = ConfigValidation.requireBoolean(enc, fileName, "lock-late-joiners-to-safe-zone");
+            PluginConfig.AltarSettings altar = enc.node("altar").get(PluginConfig.AltarSettings.class);
+            if (altar == null) {
+                throw new ConfigException(fileName, "encounter.altar", "Missing altar section");
+            }
+            return new PluginConfig.EncounterSettings(pullCountdown, autoStart, altarGuiOnly, lockLate, altar);
+        }
+
+        private PluginConfig.ReviveSettings readRevive(ConfigurationNode root, String fileName) {
+            ConfigurationNode rev = ConfigValidation.requireNode(root, fileName, "revive");
+            double channelSec = ConfigValidation.requirePositive(
+                    ConfigValidation.requireDouble(rev, fileName, "channel-seconds"),
+                    fileName, "revive.channel-seconds");
+            double interactRad = ConfigValidation.requirePositive(
+                    ConfigValidation.requireDouble(rev, fileName, "interact-radius"),
+                    fileName, "revive.interact-radius");
+            boolean requireSneak = ConfigValidation.requireBoolean(rev, fileName, "require-sneak");
+            boolean allowRightClick = ConfigValidation.requireBoolean(rev, fileName, "allow-right-click-hold");
+            double invulSec = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireDouble(rev, fileName, "invulnerability-seconds"),
+                    fileName, "revive.invulnerability-seconds");
+            double healPct = ConfigValidation.requireUnitRatio(
+                    ConfigValidation.requirePositive(
+                            ConfigValidation.requireDouble(rev, fileName, "heal-percent"),
+                            fileName, "revive.heal-percent"),
+                    fileName, "revive.heal-percent");
+            double voidRescueOffset = ConfigValidation.requireDouble(rev, fileName, "void-rescue-y-offset");
+            int wipeDelay = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(rev, fileName, "wipe-delay-seconds"),
+                    fileName, "revive.wipe-delay-seconds");
+            boolean wipeAllLeave = ConfigValidation.requireBoolean(rev, fileName, "wipe-if-all-leave-arena");
+            return new PluginConfig.ReviveSettings(
+                    channelSec, interactRad, requireSneak, allowRightClick,
+                    invulSec, healPct, voidRescueOffset, wipeDelay, wipeAllLeave);
+        }
+
+        private PluginConfig.ProtectionSettings readProtection(ConfigurationNode root, String fileName) {
+            ConfigurationNode prot = ConfigValidation.requireNode(root, fileName, "protection");
+            int maxPerPlayer = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(prot, fileName, "max-temporary-blocks-per-player"),
+                    fileName, "protection.max-temporary-blocks-per-player");
+            int maxTotal = ConfigValidation.requireNonNegative(
+                    ConfigValidation.requireInt(prot, fileName, "max-temporary-blocks-total"),
+                    fileName, "protection.max-temporary-blocks-total");
+            if (maxTotal < maxPerPlayer) {
+                throw new ConfigException(
+                        fileName,
+                        "protection.max-temporary-blocks-total",
+                        "max-temporary-blocks-total must be >= max-temporary-blocks-per-player");
+            }
+            return new PluginConfig.ProtectionSettings(
+                    ConfigValidation.requireBoolean(prot, fileName, "keep-inventory-on-raid-death"),
+                    ConfigValidation.requireBoolean(prot, fileName, "keep-experience-on-raid-death"),
+                    ConfigValidation.requireBoolean(prot, fileName, "disable-bed-and-anchor-explosions"),
+                    ConfigValidation.requireBoolean(prot, fileName, "protect-original-arena-terrain"),
+                    ConfigValidation.requireBoolean(prot, fileName, "allow-temporary-blocks"),
+                    ConfigValidation.requireBoolean(prot, fileName, "allow-water-buckets"),
+                    ConfigValidation.requireBoolean(prot, fileName, "allow-ender-pearls"),
+                    ConfigValidation.requireBoolean(prot, fileName, "allow-wind-charges"),
+                    maxPerPlayer,
+                    maxTotal,
+                    ConfigValidation.requireBoolean(prot, fileName, "rollback-temporary-blocks-on-end"));
+        }
+
+        private PluginConfig.VisualSettings readVisuals(ConfigurationNode root, String fileName) {
+            ConfigurationNode vis = ConfigValidation.requireNode(root, fileName, "visuals");
+            return new PluginConfig.VisualSettings(
+                    ConfigValidation.requireBoolean(vis, fileName, "use-packet-events"),
+                    ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(vis, fileName, "aoe-update-interval-ticks"),
+                            fileName, "visuals.aoe-update-interval-ticks"),
+                    ConfigValidation.requireBoolean(vis, fileName, "soul-marker-glow"),
+                    ConfigValidation.requirePositive(
+                            ConfigValidation.requireDouble(vis, fileName, "tether-particle-step"),
+                            fileName, "visuals.tether-particle-step"),
+                    ConfigValidation.requirePositive(
+                            ConfigValidation.requireDouble(vis, fileName, "max-render-distance"),
+                            fileName, "visuals.max-render-distance"));
+        }
+
+        @Override
+        public void serialize(Type type, @Nullable PluginConfig obj, ConfigurationNode node)
+                throws SerializationException {
+            throw new SerializationException(node, type, "PluginConfig full serialization is not supported");
+        }
     }
 
-    private static PluginConfig.ProtectionSettings parseProtection(ConfigurationSection sec, String file) {
-        return new PluginConfig.ProtectionSettings(
-                requireBoolean(sec, "keep-inventory-on-raid-death", file),
-                requireBoolean(sec, "keep-experience-on-raid-death", file),
-                requireBoolean(sec, "disable-bed-and-anchor-explosions", file),
-                requireBoolean(sec, "protect-original-arena-terrain", file),
-                requireBoolean(sec, "allow-temporary-blocks", file),
-                requireBoolean(sec, "allow-water-buckets", file),
-                requireBoolean(sec, "allow-ender-pearls", file),
-                requireBoolean(sec, "allow-wind-charges", file),
-                requireNonNegative(requireInt(sec, "max-temporary-blocks-per-player", file), "protection.max-temporary-blocks-per-player", file),
-                requireNonNegative(requireInt(sec, "max-temporary-blocks-total", file), "protection.max-temporary-blocks-total", file),
-                requireBoolean(sec, "rollback-temporary-blocks-on-end", file)
-        );
+    private static final class AbilitySettingsSerializer implements TypeSerializer<BossConfig.AbilitySettings> {
+
+        @Override
+        public BossConfig.AbilitySettings deserialize(Type type, ConfigurationNode node) {
+            String fileName = activeFileName("boss.yml");
+            if (node.virtual() || !node.isMap()) {
+                throw new ConfigException(fileName, ConfigValidation.fullPath(node), "Missing ability definition");
+            }
+            String id = String.valueOf(node.key());
+            String nameKey = ConfigValidation.requireString(node, fileName, "name-key");
+            Map<String, Object> parameters = new LinkedHashMap<>();
+            for (Map.Entry<Object, ? extends ConfigurationNode> entry : node.childrenMap().entrySet()) {
+                String key = String.valueOf(entry.getKey());
+                if ("name-key".equals(key)) {
+                    continue;
+                }
+                Object value = entry.getValue().raw();
+                if (value != null) {
+                    parameters.put(key, value);
+                }
+            }
+            return new BossConfig.AbilitySettings(id, nameKey, parameters);
+        }
+
+        @Override
+        public void serialize(Type type, BossConfig.@Nullable AbilitySettings obj, ConfigurationNode node)
+                throws SerializationException {
+            throw new SerializationException(node, type, "AbilitySettings serialization is not supported");
+        }
     }
 
-    private static PluginConfig.VisualSettings parseVisuals(ConfigurationSection sec, String file) {
-        return new PluginConfig.VisualSettings(
-                requireBoolean(sec, "use-packet-events", file),
-                requirePositive(requireInt(sec, "aoe-update-interval-ticks", file), "visuals.aoe-update-interval-ticks", file),
-                requireBoolean(sec, "soul-marker-glow", file),
-                requirePositive(requireDouble(sec, "tether-particle-step", file), "visuals.tether-particle-step", file),
-                requirePositive(requireDouble(sec, "max-render-distance", file), "visuals.max-render-distance", file)
-        );
-    }
+    private static final class BossConfigSerializer implements TypeSerializer<BossConfig> {
 
-    private static BossConfig.BossReviveSettings parseBossRevive(ConfigurationSection sec, String file) {
-        var formula = parseEnum(BossConfig.ReviveFormula.class, requireString(sec, "formula", file), "revive.formula", file);
-        double multiplier = requireNonNegative(requireDouble(sec, "multiplier", file), "revive.multiplier", file);
-        int timeout = requireNonNegative(requireInt(sec, "downed-timeout-seconds", file), "revive.downed-timeout-seconds", file);
-        return new BossConfig.BossReviveSettings(formula, multiplier, timeout);
-    }
+        @Override
+        public BossConfig deserialize(Type type, ConfigurationNode root) throws SerializationException {
+            String fileName = activeFileName("boss.yml");
+            BossConfig.Difficulty difficulty = ConfigValidation.parseEnum(
+                    BossConfig.Difficulty.class,
+                    ConfigValidation.requireString(root, fileName, "difficulty"),
+                    fileName,
+                    "difficulty");
+            String displayNameKey = ConfigValidation.requireString(root, fileName, "display-name-key");
+            double baseHp = ConfigValidation.requirePositive(
+                    ConfigValidation.requireDouble(root, fileName, "base-hp"), fileName, "base-hp");
+            double baseAttack = ConfigValidation.requirePositive(
+                    ConfigValidation.requireDouble(root, fileName, "base-attack-damage"),
+                    fileName, "base-attack-damage");
 
-    private static BossConfig.EnrageSettings parseEnrage(ConfigurationSection sec, String file) {
-        var softSec = requireSection(sec, "soft-enrage", file);
-        var soft = new BossConfig.SoftEnrageSettings(
-                requireBoolean(softSec, "enabled", file),
-                requireString(softSec, "start-phase", file),
-                requireNonNegative(requireDouble(softSec, "void-corruption-shrink-per-second", file), "enrage.soft-enrage.void-corruption-shrink-per-second", file),
-                requireNonNegative(requireDouble(softSec, "void-damage-per-second", file), "enrage.soft-enrage.void-damage-per-second", file)
-        );
+            ConfigurationNode revNode = ConfigValidation.requireNode(root, fileName, "revive");
+            BossConfig.ReviveFormula formula = ConfigValidation.parseEnum(
+                    BossConfig.ReviveFormula.class,
+                    ConfigValidation.requireString(revNode, fileName, "formula"),
+                    fileName,
+                    "revive.formula");
+            BossConfig.BossReviveSettings revive = new BossConfig.BossReviveSettings(
+                    formula,
+                    ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireDouble(revNode, fileName, "multiplier"),
+                            fileName, "revive.multiplier"),
+                    ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireInt(revNode, fileName, "downed-timeout-seconds"),
+                            fileName, "revive.downed-timeout-seconds"));
 
-        var hardSec = requireSection(sec, "hard-enrage", file);
-        var hard = new BossConfig.HardEnrageSettings(
-                requireBoolean(hardSec, "enabled", file),
-                requirePositive(requireInt(hardSec, "time-limit-seconds", file), "enrage.hard-enrage.time-limit-seconds", file),
-                requireString(hardSec, "ability-name-key", file),
-                requirePositive(requireDouble(hardSec, "cast-seconds", file), "enrage.hard-enrage.cast-seconds", file)
-        );
-        return new BossConfig.EnrageSettings(soft, hard);
-    }
+            BossConfig.EnrageSettings enrage = readEnrage(root, fileName);
 
-    private static Map<String, BossConfig.AbilitySettings> parseAbilities(ConfigurationSection sec, String file) {
-        Map<String, BossConfig.AbilitySettings> result = new LinkedHashMap<>();
-        for (String id : sec.getKeys(false)) {
-            ConfigurationSection abSec = requireSection(sec, id, file);
-            String nameKey = requireString(abSec, "name-key", file);
-            Map<String, Object> params = new LinkedHashMap<>();
-            for (String key : abSec.getKeys(false)) {
-                if (!"name-key".equals(key)) {
-                    Object val = abSec.get(key);
-                    if (val != null) {
-                        params.put(key, val);
+            ConfigurationNode abilitiesNode = ConfigValidation.requireNode(root, fileName, "abilities");
+            Map<String, BossConfig.AbilitySettings> abilities = new LinkedHashMap<>();
+            for (Map.Entry<Object, ? extends ConfigurationNode> entry : abilitiesNode.childrenMap().entrySet()) {
+                String id = String.valueOf(entry.getKey());
+                BossConfig.AbilitySettings ability = entry.getValue().get(BossConfig.AbilitySettings.class);
+                if (ability == null) {
+                    throw new ConfigException(fileName, ConfigValidation.fullPath(entry.getValue()), "Invalid ability");
+                }
+                abilities.put(id, ability);
+            }
+            if (abilities.isEmpty()) {
+                throw new ConfigException(fileName, "abilities", "Boss must define at least one ability");
+            }
+
+            List<BossConfig.PhaseConfig> phases = readPhases(root, fileName, abilities);
+            if (enrage.softEnrage().enabled()) {
+                String startPhase = enrage.softEnrage().startPhase();
+                boolean found = phases.stream().anyMatch(p -> p.id().equals(startPhase));
+                if (!found) {
+                    throw new ConfigException(
+                            fileName,
+                            "enrage.soft-enrage.start-phase",
+                            "Soft enrage start-phase '" + startPhase + "' does not exist in phases");
+                }
+            }
+
+            return new BossConfig(
+                    difficulty,
+                    displayNameKey,
+                    baseHp,
+                    baseAttack,
+                    revive,
+                    enrage,
+                    Collections.unmodifiableMap(abilities),
+                    List.copyOf(phases));
+        }
+
+        private BossConfig.EnrageSettings readEnrage(ConfigurationNode root, String fileName) {
+            ConfigurationNode enrageNode = ConfigValidation.requireNode(root, fileName, "enrage");
+            ConfigurationNode softNode = ConfigValidation.requireNode(enrageNode, fileName, "soft-enrage");
+            BossConfig.SoftEnrageSettings soft = new BossConfig.SoftEnrageSettings(
+                    ConfigValidation.requireBoolean(softNode, fileName, "enabled"),
+                    ConfigValidation.requireString(softNode, fileName, "start-phase"),
+                    ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireDouble(softNode, fileName, "void-corruption-shrink-per-second"),
+                            fileName, "enrage.soft-enrage.void-corruption-shrink-per-second"),
+                    ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireDouble(softNode, fileName, "void-damage-per-second"),
+                            fileName, "enrage.soft-enrage.void-damage-per-second"));
+
+            ConfigurationNode hardNode = ConfigValidation.requireNode(enrageNode, fileName, "hard-enrage");
+            boolean hardEnabled = ConfigValidation.requireBoolean(hardNode, fileName, "enabled");
+            int timeLimit = ConfigValidation.requireInt(hardNode, fileName, "time-limit-seconds");
+            double castSeconds = ConfigValidation.requireDouble(hardNode, fileName, "cast-seconds");
+            if (hardEnabled) {
+                ConfigValidation.requirePositive(timeLimit, fileName, "enrage.hard-enrage.time-limit-seconds");
+                ConfigValidation.requirePositive(castSeconds, fileName, "enrage.hard-enrage.cast-seconds");
+            } else {
+                ConfigValidation.requireNonNegative(timeLimit, fileName, "enrage.hard-enrage.time-limit-seconds");
+                ConfigValidation.requireNonNegative(castSeconds, fileName, "enrage.hard-enrage.cast-seconds");
+            }
+            BossConfig.HardEnrageSettings hard = new BossConfig.HardEnrageSettings(
+                    hardEnabled,
+                    timeLimit,
+                    ConfigValidation.requireString(hardNode, fileName, "ability-name-key"),
+                    castSeconds);
+            return new BossConfig.EnrageSettings(soft, hard);
+        }
+
+        private List<BossConfig.PhaseConfig> readPhases(
+                ConfigurationNode root, String fileName, Map<String, BossConfig.AbilitySettings> abilities) {
+            List<? extends ConfigurationNode> phaseNodes = ConfigValidation.requireList(root, fileName, "phases");
+            if (phaseNodes.isEmpty()) {
+                throw new ConfigException(fileName, "phases", "Boss must define at least one phase");
+            }
+            List<BossConfig.PhaseConfig> phases = new ArrayList<>(phaseNodes.size());
+            Set<String> seenIds = new HashSet<>();
+            for (ConfigurationNode phaseNode : phaseNodes) {
+                if (!phaseNode.isMap()) {
+                    throw new ConfigException(
+                            fileName, ConfigValidation.fullPath(phaseNode), "Phase entry must be a map");
+                }
+                String id = ConfigValidation.requireString(phaseNode, fileName, "id");
+                if (!seenIds.add(id)) {
+                    throw new ConfigException(
+                            fileName, ConfigValidation.fullPath(phaseNode.node("id")), "Duplicate phase id: " + id);
+                }
+                String nameKey = ConfigValidation.requireString(phaseNode, fileName, "name-key");
+                double hpMax = ConfigValidation.requireUnitRatio(
+                        ConfigValidation.requireDouble(phaseNode, fileName, "hp-threshold-max"),
+                        fileName, ConfigValidation.fullPath(phaseNode.node("hp-threshold-max")));
+                double hpMin = ConfigValidation.requireUnitRatio(
+                        ConfigValidation.requireDouble(phaseNode, fileName, "hp-threshold-min"),
+                        fileName, ConfigValidation.fullPath(phaseNode.node("hp-threshold-min")));
+                if (hpMin > hpMax) {
+                    throw new ConfigException(
+                            fileName,
+                            ConfigValidation.fullPath(phaseNode.node("hp-threshold-min")),
+                            "hp-threshold-min (" + hpMin + ") must be <= hp-threshold-max (" + hpMax + ")");
+                }
+                double timelineSpeed = ConfigValidation.requirePositive(
+                        ConfigValidation.requireDouble(phaseNode, fileName, "timeline-speed"),
+                        fileName, ConfigValidation.fullPath(phaseNode.node("timeline-speed")));
+                boolean softEnrage = ConfigValidation.requireBoolean(phaseNode, fileName, "soft-enrage");
+
+                List<? extends ConfigurationNode> stepNodes =
+                        ConfigValidation.requireList(phaseNode, fileName, "timeline");
+                if (stepNodes.isEmpty()) {
+                    throw new ConfigException(
+                            fileName,
+                            ConfigValidation.fullPath(phaseNode.node("timeline")),
+                            "Phase timeline cannot be empty");
+                }
+                List<BossConfig.TimelineStep> timeline = new ArrayList<>(stepNodes.size());
+                for (ConfigurationNode stepNode : stepNodes) {
+                    if (!stepNode.isMap()) {
+                        throw new ConfigException(
+                                fileName, ConfigValidation.fullPath(stepNode), "Timeline step must be a map");
                     }
+                    double delay = ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireDouble(stepNode, fileName, "delay-seconds"),
+                            fileName, ConfigValidation.fullPath(stepNode.node("delay-seconds")));
+                    String action = ConfigValidation.requireString(stepNode, fileName, "action");
+                    ConfigurationNode abilityNode = stepNode.node("ability");
+                    String ability = null;
+                    if (!abilityNode.virtual()) {
+                        ability = ConfigValidation.requireString(abilityNode, fileName);
+                        if (!abilities.containsKey(ability)) {
+                            throw new ConfigException(
+                                    fileName,
+                                    ConfigValidation.fullPath(abilityNode),
+                                    "Unknown ability referenced in timeline: " + ability);
+                        }
+                    }
+                    timeline.add(new BossConfig.TimelineStep(delay, action, ability));
                 }
+                phases.add(new BossConfig.PhaseConfig(
+                        id, nameKey, hpMax, hpMin, timelineSpeed, softEnrage, List.copyOf(timeline)));
             }
-            result.put(id, new BossConfig.AbilitySettings(id, nameKey, params));
+            return phases;
         }
-        if (result.isEmpty()) {
-            throw new ConfigException(file, "abilities", "At least one ability must be configured");
+
+        @Override
+        public void serialize(Type type, @Nullable BossConfig obj, ConfigurationNode node)
+                throws SerializationException {
+            throw new SerializationException(node, type, "BossConfig serialization is not supported");
         }
-        return Collections.unmodifiableMap(result);
     }
 
-    private static List<BossConfig.PhaseConfig> parsePhases(
-            YamlConfiguration root, Map<String, BossConfig.AbilitySettings> abilities, String file) {
-        List<Map<?, ?>> rawPhases = requireMapList(root, "phases", file);
-        List<BossConfig.PhaseConfig> phases = new ArrayList<>(rawPhases.size());
+    private static final class RewardsConfigSerializer implements TypeSerializer<RewardsConfig> {
 
-        for (int i = 0; i < rawPhases.size(); i++) {
-            Map<?, ?> raw = rawPhases.get(i);
-            String pPath = "phases[" + i + "]";
-            String id = mapString(raw, "id", pPath, file);
-            String nameKey = mapString(raw, "name-key", pPath, file);
-            double maxHp = requireUnitRatio(mapDouble(raw, "hp-threshold-max", pPath, file), pPath + ".hp-threshold-max", file);
-            double minHp = requireUnitRatio(mapDouble(raw, "hp-threshold-min", pPath, file), pPath + ".hp-threshold-min", file);
-            if (maxHp <= minHp) {
-                throw new ConfigException(file, pPath, "hp-threshold-max must be > hp-threshold-min");
-            }
-            double speed = requirePositive(mapDouble(raw, "timeline-speed", pPath, file), pPath + ".timeline-speed", file);
-            boolean softEnrage = raw.get("soft-enrage") instanceof Boolean b && b;
+        @Override
+        public RewardsConfig deserialize(Type type, ConfigurationNode root) {
+            String fileName = activeFileName(ConfigManager.REWARDS_FILE);
+            Map<String, RewardsConfig.CurrencyDefinition> currencies = readCurrencies(root, fileName);
+            Map<String, RewardsConfig.CustomGearDefinition> customGear = readCustomGear(root, fileName);
+            Map<String, RewardsConfig.CustomEnchantDefinition> customEnchants = readCustomEnchants(root, fileName);
+            Map<BossConfig.Difficulty, RewardsConfig.DifficultyClearReward> clearRewards =
+                    readClearRewards(root, fileName, currencies);
+            RewardsConfig.ShopSettings shop = readShop(root, fileName, currencies, customGear, customEnchants);
+            return new RewardsConfig(
+                    Collections.unmodifiableMap(currencies),
+                    Collections.unmodifiableMap(clearRewards),
+                    Collections.unmodifiableMap(customGear),
+                    Collections.unmodifiableMap(customEnchants),
+                    shop);
+        }
 
-            Object rawTimelineObj = raw.get("timeline");
-            if (!(rawTimelineObj instanceof List<?> rawTimeline) || rawTimeline.isEmpty()) {
-                throw new ConfigException(file, pPath + ".timeline", "Phase timeline must be a non-empty list");
+        private Map<String, RewardsConfig.CurrencyDefinition> readCurrencies(
+                ConfigurationNode root, String fileName) {
+            ConfigurationNode node = ConfigValidation.requireNode(root, fileName, "currencies");
+            Map<String, RewardsConfig.CurrencyDefinition> result = new LinkedHashMap<>();
+            for (Map.Entry<Object, ? extends ConfigurationNode> entry : node.childrenMap().entrySet()) {
+                String id = String.valueOf(entry.getKey());
+                ConfigurationNode child = entry.getValue();
+                result.put(id, new RewardsConfig.CurrencyDefinition(
+                        id,
+                        ConfigValidation.requireString(child, fileName, "name-key"),
+                        ConfigValidation.requireString(child, fileName, "icon"),
+                        ConfigValidation.requirePositive(
+                                ConfigValidation.requireInt(child, fileName, "max-balance"),
+                                fileName, ConfigValidation.fullPath(child.node("max-balance")))));
             }
-            List<BossConfig.TimelineStep> steps = new ArrayList<>(rawTimeline.size());
-            for (int j = 0; j < rawTimeline.size(); j++) {
-                if (!(rawTimeline.get(j) instanceof Map<?, ?> stepMap)) {
-                    throw new ConfigException(file, pPath + ".timeline[" + j + "]", "Timeline entry must be a map");
+            if (result.isEmpty()) {
+                throw new ConfigException(fileName, "currencies", "At least one currency must be defined");
+            }
+            return result;
+        }
+
+        private Map<String, RewardsConfig.CustomGearDefinition> readCustomGear(
+                ConfigurationNode root, String fileName) {
+            ConfigurationNode node = ConfigValidation.requireNode(root, fileName, "custom-gear");
+            Map<String, RewardsConfig.CustomGearDefinition> result = new LinkedHashMap<>();
+            for (Map.Entry<Object, ? extends ConfigurationNode> entry : node.childrenMap().entrySet()) {
+                String id = String.valueOf(entry.getKey());
+                ConfigurationNode child = entry.getValue();
+                ConfigurationNode statsNode = ConfigValidation.requireNode(child, fileName, "stats");
+                Map<String, Double> stats = new LinkedHashMap<>();
+                for (Map.Entry<Object, ? extends ConfigurationNode> statEntry : statsNode.childrenMap().entrySet()) {
+                    String statKey = String.valueOf(statEntry.getKey());
+                    stats.put(statKey, ConfigValidation.requireDouble(statEntry.getValue(), fileName));
                 }
-                String sPath = pPath + ".timeline[" + j + "]";
-                double delay = requireNonNegative(mapDouble(stepMap, "delay-seconds", sPath, file), sPath + ".delay-seconds", file);
-                String action = mapString(stepMap, "action", sPath, file);
-                Object abObj = stepMap.get("ability");
-                String ability = abObj != null ? abObj.toString() : null;
-                if (ability != null && !ability.isBlank() && !abilities.containsKey(ability)) {
-                    throw new ConfigException(file, sPath + ".ability",
-                            "Unknown ability reference '" + ability + "'");
+                result.put(id, new RewardsConfig.CustomGearDefinition(
+                        id,
+                        ConfigValidation.requireString(child, fileName, "name-key"),
+                        ConfigValidation.requireString(child, fileName, "lore-key"),
+                        ConfigValidation.requireString(child, fileName, "material"),
+                        ConfigValidation.requireNonNegative(
+                                ConfigValidation.requireInt(child, fileName, "custom-model-data"),
+                                fileName, ConfigValidation.fullPath(child.node("custom-model-data"))),
+                        Collections.unmodifiableMap(stats)));
+            }
+            return result;
+        }
+
+        private Map<String, RewardsConfig.CustomEnchantDefinition> readCustomEnchants(
+                ConfigurationNode root, String fileName) {
+            ConfigurationNode node = ConfigValidation.requireNode(root, fileName, "custom-enchants");
+            Map<String, RewardsConfig.CustomEnchantDefinition> result = new LinkedHashMap<>();
+            for (Map.Entry<Object, ? extends ConfigurationNode> entry : node.childrenMap().entrySet()) {
+                String id = String.valueOf(entry.getKey());
+                ConfigurationNode child = entry.getValue();
+                Map<String, Double> stats = new LinkedHashMap<>();
+                for (Map.Entry<Object, ? extends ConfigurationNode> statEntry : child.childrenMap().entrySet()) {
+                    String key = String.valueOf(statEntry.getKey());
+                    if ("name-key".equals(key) || "lore-key".equals(key) || "max-level".equals(key)) {
+                        continue;
+                    }
+                    stats.put(key, ConfigValidation.requireDouble(statEntry.getValue(), fileName));
                 }
-                steps.add(new BossConfig.TimelineStep(delay, action, ability));
+                result.put(id, new RewardsConfig.CustomEnchantDefinition(
+                        id,
+                        ConfigValidation.requireString(child, fileName, "name-key"),
+                        ConfigValidation.requireString(child, fileName, "lore-key"),
+                        ConfigValidation.requirePositive(
+                                ConfigValidation.requireInt(child, fileName, "max-level"),
+                                fileName, ConfigValidation.fullPath(child.node("max-level"))),
+                        Collections.unmodifiableMap(stats)));
             }
-
-            phases.add(new BossConfig.PhaseConfig(id, nameKey, maxHp, minHp, speed, softEnrage, List.copyOf(steps)));
+            return result;
         }
-        return List.copyOf(phases);
-    }
 
-    private static Map<String, RewardsConfig.CurrencyDefinition> parseCurrencies(ConfigurationSection sec, String file) {
-        Map<String, RewardsConfig.CurrencyDefinition> map = new LinkedHashMap<>();
-        for (String id : sec.getKeys(false)) {
-            ConfigurationSection cSec = requireSection(sec, id, file);
-            map.put(id, new RewardsConfig.CurrencyDefinition(
-                    id,
-                    requireString(cSec, "name-key", file),
-                    requireString(cSec, "icon", file),
-                    requirePositive(requireInt(cSec, "max-balance", file), "currencies." + id + ".max-balance", file)
-            ));
-        }
-        if (map.isEmpty()) {
-            throw new ConfigException(file, "currencies", "At least one currency must be defined");
-        }
-        return Collections.unmodifiableMap(map);
-    }
-
-    private static Map<BossConfig.Difficulty, RewardsConfig.DifficultyClearReward> parseClearRewards(
-            ConfigurationSection sec, Map<String, RewardsConfig.CurrencyDefinition> currencies, String file) {
-        Map<BossConfig.Difficulty, RewardsConfig.DifficultyClearReward> map = new EnumMap<>(BossConfig.Difficulty.class);
-        for (BossConfig.Difficulty diff : BossConfig.Difficulty.values()) {
-            String key = diff.name().toLowerCase(Locale.ROOT);
-            ConfigurationSection dSec = requireSection(sec, key, file);
-            Map<String, Integer> points = parseCurrencyAmounts(requireSection(dSec, "points", file), currencies, file);
-            Map<String, Integer> firstBonus = parseCurrencyAmounts(requireSection(dSec, "first-clear-bonus", file), currencies, file);
-            List<RewardsConfig.DropEntry> drops = parseDrops(dSec, "drops", file);
-            map.put(diff, new RewardsConfig.DifficultyClearReward(points, firstBonus, drops));
-        }
-        return Collections.unmodifiableMap(map);
-    }
-
-    private static Map<String, Integer> parseCurrencyAmounts(
-            ConfigurationSection sec, Map<String, RewardsConfig.CurrencyDefinition> currencies, String file) {
-        Map<String, Integer> result = new LinkedHashMap<>();
-        for (String currencyId : sec.getKeys(false)) {
-            if (!currencies.containsKey(currencyId)) {
-                throw new ConfigException(file, fullPath(sec, currencyId), "Unknown currency '" + currencyId + "'");
-            }
-            int amount = requireNonNegative(requireInt(sec, currencyId, file), fullPath(sec, currencyId), file);
-            result.put(currencyId, amount);
-        }
-        return Collections.unmodifiableMap(result);
-    }
-
-    private static List<RewardsConfig.DropEntry> parseDrops(ConfigurationSection sec, String key, String file) {
-        List<Map<?, ?>> rawList = sec.getMapList(key);
-        List<RewardsConfig.DropEntry> drops = new ArrayList<>(rawList.size());
-        String basePath = fullPath(sec, key);
-        for (int i = 0; i < rawList.size(); i++) {
-            Map<?, ?> raw = rawList.get(i);
-            String dPath = basePath + "[" + i + "]";
-            String type = mapString(raw, "type", dPath, file);
-            String id = mapString(raw, "id", dPath, file);
-            int level = raw.get("level") instanceof Number n ? n.intValue() : 1;
-            double chance = requireUnitRatio(mapDouble(raw, "chance", dPath, file), dPath + ".chance", file);
-            int minAmount = requirePositive(mapInt(raw, "min-amount", dPath, file), dPath + ".min-amount", file);
-            int maxAmount = requirePositive(mapInt(raw, "max-amount", dPath, file), dPath + ".max-amount", file);
-            if (minAmount > maxAmount) {
-                throw new ConfigException(file, dPath, "min-amount must be <= max-amount");
-            }
-            boolean perPlayer = !(raw.get("per-player") instanceof Boolean b) || b;
-            drops.add(new RewardsConfig.DropEntry(type, id, level, chance, minAmount, maxAmount, perPlayer));
-        }
-        return List.copyOf(drops);
-    }
-
-    private static Map<String, RewardsConfig.CustomGearDefinition> parseCustomGear(ConfigurationSection sec, String file) {
-        Map<String, RewardsConfig.CustomGearDefinition> map = new LinkedHashMap<>();
-        for (String id : sec.getKeys(false)) {
-            ConfigurationSection gSec = requireSection(sec, id, file);
-            Map<String, Double> stats = parseDoubleMap(requireSection(gSec, "stats", file), file);
-            map.put(id, new RewardsConfig.CustomGearDefinition(
-                    id,
-                    requireString(gSec, "name-key", file),
-                    requireString(gSec, "lore-key", file),
-                    requireString(gSec, "material", file),
-                    requireNonNegative(requireInt(gSec, "custom-model-data", file), "custom-gear." + id + ".custom-model-data", file),
-                    stats
-            ));
-        }
-        return Collections.unmodifiableMap(map);
-    }
-
-    private static Map<String, RewardsConfig.CustomEnchantDefinition> parseCustomEnchants(ConfigurationSection sec, String file) {
-        Map<String, RewardsConfig.CustomEnchantDefinition> map = new LinkedHashMap<>();
-        for (String id : sec.getKeys(false)) {
-            ConfigurationSection eSec = requireSection(sec, id, file);
-            Map<String, Double> stats = new LinkedHashMap<>();
-            for (String key : eSec.getKeys(false)) {
-                if (!"name-key".equals(key) && !"lore-key".equals(key) && !"max-level".equals(key)) {
-                    stats.put(key, requireDouble(eSec, key, file));
+        private Map<BossConfig.Difficulty, RewardsConfig.DifficultyClearReward> readClearRewards(
+                ConfigurationNode root,
+                String fileName,
+                Map<String, RewardsConfig.CurrencyDefinition> currencies) {
+            ConfigurationNode clearNode = ConfigValidation.requireNode(root, fileName, "clear-rewards");
+            Map<BossConfig.Difficulty, RewardsConfig.DifficultyClearReward> result =
+                    new EnumMap<>(BossConfig.Difficulty.class);
+            for (BossConfig.Difficulty diff : BossConfig.Difficulty.values()) {
+                String key = diff.name().toLowerCase(java.util.Locale.ROOT);
+                ConfigurationNode diffNode = ConfigValidation.requireNode(clearNode, fileName, key);
+                Map<String, Integer> points = readCurrencyMap(
+                        ConfigValidation.requireNode(diffNode, fileName, "points"), fileName, currencies);
+                Map<String, Integer> firstClearBonus = readCurrencyMap(
+                        ConfigValidation.requireNode(diffNode, fileName, "first-clear-bonus"), fileName, currencies);
+                List<? extends ConfigurationNode> dropNodes =
+                        ConfigValidation.requireList(diffNode, fileName, "drops");
+                List<RewardsConfig.DropEntry> drops = new ArrayList<>(dropNodes.size());
+                for (ConfigurationNode dropNode : dropNodes) {
+                    if (!dropNode.isMap()) {
+                        throw new ConfigException(
+                                fileName, ConfigValidation.fullPath(dropNode), "Drop entry must be a map");
+                    }
+                    int level = dropNode.node("level").virtual()
+                            ? 1
+                            : ConfigValidation.requirePositive(
+                                    ConfigValidation.requireInt(dropNode, fileName, "level"),
+                                    fileName, ConfigValidation.fullPath(dropNode.node("level")));
+                    double chance = ConfigValidation.requireUnitRatio(
+                            ConfigValidation.requireDouble(dropNode, fileName, "chance"),
+                            fileName, ConfigValidation.fullPath(dropNode.node("chance")));
+                    int minAmount = ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(dropNode, fileName, "min-amount"),
+                            fileName, ConfigValidation.fullPath(dropNode.node("min-amount")));
+                    int maxAmount = ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(dropNode, fileName, "max-amount"),
+                            fileName, ConfigValidation.fullPath(dropNode.node("max-amount")));
+                    if (maxAmount < minAmount) {
+                        throw new ConfigException(
+                                fileName,
+                                ConfigValidation.fullPath(dropNode.node("max-amount")),
+                                "max-amount must be >= min-amount");
+                    }
+                    boolean perPlayer = dropNode.node("per-player").virtual()
+                            || ConfigValidation.requireBoolean(dropNode, fileName, "per-player");
+                    drops.add(new RewardsConfig.DropEntry(
+                            ConfigValidation.requireString(dropNode, fileName, "type"),
+                            ConfigValidation.requireString(dropNode, fileName, "id"),
+                            level,
+                            chance,
+                            minAmount,
+                            maxAmount,
+                            perPlayer));
                 }
+                result.put(diff, new RewardsConfig.DifficultyClearReward(
+                        points, firstClearBonus, List.copyOf(drops)));
             }
-            map.put(id, new RewardsConfig.CustomEnchantDefinition(
-                    id,
-                    requireString(eSec, "name-key", file),
-                    requireString(eSec, "lore-key", file),
-                    requirePositive(requireInt(eSec, "max-level", file), "custom-enchants." + id + ".max-level", file),
-                    Collections.unmodifiableMap(stats)
-            ));
-        }
-        return Collections.unmodifiableMap(map);
-    }
-
-    private static Map<String, Double> parseDoubleMap(ConfigurationSection sec, String file) {
-        Map<String, Double> result = new LinkedHashMap<>();
-        for (String key : sec.getKeys(false)) {
-            result.put(key, requireDouble(sec, key, file));
-        }
-        return Collections.unmodifiableMap(result);
-    }
-
-    private static RewardsConfig.ShopSettings parseShop(
-            ConfigurationSection sec,
-            Map<String, RewardsConfig.CurrencyDefinition> currencies,
-            Map<String, RewardsConfig.CustomGearDefinition> gear,
-            Map<String, RewardsConfig.CustomEnchantDefinition> enchants,
-            String file) {
-        String titleKey = requireString(sec, "title-key", file);
-        int size = requireInt(sec, "size", file);
-        if (size < 9 || size > 54 || size % 9 != 0) {
-            throw new ConfigException(file, "shop.size", "Shop GUI size must be a multiple of 9 between 9 and 54");
+            return result;
         }
 
-        List<Map<?, ?>> rawItems = requireMapList(sec, "items", file);
-        List<RewardsConfig.ShopItemDefinition> items = new ArrayList<>(rawItems.size());
-        for (int i = 0; i < rawItems.size(); i++) {
-            Map<?, ?> raw = rawItems.get(i);
-            String iPath = "shop.items[" + i + "]";
-            String id = mapString(raw, "id", iPath, file);
-            int slot = mapInt(raw, "slot", iPath, file);
-            if (slot < 0 || slot >= size) {
-                throw new ConfigException(file, iPath + ".slot", "Slot " + slot + " is outside [0, " + (size - 1) + "]");
-            }
-            String type = mapString(raw, "type", iPath, file);
-            String target = mapString(raw, "target", iPath, file);
-            validateShopTarget(type, target, gear, enchants, iPath, file);
-            int level = raw.get("level") instanceof Number n ? n.intValue() : 1;
-            int amount = requirePositive(mapInt(raw, "amount", iPath, file), iPath + ".amount", file);
-            boolean requiresHard = raw.get("requires-hard-clear") instanceof Boolean b && b;
-
-            Object rawCostsObj = raw.get("costs");
-            if (!(rawCostsObj instanceof Map<?, ?> rawCosts) || rawCosts.isEmpty()) {
-                throw new ConfigException(file, iPath + ".costs", "Shop item must specify at least one currency cost");
-            }
-            Map<String, Integer> costs = new LinkedHashMap<>();
-            for (Map.Entry<?, ?> entry : rawCosts.entrySet()) {
+        private Map<String, Integer> readCurrencyMap(
+                ConfigurationNode node,
+                String fileName,
+                Map<String, RewardsConfig.CurrencyDefinition> currencies) {
+            Map<String, Integer> result = new LinkedHashMap<>();
+            for (Map.Entry<Object, ? extends ConfigurationNode> entry : node.childrenMap().entrySet()) {
                 String currencyId = String.valueOf(entry.getKey());
                 if (!currencies.containsKey(currencyId)) {
-                    throw new ConfigException(file, iPath + ".costs." + currencyId, "Unknown currency '" + currencyId + "'");
+                    throw new ConfigException(
+                            fileName,
+                            ConfigValidation.fullPath(entry.getValue()),
+                            "Unknown currency id: " + currencyId);
                 }
-                if (!(entry.getValue() instanceof Number num)) {
-                    throw new ConfigException(file, iPath + ".costs." + currencyId, "Cost must be an integer");
-                }
-                int costVal = requirePositive(num.intValue(), iPath + ".costs." + currencyId, file);
-                costs.put(currencyId, costVal);
+                int amount = ConfigValidation.requireNonNegative(
+                        ConfigValidation.requireInt(entry.getValue(), fileName),
+                        fileName, ConfigValidation.fullPath(entry.getValue()));
+                result.put(currencyId, amount);
             }
-
-            items.add(new RewardsConfig.ShopItemDefinition(
-                    id, slot, type, target, level, amount, requiresHard, Collections.unmodifiableMap(costs)));
+            return Collections.unmodifiableMap(result);
         }
 
-        return new RewardsConfig.ShopSettings(titleKey, size, List.copyOf(items));
-    }
+        private RewardsConfig.ShopSettings readShop(
+                ConfigurationNode root,
+                String fileName,
+                Map<String, RewardsConfig.CurrencyDefinition> currencies,
+                Map<String, RewardsConfig.CustomGearDefinition> customGear,
+                Map<String, RewardsConfig.CustomEnchantDefinition> customEnchants) {
+            ConfigurationNode shopNode = ConfigValidation.requireNode(root, fileName, "shop");
+            String titleKey = ConfigValidation.requireString(shopNode, fileName, "title-key");
+            int size = ConfigValidation.requirePositive(
+                    ConfigValidation.requireInt(shopNode, fileName, "size"), fileName, "shop.size");
+            if (size % 9 != 0 || size > 54) {
+                throw new ConfigException(fileName, "shop.size", "Shop size must be a positive multiple of 9 up to 54");
+            }
+            List<? extends ConfigurationNode> itemNodes = ConfigValidation.requireList(shopNode, fileName, "items");
+            List<RewardsConfig.ShopItemDefinition> items = new ArrayList<>(itemNodes.size());
+            Set<Integer> usedSlots = new HashSet<>();
+            Set<String> usedIds = new HashSet<>();
+            for (ConfigurationNode itemNode : itemNodes) {
+                if (!itemNode.isMap()) {
+                    throw new ConfigException(
+                            fileName, ConfigValidation.fullPath(itemNode), "Shop item must be a map");
+                }
+                String id = ConfigValidation.requireString(itemNode, fileName, "id");
+                if (!usedIds.add(id)) {
+                    throw new ConfigException(
+                            fileName, ConfigValidation.fullPath(itemNode.node("id")), "Duplicate shop item id: " + id);
+                }
+                int slot = ConfigValidation.requireInt(itemNode, fileName, "slot");
+                if (slot < 0 || slot >= size) {
+                    throw new ConfigException(
+                            fileName,
+                            ConfigValidation.fullPath(itemNode.node("slot")),
+                            "Shop item slot " + slot + " is out of range [0, " + (size - 1) + "]");
+                }
+                if (!usedSlots.add(slot)) {
+                    throw new ConfigException(
+                            fileName, ConfigValidation.fullPath(itemNode.node("slot")), "Duplicate shop slot: " + slot);
+                }
+                String itemType = ConfigValidation.requireString(itemNode, fileName, "type");
+                String target = ConfigValidation.requireString(itemNode, fileName, "target");
+                int level = itemNode.node("level").virtual()
+                        ? 1
+                        : ConfigValidation.requirePositive(
+                                ConfigValidation.requireInt(itemNode, fileName, "level"),
+                                fileName, ConfigValidation.fullPath(itemNode.node("level")));
+                int amount = ConfigValidation.requirePositive(
+                        ConfigValidation.requireInt(itemNode, fileName, "amount"),
+                        fileName, ConfigValidation.fullPath(itemNode.node("amount")));
+                boolean requiresHard = !itemNode.node("requires-hard-clear").virtual()
+                        && ConfigValidation.requireBoolean(itemNode, fileName, "requires-hard-clear");
 
-    private static void validateShopTarget(
-            String type,
-            String target,
-            Map<String, RewardsConfig.CustomGearDefinition> gear,
-            Map<String, RewardsConfig.CustomEnchantDefinition> enchants,
-            String path,
-            String file) {
-        switch (type) {
-            case "CUSTOM_GEAR" -> {
-                if (!gear.containsKey(target)) {
-                    throw new ConfigException(file, path + ".target", "Unknown custom gear '" + target + "'");
+                ConfigurationNode costsNode = ConfigValidation.requireNode(itemNode, fileName, "costs");
+                Map<String, Integer> costs = readCurrencyMap(costsNode, fileName, currencies);
+                if (costs.isEmpty()) {
+                    throw new ConfigException(
+                            fileName,
+                            ConfigValidation.fullPath(costsNode),
+                            "Shop item must define at least one cost");
+                }
+                validateShopTarget(
+                        itemType, target, level, customGear, customEnchants,
+                        fileName, ConfigValidation.fullPath(itemNode.node("target")));
+
+                items.add(new RewardsConfig.ShopItemDefinition(
+                        id, slot, itemType, target, level, amount, requiresHard, costs));
+            }
+            return new RewardsConfig.ShopSettings(titleKey, size, List.copyOf(items));
+        }
+
+        private void validateShopTarget(
+                String itemType,
+                String target,
+                int level,
+                Map<String, RewardsConfig.CustomGearDefinition> customGear,
+                Map<String, RewardsConfig.CustomEnchantDefinition> customEnchants,
+                String fileName,
+                String path) {
+            switch (itemType) {
+                case "CUSTOM_GEAR" -> {
+                    if (!customGear.containsKey(target)) {
+                        throw new ConfigException(fileName, path, "Unknown custom-gear target: " + target);
+                    }
+                }
+                case "CUSTOM_ENCHANT_BOOK" -> {
+                    RewardsConfig.CustomEnchantDefinition enchant = customEnchants.get(target);
+                    if (enchant == null) {
+                        throw new ConfigException(fileName, path, "Unknown custom-enchant target: " + target);
+                    }
+                    if (level > enchant.maxLevel()) {
+                        throw new ConfigException(
+                                fileName, path, "Shop enchant level " + level + " exceeds max-level " + enchant.maxLevel());
+                    }
+                }
+                default -> {
+                    // Allow future/vanilla item types such as VANILLA_ITEM without rejecting custom-gear check.
                 }
             }
-            case "CUSTOM_ENCHANT_BOOK" -> {
-                if (!enchants.containsKey(target)) {
-                    throw new ConfigException(file, path + ".target", "Unknown custom enchant '" + target + "'");
-                }
-            }
-            case "VANILLA_ITEM" -> {
-                // Validated at runtime against Bukkit Material registry
-            }
-            default -> throw new ConfigException(file, path + ".type", "Unsupported shop item type '" + type + "'");
+        }
+
+        @Override
+        public void serialize(Type type, @Nullable RewardsConfig obj, ConfigurationNode node)
+                throws SerializationException {
+            throw new SerializationException(node, type, "RewardsConfig serialization is not supported");
         }
     }
 }

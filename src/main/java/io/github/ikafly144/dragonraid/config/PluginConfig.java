@@ -1,54 +1,61 @@
 package io.github.ikafly144.dragonraid.config;
 
 import java.util.List;
+import org.spongepowered.configurate.objectmapping.ConfigSerializable;
+import org.spongepowered.configurate.objectmapping.meta.Setting;
 
 /**
  * Strongly-typed immutable representation of {@code config.yml}.
  */
+@ConfigSerializable
 public record PluginConfig(
-        LanguageSettings language,
-        DatabaseSettings database,
-        WorldSettings world,
-        RegionConfig regions,
-        ScalingSettings scaling,
-        EncounterSettings encounter,
-        ReviveSettings revive,
-        ProtectionSettings protection,
-        VisualSettings visuals
+        @Setting("language") LanguageSettings language,
+        @Setting("database") DatabaseSettings database,
+        @Setting("world") WorldSettings world,
+        @Setting("regions") RegionConfig regions,
+        @Setting("scaling") ScalingSettings scaling,
+        @Setting("encounter") EncounterSettings encounter,
+        @Setting("revive") ReviveSettings revive,
+        @Setting("protection") ProtectionSettings protection,
+        @Setting("visuals") VisualSettings visuals
 ) {
 
+    @ConfigSerializable
     public record LanguageSettings(
-            String defaultLocale,
-            boolean perPlayerLocale,
-            List<String> supportedLocales
+            @Setting("default") String defaultLocale,
+            @Setting("per-player-locale") boolean perPlayerLocale,
+            @Setting("supported") List<String> supportedLocales
     ) {
     }
 
+    @ConfigSerializable
     public record DatabaseSettings(
-            String type,
-            String file,
-            int poolSize
+            @Setting("type") String type,
+            @Setting("file") String file,
+            @Setting("pool-size") int poolSize
     ) {
     }
 
+    @ConfigSerializable
     public record WorldSettings(
-            String endWorldName,
-            boolean replaceFirstDragon,
-            boolean preserveVanillaProgression
+            @Setting("end-world-name") String endWorldName,
+            @Setting("replace-first-dragon") boolean replaceFirstDragon,
+            @Setting("preserve-vanilla-progression") boolean preserveVanillaProgression
     ) {
     }
 
+    @ConfigSerializable
     public record GimmickScaling(
-            int towerBase,
-            double towerPerPlayers,
-            int towerMin,
-            int towerMax,
-            double spreadRatio,
-            int spreadMin,
-            int spreadMax,
-            int crystalBase,
-            double crystalPerAdditionalPlayer,
-            int crystalMax
+            @Setting("tower-base") int towerBase,
+            @Setting("tower-per-players") double towerPerPlayers,
+            @Setting("tower-min") int towerMin,
+            @Setting("tower-max") int towerMax,
+            @Setting("spread-ratio") double spreadRatio,
+            @Setting("spread-min") int spreadMin,
+            @Setting("spread-max") int spreadMax,
+            @Setting("crystal-base") int crystalBase,
+            @Setting("crystal-per-additional-player") double crystalPerAdditionalPlayer,
+            @Setting("crystal-max") int crystalMax
     ) {
         /** Computes dynamic Meteor Tower count for party size {@code playerCount}. */
         public int towerCount(int playerCount) {
@@ -76,22 +83,24 @@ public record PluginConfig(
         }
     }
 
+    @ConfigSerializable
     public record SoloFallbackSettings(
-            boolean enabled,
-            double stackDamageMultiplier,
-            double simultaneousCrystalGraceSeconds,
-            boolean allowVanillaTotem
+            @Setting("enabled") boolean enabled,
+            @Setting("stack-damage-multiplier") double stackDamageMultiplier,
+            @Setting("simultaneous-crystal-grace-seconds") double simultaneousCrystalGraceSeconds,
+            @Setting("allow-vanilla-totem") boolean allowVanillaTotem
     ) {
     }
 
+    @ConfigSerializable
     public record ScalingSettings(
-            int minPlayers,
-            int maxPlayers,
-            boolean enforceMaxPlayers,
-            double hpAlpha,
-            double objectHpAlpha,
-            GimmickScaling gimmick,
-            SoloFallbackSettings soloFallback
+            @Setting("min-players") int minPlayers,
+            @Setting("max-players") int maxPlayers,
+            @Setting("enforce-max-players") boolean enforceMaxPlayers,
+            @Setting("hp-alpha") double hpAlpha,
+            @Setting("object-hp-alpha") double objectHpAlpha,
+            @Setting("gimmick") GimmickScaling gimmick,
+            @Setting("solo-fallback") SoloFallbackSettings soloFallback
     ) {
         /** Computes scaled boss HP: {@code baseHp * (1 + hpAlpha * (N - 1))}. */
         public double scaleBossHp(double baseHp, int playerCount) {
@@ -106,61 +115,70 @@ public record PluginConfig(
         }
     }
 
-    public record ItemCost(String material, int amount) {
+    @ConfigSerializable
+    public record ItemCost(
+            @Setting("material") String material,
+            @Setting("amount") int amount
+    ) {
     }
 
+    @ConfigSerializable
     public record AltarSettings(
-            RegionConfig.Point3D location,
-            double interactRadius,
-            boolean unlockHardAfterNormalClear,
+            @Setting("location") RegionConfig.Point3D location,
+            @Setting("interact-radius") double interactRadius,
+            @Setting("unlock-hard-after-normal-clear") boolean unlockHardAfterNormalClear,
             List<ItemCost> normalCosts,
             List<ItemCost> hardCosts
     ) {
     }
 
+    @ConfigSerializable
     public record EncounterSettings(
-            int pullCountdownSeconds,
-            boolean autoStartOnArenaEnter,
-            boolean altarGuiOnly,
-            boolean lockLateJoinersToSafeZone,
-            AltarSettings altar
+            @Setting("pull-countdown-seconds") int pullCountdownSeconds,
+            @Setting("auto-start-on-arena-enter") boolean autoStartOnArenaEnter,
+            @Setting("altar-gui-only") boolean altarGuiOnly,
+            @Setting("lock-late-joiners-to-safe-zone") boolean lockLateJoinersToSafeZone,
+            @Setting("altar") AltarSettings altar
     ) {
     }
 
+    @ConfigSerializable
     public record ReviveSettings(
-            double channelSeconds,
-            double interactRadius,
-            boolean requireSneak,
-            boolean allowRightClickHold,
-            double invulnerabilitySeconds,
-            double healPercent,
-            double voidRescueYOffset,
-            int wipeDelaySeconds,
-            boolean wipeIfAllLeaveArena
+            @Setting("channel-seconds") double channelSeconds,
+            @Setting("interact-radius") double interactRadius,
+            @Setting("require-sneak") boolean requireSneak,
+            @Setting("allow-right-click-hold") boolean allowRightClickHold,
+            @Setting("invulnerability-seconds") double invulnerabilitySeconds,
+            @Setting("heal-percent") double healPercent,
+            @Setting("void-rescue-y-offset") double voidRescueYOffset,
+            @Setting("wipe-delay-seconds") int wipeDelaySeconds,
+            @Setting("wipe-if-all-leave-arena") boolean wipeIfAllLeaveArena
     ) {
     }
 
+    @ConfigSerializable
     public record ProtectionSettings(
-            boolean keepInventoryOnRaidDeath,
-            boolean keepExperienceOnRaidDeath,
-            boolean disableBedAndAnchorExplosions,
-            boolean protectOriginalArenaTerrain,
-            boolean allowTemporaryBlocks,
-            boolean allowWaterBuckets,
-            boolean allowEnderPearls,
-            boolean allowWindCharges,
-            int maxTemporaryBlocksPerPlayer,
-            int maxTemporaryBlocksTotal,
-            boolean rollbackTemporaryBlocksOnEnd
+            @Setting("keep-inventory-on-raid-death") boolean keepInventoryOnRaidDeath,
+            @Setting("keep-experience-on-raid-death") boolean keepExperienceOnRaidDeath,
+            @Setting("disable-bed-and-anchor-explosions") boolean disableBedAndAnchorExplosions,
+            @Setting("protect-original-arena-terrain") boolean protectOriginalArenaTerrain,
+            @Setting("allow-temporary-blocks") boolean allowTemporaryBlocks,
+            @Setting("allow-water-buckets") boolean allowWaterBuckets,
+            @Setting("allow-ender-pearls") boolean allowEnderPearls,
+            @Setting("allow-wind-charges") boolean allowWindCharges,
+            @Setting("max-temporary-blocks-per-player") int maxTemporaryBlocksPerPlayer,
+            @Setting("max-temporary-blocks-total") int maxTemporaryBlocksTotal,
+            @Setting("rollback-temporary-blocks-on-end") boolean rollbackTemporaryBlocksOnEnd
     ) {
     }
 
+    @ConfigSerializable
     public record VisualSettings(
-            boolean usePacketEvents,
-            int aoeUpdateIntervalTicks,
-            boolean soulMarkerGlow,
-            double tetherParticleStep,
-            double maxRenderDistance
+            @Setting("use-packet-events") boolean usePacketEvents,
+            @Setting("aoe-update-interval-ticks") int aoeUpdateIntervalTicks,
+            @Setting("soul-marker-glow") boolean soulMarkerGlow,
+            @Setting("tether-particle-step") double tetherParticleStep,
+            @Setting("max-render-distance") double maxRenderDistance
     ) {
     }
 }

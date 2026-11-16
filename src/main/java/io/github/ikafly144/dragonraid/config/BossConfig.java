@@ -3,19 +3,22 @@ package io.github.ikafly144.dragonraid.config;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.spongepowered.configurate.objectmapping.ConfigSerializable;
+import org.spongepowered.configurate.objectmapping.meta.Setting;
 
 /**
  * Strongly-typed immutable representation of {@code boss_normal.yml} and {@code boss_hard.yml}.
  */
+@ConfigSerializable
 public record BossConfig(
-        Difficulty difficulty,
-        String displayNameKey,
-        double baseHp,
-        double baseAttackDamage,
-        BossReviveSettings revive,
-        EnrageSettings enrage,
-        Map<String, AbilitySettings> abilities,
-        List<PhaseConfig> phases
+        @Setting("difficulty") Difficulty difficulty,
+        @Setting("display-name-key") String displayNameKey,
+        @Setting("base-hp") double baseHp,
+        @Setting("base-attack-damage") double baseAttackDamage,
+        @Setting("revive") BossReviveSettings revive,
+        @Setting("enrage") EnrageSettings enrage,
+        @Setting("abilities") Map<String, AbilitySettings> abilities,
+        @Setting("phases") List<PhaseConfig> phases
 ) {
 
     public enum Difficulty {
@@ -28,10 +31,11 @@ public record BossConfig(
         HALF_CEIL
     }
 
+    @ConfigSerializable
     public record BossReviveSettings(
-            ReviveFormula formula,
-            double multiplier,
-            int downedTimeoutSeconds
+            @Setting("formula") ReviveFormula formula,
+            @Setting("multiplier") double multiplier,
+            @Setting("downed-timeout-seconds") int downedTimeoutSeconds
     ) {
         /**
          * Computes maximum revives allowed for the encounter given {@code playerCount}.
@@ -49,25 +53,28 @@ public record BossConfig(
         }
     }
 
+    @ConfigSerializable
     public record SoftEnrageSettings(
-            boolean enabled,
-            String startPhase,
-            double voidCorruptionShrinkPerSecond,
-            double voidDamagePerSecond
+            @Setting("enabled") boolean enabled,
+            @Setting("start-phase") String startPhase,
+            @Setting("void-corruption-shrink-per-second") double voidCorruptionShrinkPerSecond,
+            @Setting("void-damage-per-second") double voidDamagePerSecond
     ) {
     }
 
+    @ConfigSerializable
     public record HardEnrageSettings(
-            boolean enabled,
-            int timeLimitSeconds,
-            String abilityNameKey,
-            double castSeconds
+            @Setting("enabled") boolean enabled,
+            @Setting("time-limit-seconds") int timeLimitSeconds,
+            @Setting("ability-name-key") String abilityNameKey,
+            @Setting("cast-seconds") double castSeconds
     ) {
     }
 
+    @ConfigSerializable
     public record EnrageSettings(
-            SoftEnrageSettings softEnrage,
-            HardEnrageSettings hardEnrage
+            @Setting("soft-enrage") SoftEnrageSettings softEnrage,
+            @Setting("hard-enrage") HardEnrageSettings hardEnrage
     ) {
     }
 
@@ -75,9 +82,10 @@ public record BossConfig(
      * Generic ability definition backed by immutable parameter map so each mechanic can expose
      * standard and mechanic-specific parameters uniformly.
      */
+    @ConfigSerializable
     public record AbilitySettings(
             String id,
-            String nameKey,
+            @Setting("name-key") String nameKey,
             Map<String, Object> parameters
     ) {
         public AbilitySettings {
@@ -112,21 +120,23 @@ public record BossConfig(
         }
     }
 
+    @ConfigSerializable
     public record TimelineStep(
-            double delaySeconds,
-            String action,
-            String ability
+            @Setting("delay-seconds") double delaySeconds,
+            @Setting("action") String action,
+            @Setting("ability") String ability
     ) {
     }
 
+    @ConfigSerializable
     public record PhaseConfig(
-            String id,
-            String nameKey,
-            double hpThresholdMax,
-            double hpThresholdMin,
-            double timelineSpeed,
-            boolean softEnrage,
-            List<TimelineStep> timeline
+            @Setting("id") String id,
+            @Setting("name-key") String nameKey,
+            @Setting("hp-threshold-max") double hpThresholdMax,
+            @Setting("hp-threshold-min") double hpThresholdMin,
+            @Setting("timeline-speed") double timelineSpeed,
+            @Setting("soft-enrage") boolean softEnrage,
+            @Setting("timeline") List<TimelineStep> timeline
     ) {
         public boolean matchesHpRatio(double hpRatio) {
             return hpRatio <= hpThresholdMax && hpRatio >= hpThresholdMin;

@@ -2,14 +2,14 @@ package io.github.ikafly144.dragonraid.config;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.function.Function;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.Plugin;
 
 /**
@@ -106,6 +106,16 @@ public final class ConfigManager {
     }
 
     /**
+     * Validates and persists updated region settings to {@code config.yml} asynchronously,
+     * preserving existing YAML comments and reloading atomically on completion.
+     */
+    public CompletableFuture<Void> updateRegionsAsync(RegionConfig regions, Executor executor) {
+        Objects.requireNonNull(regions, "regions");
+        Objects.requireNonNull(executor, "executor");
+        return CompletableFuture.runAsync(() -> updateRegions(regions), executor);
+    }
+
+    /**
      * Validates and persists updated region settings to {@code config.yml}, then reloads atomically.
      */
     public synchronized void updateRegions(RegionConfig regions) {
@@ -113,51 +123,8 @@ public final class ConfigManager {
         YamlConfigLoader.validateRegionConfig(regions, CONFIG_FILE);
 
         Path configPath = dataFolder.resolve(CONFIG_FILE);
-        YamlConfiguration yaml = YamlConfigLoader.loadYaml(configPath);
-
-        writeArenaSection(yaml, regions.arena());
-        writeSafeZoneSection(yaml, regions.safeZone());
-        yaml.set("regions.void-y-threshold", regions.voidYThreshold());
-
-        try {
-            Files.writeString(configPath, yaml.saveToString(), StandardCharsets.UTF_8);
-        } catch (IOException ex) {
-            throw new ConfigException(CONFIG_FILE, "regions", "Failed to save updated regions", ex);
-        }
+        YamlConfigLoader.saveRegionsPreservingComments(configPath, regions);
         reload();
-    }
-
-    private static void writeArenaSection(YamlConfiguration yaml, RegionConfig.ArenaRegion arena) {
-        String base = "regions.arena";
-        yaml.set(base + ".shape", arena.shape().name().toLowerCase());
-        writePoint(yaml, base + ".center", arena.center());
-        yaml.set(base + ".radius", arena.radius());
-        writePoint(yaml, base + ".min", arena.min());
-        writePoint(yaml, base + ".max", arena.max());
-        yaml.set(base + ".min-y", arena.minY());
-        yaml.set(base + ".max-y", arena.maxY());
-    }
-
-    private static void writeSafeZoneSection(YamlConfiguration yaml, RegionConfig.SafeZoneRegion safeZone) {
-        String base = "regions.safe-zone";
-        yaml.set(base + ".shape", safeZone.shape().name().toLowerCase());
-        writePoint(yaml, base + ".center", safeZone.center());
-        yaml.set(base + ".radius", safeZone.radius());
-        writePoint(yaml, base + ".min", safeZone.min());
-        writePoint(yaml, base + ".max", safeZone.max());
-        yaml.set(base + ".min-y", safeZone.minY());
-        yaml.set(base + ".max-y", safeZone.maxY());
-        yaml.set(base + ".spawn-point.x", safeZone.spawnPoint().x());
-        yaml.set(base + ".spawn-point.y", safeZone.spawnPoint().y());
-        yaml.set(base + ".spawn-point.z", safeZone.spawnPoint().z());
-        yaml.set(base + ".spawn-point.yaw", safeZone.spawnPoint().yaw());
-        yaml.set(base + ".spawn-point.pitch", safeZone.spawnPoint().pitch());
-    }
-
-    private static void writePoint(YamlConfiguration yaml, String path, RegionConfig.Point3D point) {
-        yaml.set(path + ".x", point.x());
-        yaml.set(path + ".y", point.y());
-        yaml.set(path + ".z", point.z());
     }
 
     public Path dataFolder() {

@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -23,6 +25,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -294,6 +297,44 @@ class DefaultRaidCommandHandlerTest {
         assertEquals(2, altarMsgs.size());
         assertTrue(altarMsgs.get(0).contains("Altar"));
         assertTrue(altarMsgs.get(1).contains("Altar"));
+    }
+
+    @Test
+    void adminReloadAndRegionUpdateRunIoAsyncAndReplyOnSenderThread() {
+        List<Runnable> asyncQueue = new ArrayList<>();
+        List<Runnable> globalQueue = new ArrayList<>();
+        List<Runnable> entityQueue = new ArrayList<>();
+
+        doReturn((Executor) asyncQueue::add).when(scheduler).asyncExecutor();
+        doAnswer(inv -> {
+            globalQueue.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        }).when(scheduler).runGlobal(any(Runnable.class));
+        doAnswer(inv -> {
+            entityQueue.add(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        }).when(scheduler).runAtEntity(any(Player.class), any(Runnable.class));
+
+        CommandSender console = mock(CommandSender.class);
+        handler.adminReload(console);
+        assertEquals(1, asyncQueue.size());
+        assertEquals(0, globalQueue.size());
+        asyncQueue.removeFirst().run();
+        assertEquals(1, globalQueue.size());
+        globalQueue.removeFirst().run();
+        assertEquals(1, captureMessages(console).size());
+
+        World world = mock(World.class);
+        Player admin = mock(Player.class);
+        when(admin.locale()).thenReturn(Locale.US);
+        handler.adminRegion(admin, new Location(world, 30.0, 68.0, -10.0), RegionAction.SET_ARENA);
+        assertEquals(1, asyncQueue.size());
+        assertEquals(0, entityQueue.size());
+        asyncQueue.removeFirst().run();
+        assertEquals(1, entityQueue.size());
+        entityQueue.removeFirst().run();
+        assertEquals(30.0, configManager.pluginConfig().regions().arena().center().x(), 1e-6);
+        assertEquals(1, captureMessages(admin).size());
     }
 
     private static List<String> captureMessages(CommandSender sender) {

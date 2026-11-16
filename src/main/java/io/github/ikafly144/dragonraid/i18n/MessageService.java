@@ -3,8 +3,6 @@ package io.github.ikafly144.dragonraid.i18n;
 import io.github.ikafly144.dragonraid.config.ConfigException;
 import io.github.ikafly144.dragonraid.config.ConfigManager;
 import io.github.ikafly144.dragonraid.config.PluginConfig;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -22,10 +20,12 @@ import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.command.CommandSender;
-import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.InvalidConfigurationException;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.spongepowered.configurate.CommentedConfigurationNode;
+import org.spongepowered.configurate.ConfigurateException;
+import org.spongepowered.configurate.ConfigurationNode;
+import org.spongepowered.configurate.yaml.NodeStyle;
+import org.spongepowered.configurate.yaml.YamlConfigurationLoader;
 
 /**
  * MiniMessage multi-language service loading {@code lang/*.yml} files with
@@ -88,27 +88,29 @@ public final class MessageService {
     private static Map<String, String> loadBundle(Path path) {
         String fileName = path.getFileName().toString();
         try {
-            String raw = Files.readString(path, StandardCharsets.UTF_8);
-            YamlConfiguration yaml = new YamlConfiguration();
-            yaml.loadFromString(raw);
+            YamlConfigurationLoader loader = YamlConfigurationLoader.builder()
+                    .path(path)
+                    .nodeStyle(NodeStyle.BLOCK)
+                    .indent(2)
+                    .build();
+            CommentedConfigurationNode root = loader.load();
             Map<String, String> flat = new LinkedHashMap<>();
-            flatten("", yaml, flat);
+            flatten("", root, flat);
             return Collections.unmodifiableMap(flat);
-        } catch (IOException | InvalidConfigurationException ex) {
+        } catch (ConfigurateException ex) {
             throw new ConfigException(fileName, "", "Failed to load language file: " + ex.getMessage(), ex);
         }
     }
 
-    private static void flatten(String prefix, ConfigurationSection section, Map<String, String> out) {
-        for (String key : section.getKeys(false)) {
+    private static void flatten(String prefix, ConfigurationNode section, Map<String, String> out) {
+        for (Map.Entry<Object, ? extends ConfigurationNode> entry : section.childrenMap().entrySet()) {
+            String key = String.valueOf(entry.getKey());
+            ConfigurationNode child = entry.getValue();
             String fullKey = prefix.isEmpty() ? key : prefix + "." + key;
-            if (section.isConfigurationSection(key)) {
-                ConfigurationSection child = section.getConfigurationSection(key);
-                if (child != null) {
-                    flatten(fullKey, child, out);
-                }
-            } else {
-                String value = section.getString(key);
+            if (child.isMap()) {
+                flatten(fullKey, child, out);
+            } else if (!child.isList() && child.rawScalar() != null) {
+                String value = child.getString();
                 if (value != null) {
                     out.put(fullKey, value);
                 }
