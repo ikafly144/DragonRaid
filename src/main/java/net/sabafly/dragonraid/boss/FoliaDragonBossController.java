@@ -2,6 +2,7 @@ package net.sabafly.dragonraid.boss;
 
 import java.util.Collection;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.logging.Level;
@@ -54,6 +55,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     private volatile double orbitAngleRad;
     private volatile @Nullable TaskHandle movementTask;
     private volatile boolean activeCombat;
+    private final AtomicLong generation = new AtomicLong(0L);
 
     @FunctionalInterface
     interface DragonSpawner {
@@ -89,8 +91,10 @@ public final class FoliaDragonBossController implements DragonBossController {
         double validMaxHp = Math.max(1.0, scaledMaxHp);
         Location anchor = arenaAnchor(endWorld, LOW_ORBIT_Y_OFFSET);
 
+        final long bindGeneration;
         synchronized (lock) {
             cancelMovementTask();
+            bindGeneration = generation.incrementAndGet();
             this.maxHp = validMaxHp;
             this.currentHp = validMaxHp;
             this.targetPosture = DragonPosture.LOW_ORBIT;
@@ -103,22 +107,26 @@ public final class FoliaDragonBossController implements DragonBossController {
 
         EnderDragon existing = dragonFinder.apply(endWorld);
         if (existing != null && !existing.isDead()) {
-            bindEntity(existing, false, validMaxHp, true, anchor);
+            bindEntity(existing, false, validMaxHp, true, anchor, bindGeneration);
             return;
         }
 
         scheduler.runAtRegion(anchor, () -> {
-            EnderDragon rechecked = dragonFinder.apply(endWorld);
-            if (rechecked != null && !rechecked.isDead()) {
-                bindEntity(rechecked, false, validMaxHp, true, anchor);
+            if (generation.get() != bindGeneration || !activeCombat) {
                 return;
             }
-            if (!activeCombat) {
+            EnderDragon rechecked = dragonFinder.apply(endWorld);
+            if (rechecked != null && !rechecked.isDead()) {
+                bindEntity(rechecked, false, validMaxHp, true, anchor, bindGeneration);
                 return;
             }
             try {
                 EnderDragon spawned = dragonSpawner.spawn(endWorld, anchor);
-                bindEntity(spawned, true, validMaxHp, true, anchor);
+                if (generation.get() != bindGeneration || !activeCombat) {
+                    spawned.remove();
+                    return;
+                }
+                bindEntity(spawned, true, validMaxHp, true, anchor, bindGeneration);
             } catch (RuntimeException ex) {
                 logger.log(Level.WARNING, "Failed to spawn raid EnderDragon", ex);
             }
@@ -132,17 +140,19 @@ public final class FoliaDragonBossController implements DragonBossController {
         if (existing == null || existing.isDead()) {
             return;
         }
+        final long holdGeneration;
         synchronized (lock) {
             if (activeCombat || (activeDragon != null && !activeDragon.isDead() && movementTask != null)) {
                 return;
             }
+            holdGeneration = generation.incrementAndGet();
             this.targetPosture = DragonPosture.LOW_ORBIT;
             this.preStaggerPosture = null;
             this.staggerRemainingSeconds = 0.0;
             this.activeCombat = false;
         }
         Location anchor = arenaAnchor(endWorld, LOW_ORBIT_Y_OFFSET);
-        bindEntity(existing, false, 0.0, false, anchor);
+        bindEntity(existing, false, 0.0, false, anchor, holdGeneration);
     }
 
     private void bindEntity(
@@ -150,8 +160,12 @@ public final class FoliaDragonBossController implements DragonBossController {
             boolean wasSummoned,
             double targetMaxHp,
             boolean applyHealth,
-            Location initialAnchor) {
+            Location initialAnchor,
+            long expectedGeneration) {
         synchronized (lock) {
+            if (generation.get() != expectedGeneration) {
+                return;
+            }
             cancelMovementTask();
             this.activeDragon = dragon;
             this.summonedByPlugin = wasSummoned;
@@ -159,11 +173,11 @@ public final class FoliaDragonBossController implements DragonBossController {
         }
 
         scheduler.runAtEntity(dragon, () -> {
-            if (dragon.isDead()) {
+            if (dragon.isDead() || generation.get() != expectedGeneration) {
                 return;
             }
             synchronized (lock) {
-                if (this.activeDragon != dragon) {
+                if (this.activeDragon != dragon || generation.get() != expectedGeneration) {
                     return;
                 }
                 this.previousAi = dragon.hasAI();
@@ -463,6 +477,7 @@ public final class FoliaDragonBossController implements DragonBossController {
         boolean prevAi;
         boolean prevGravity;
         synchronized (lock) {
+            generation.incrementAndGet();
             cancelMovementTask();
             dragon = this.activeDragon;
             prevAi = this.previousAi;
@@ -486,6 +501,7 @@ public final class FoliaDragonBossController implements DragonBossController {
         boolean prevAi;
         boolean prevGravity;
         synchronized (lock) {
+            generation.incrementAndGet();
             cancelMovementTask();
             dragon = this.activeDragon;
             wasSummoned = this.summonedByPlugin;

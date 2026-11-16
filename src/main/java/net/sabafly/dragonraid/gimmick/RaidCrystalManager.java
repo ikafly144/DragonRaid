@@ -25,6 +25,7 @@ import org.bukkit.block.Block;
 import org.bukkit.entity.EnderCrystal;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -44,6 +45,7 @@ public final class RaidCrystalManager {
 
     private final Map<UUID, TrackedCrystal> trackedCrystals = new ConcurrentHashMap<>();
     private final AtomicInteger waveCounter = new AtomicInteger(0);
+    private final AtomicInteger generation = new AtomicInteger(0);
     private volatile double bossRegenPerSecond;
 
     @FunctionalInterface
@@ -101,6 +103,7 @@ public final class RaidCrystalManager {
         double phaseAngle = (waveCounter.getAndIncrement() * Math.PI) / Math.max(1, targetCount);
         double validMaxHp = Math.max(1.0, crystalMaxHp);
 
+        int expectedGen = generation.get();
         for (int i = 0; i < toSpawn; i++) {
             double angle = phaseAngle + (2.0 * Math.PI * i) / toSpawn;
             double x = center.x() + Math.cos(angle) * ringRadius;
@@ -108,9 +111,16 @@ public final class RaidCrystalManager {
             Location probeLoc = new Location(world, x, center.y() + FALLBACK_Y_OFFSET, z);
 
             scheduler.runAtRegion(probeLoc, () -> {
+                if (generation.get() != expectedGen) {
+                    return;
+                }
                 Location spawnLoc = resolveCrystalSpawnLocation(world, x, z, center.y());
                 try {
                     EnderCrystal crystal = crystalSpawner.spawn(world, spawnLoc);
+                    if (generation.get() != expectedGen) {
+                        crystal.remove();
+                        return;
+                    }
                     crystal.setShowingBottom(false);
                     crystal.setBeamTarget(new Location(world, center.x(), center.y() + 10.0, center.z()));
                     crystal.setCustomNameVisible(true);
@@ -169,25 +179,32 @@ public final class RaidCrystalManager {
             if (world != null) {
                 Location loc = tracked.location;
                 for (Player p : world.getPlayers()) {
-                    if (p != null && p.isOnline() && p.getLocation().distanceSquared(loc) <= 64.0 * 64.0) {
-                        scheduler.runAtEntity(p, () -> p.playSound(Sound.sound(
-                                Key.key("minecraft:block.glass.break"),
-                                Sound.Source.HOSTILE,
-                                1.0f,
-                                0.8f
-                        )));
+                    if (p != null && p.isOnline()) {
+                        scheduler.runAtEntity(p, () -> {
+                            Location pLoc = p.getLocation();
+                            if (pLoc != null && loc.getWorld() != null && loc.getWorld().equals(pLoc.getWorld())
+                                    && pLoc.distanceSquared(loc) <= 64.0 * 64.0) {
+                                p.playSound(Sound.sound(
+                                        Key.key("minecraft:block.glass.break"),
+                                        Sound.Source.HOSTILE,
+                                        1.0f,
+                                        0.8f
+                                ));
+                            }
+                        });
                     }
                 }
             }
         } else {
             updateCrystalLabel(crystal, remainingHp, tracked.maxHp);
-            if (damager instanceof Player player) {
-                player.playSound(Sound.sound(
+            Player attacker = resolvePlayerAttacker(damager);
+            if (attacker != null && attacker.isOnline()) {
+                scheduler.runAtEntity(attacker, () -> attacker.playSound(Sound.sound(
                         Key.key("minecraft:block.amethyst_block.hit"),
                         Sound.Source.HOSTILE,
                         0.8f,
                         1.2f
-                ));
+                )));
             }
         }
         return true;
@@ -238,6 +255,7 @@ public final class RaidCrystalManager {
      * Removes all tracked raid crystals safely on their owning entity threads.
      */
     public void clearAll() {
+        generation.incrementAndGet();
         List<TrackedCrystal> snapshot = new ArrayList<>(trackedCrystals.values());
         trackedCrystals.clear();
         bossRegenPerSecond = 0.0;
@@ -275,6 +293,16 @@ public final class RaidCrystalManager {
             }
         }
         return new Location(world, x, centerY + FALLBACK_Y_OFFSET, z);
+    }
+
+    private static @Nullable Player resolvePlayerAttacker(@Nullable Entity damager) {
+        if (damager instanceof Player player) {
+            return player;
+        }
+        if (damager instanceof Projectile projectile && projectile.getShooter() instanceof Player shooter) {
+            return shooter;
+        }
+        return null;
     }
 
     private static void updateCrystalLabel(EnderCrystal crystal, double currentHp, double maxHp) {

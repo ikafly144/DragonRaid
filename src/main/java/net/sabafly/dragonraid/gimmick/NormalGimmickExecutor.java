@@ -69,6 +69,7 @@ public final class NormalGimmickExecutor {
     private final Map<UUID, Long> shieldRaiseMillis = new ConcurrentHashMap<>();
     private final Map<UUID, Boolean> lastBlockingState = new ConcurrentHashMap<>();
     private final AtomicInteger towerRotationIndex = new AtomicInteger(0);
+    private final AtomicInteger mechanicGeneration = new AtomicInteger(0);
 
     private volatile @Nullable ActiveMechanic activeMechanic;
     private volatile double safeArenaRadius;
@@ -117,6 +118,7 @@ public final class NormalGimmickExecutor {
      * Resets mechanic state and soft enrage radius for a fresh encounter attempt.
      */
     public void resetState() {
+        this.mechanicGeneration.incrementAndGet();
         this.activeMechanic = null;
         this.shieldRaiseMillis.clear();
         this.lastBlockingState.clear();
@@ -389,6 +391,7 @@ public final class NormalGimmickExecutor {
      * Cancels any in-progress mechanic (e.g. on phase change, stagger, or wipe).
      */
     public void cancelActiveMechanic() {
+        this.mechanicGeneration.incrementAndGet();
         this.activeMechanic = null;
     }
 
@@ -656,13 +659,14 @@ public final class NormalGimmickExecutor {
         double damage = ability != null ? ability.damage(26.0) : 26.0;
         double range = ability != null ? ability.getDouble("range", 96.0) : 96.0;
         double rangeSq = range * range;
+        int expectedGen = mechanicGeneration.get();
 
         for (Player player : aliveParticipants) {
             if (player == null || !player.isOnline()) {
                 continue;
             }
             Location playerLoc = player.getLocation();
-            if (!bossLocation.getWorld().equals(playerLoc.getWorld())) {
+            if (playerLoc == null || !bossLocation.getWorld().equals(playerLoc.getWorld())) {
                 continue;
             }
             if (playerLoc.distanceSquared(bossLocation) > rangeSq) {
@@ -670,7 +674,10 @@ public final class NormalGimmickExecutor {
             }
             Location playerEye = playerLoc.clone().add(0.0, 1.62, 0.0);
             occlusionChecker.isOccludedAsync(bossLocation, playerEye).whenComplete((occluded, ex) -> {
-                if (ex == null && !Boolean.TRUE.equals(occluded) && player.isOnline()) {
+                if (ex == null
+                        && mechanicGeneration.get() == expectedGen
+                        && !Boolean.TRUE.equals(occluded)
+                        && player.isOnline()) {
                     applyDamageOnEntityThread(player, damage);
                 }
             });
@@ -855,9 +862,13 @@ public final class NormalGimmickExecutor {
             return false;
         }
         for (Player p : players) {
-            if (p != null && p.isOnline()
-                    && center.getWorld().equals(p.getLocation().getWorld())
-                    && horizontalDistSq(p.getLocation(), center) <= radiusSq) {
+            if (p == null || !p.isOnline()) {
+                continue;
+            }
+            Location pLoc = p.getLocation();
+            if (pLoc != null
+                    && center.getWorld().equals(pLoc.getWorld())
+                    && horizontalDistSq(pLoc, center) <= radiusSq) {
                 return true;
             }
         }

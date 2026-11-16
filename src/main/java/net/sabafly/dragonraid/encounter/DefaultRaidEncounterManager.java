@@ -1169,6 +1169,18 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             wipeGeneration = encounterGeneration.get();
         }
 
+        RaidTimelineEngine timeline = this.activeTimeline;
+        this.activeTimeline = null;
+        if (timeline != null) {
+            timeline.stop();
+        }
+        if (gimmickExecutor != null) {
+            gimmickExecutor.cancelActiveMechanic();
+        }
+        if (hudService != null && endWorld != null) {
+            hudService.updateCastBossBar(null, 0.0, 0.0, onlinePlayersInWorld(endWorld));
+        }
+
         for (RaidParticipant participant : participants.values()) {
             Player player = playerLookup.apply(participant.playerId());
             if (player != null && player.isOnline()) {
@@ -1255,6 +1267,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         Objects.requireNonNull(dragon, "dragon");
         if (!regionService.isRaidWorld(dragon.getWorld())) {
             return;
+        }
+        if (bossController != null) {
+            EnderDragon activeBoss = bossController.activeDragon();
+            if (activeBoss != null && !activeBoss.getUniqueId().equals(dragon.getUniqueId())) {
+                return;
+            }
         }
         BossConfig.Difficulty difficulty;
         long defeatGeneration;
