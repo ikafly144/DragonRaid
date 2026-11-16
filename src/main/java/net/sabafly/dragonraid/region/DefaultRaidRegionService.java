@@ -100,13 +100,13 @@ public final class DefaultRaidRegionService implements RaidRegionService {
         RegionConfig regions = configManager.pluginConfig().regions();
         ArenaRegion arena = regions.arena();
         Point3D clampedXZ = clampXZInsideArena(arena, from.getX(), from.getZ());
-        double baseY = Math.max(regions.voidYThreshold() + 2.0, arena.center().y());
-        if (arena.shape() == Shape.CYLINDER) {
-            baseY = Math.max(arena.minY() + 2.0, Math.min(arena.maxY() - 2.0, baseY));
-        } else {
-            baseY = Math.max(arena.min().y() + 2.0, Math.min(arena.max().y() - 2.0, baseY));
-        }
-        return new Location(world, clampedXZ.x(), baseY + Math.max(0.0, yOffset), clampedXZ.z(), from.getYaw(), from.getPitch());
+        double minBoundY = arena.shape() == Shape.CYLINDER ? arena.minY() : arena.min().y();
+        double maxBoundY = arena.shape() == Shape.CYLINDER ? arena.maxY() : arena.max().y();
+        double minSafeY = Math.max(regions.voidYThreshold() + 1.0, minBoundY);
+        double maxSafeY = Math.max(minSafeY, maxBoundY - 2.0);
+        double targetY = arena.center().y() + Math.max(0.0, yOffset);
+        double finalY = Math.max(minSafeY, Math.min(maxSafeY, targetY));
+        return new Location(world, clampedXZ.x(), finalY, clampedXZ.z(), from.getYaw(), from.getPitch());
     }
 
     @Override
@@ -180,19 +180,34 @@ public final class DefaultRaidRegionService implements RaidRegionService {
         int scanBottom = Math.max(world.getMinHeight(), Math.max(minY, voidFloor));
         int scanTop = Math.min(world.getMaxHeight() - 3, Math.min(maxY - 2, (int) Math.ceil(arena.center().y()) + 40));
 
+        double effectiveOffset = Math.max(0.0, yOffset);
+        int ceilingLimit = Math.min(world.getMaxHeight() - 1, maxY);
         for (int y = scanTop; y >= scanBottom; y--) {
             Block ground = world.getBlockAt(blockX, y, blockZ);
             if (!isSafeSupportBlock(ground)) {
                 continue;
             }
-            Block feet = world.getBlockAt(blockX, y + 1, blockZ);
-            Block head = world.getBlockAt(blockX, y + 2, blockZ);
-            if (feet.isPassable() && !feet.isLiquid() && head.isPassable() && !head.isLiquid()) {
-                double safeY = y + 1.0 + Math.max(0.0, yOffset);
+            double safeY = y + 1.0 + effectiveOffset;
+            int landingFeetY = (int) Math.floor(safeY);
+            int landingHeadY = landingFeetY + 1;
+            if (landingHeadY > ceilingLimit) {
+                continue;
+            }
+            if (hasVerticalClearance(world, blockX, blockZ, y + 1, landingHeadY)) {
                 return new Location(world, blockX + 0.5, safeY, blockZ + 0.5, yaw, pitch);
             }
         }
         return null;
+    }
+
+    private static boolean hasVerticalClearance(World world, int blockX, int blockZ, int fromY, int toY) {
+        for (int checkY = fromY; checkY <= toY; checkY++) {
+            Block space = world.getBlockAt(blockX, checkY, blockZ);
+            if (!space.isPassable() || space.isLiquid()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isSafeSupportBlock(Block block) {

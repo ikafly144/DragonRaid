@@ -2,6 +2,7 @@ package net.sabafly.dragonraid.scaling;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
@@ -85,5 +86,23 @@ class RaidScalingCalculatorTest {
         assertEquals(6, largeRaid.towerCount()); // clamped to tower-max=6
         assertEquals(6, largeRaid.spreadTargets()); // ceil(12 * 0.5) = 6 <= 8
         assertEquals(9, largeRaid.crystalCount()); // 4 + floor(11 * 0.5) = 9 <= 10
+    }
+
+    @Test
+    void outOfRangePartySize_throwsIllegalArgumentException() {
+        PluginConfig.ScalingSettings base = configManager.pluginConfig().scaling();
+        PluginConfig.ScalingSettings strict = new PluginConfig.ScalingSettings(
+                2,
+                4,
+                true,
+                base.hpAlpha(),
+                base.objectHpAlpha(),
+                base.gimmick(),
+                base.soloFallback());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> RaidScalingCalculator.calculate(strict, configManager.normalBossConfig(), 1));
+        assertThrows(IllegalArgumentException.class,
+                () -> RaidScalingCalculator.calculate(strict, configManager.normalBossConfig(), 5));
     }
 }

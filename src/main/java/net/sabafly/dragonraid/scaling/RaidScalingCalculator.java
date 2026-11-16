@@ -23,7 +23,7 @@ public final class RaidScalingCalculator {
         Objects.requireNonNull(scaling, "scaling");
         Objects.requireNonNull(bossConfig, "bossConfig");
 
-        int effectiveN = clampPartySize(scaling, rawPartySize);
+        int effectiveN = requireValidPartySize(scaling, rawPartySize);
         double scaledBossHp = scaling.scaleBossHp(bossConfig.baseHp(), effectiveN);
 
         double baseCrystalHp = bossConfig.ability("crystals")
@@ -68,11 +68,15 @@ public final class RaidScalingCalculator {
         );
     }
 
-    private static int clampPartySize(PluginConfig.ScalingSettings scaling, int rawPartySize) {
-        int n = Math.max(scaling.minPlayers(), Math.max(1, rawPartySize));
-        if (scaling.enforceMaxPlayers()) {
-            n = Math.min(n, scaling.maxPlayers());
+    private static int requireValidPartySize(PluginConfig.ScalingSettings scaling, int rawPartySize) {
+        if (rawPartySize < scaling.minPlayers()) {
+            throw new IllegalArgumentException(
+                    "Party size " + rawPartySize + " is below configured min-players (" + scaling.minPlayers() + ")");
         }
-        return n;
+        if (scaling.enforceMaxPlayers() && rawPartySize > scaling.maxPlayers()) {
+            throw new IllegalArgumentException(
+                    "Party size " + rawPartySize + " exceeds configured max-players (" + scaling.maxPlayers() + ")");
+        }
+        return rawPartySize;
     }
 }

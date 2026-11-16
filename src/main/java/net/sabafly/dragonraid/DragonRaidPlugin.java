@@ -19,7 +19,10 @@ import net.sabafly.dragonraid.region.RaidRegionService;
 import net.sabafly.dragonraid.scheduler.FoliaRaidScheduler;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
+import net.sabafly.dragonraid.storage.RaidRecoveryRepository;
+import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
+import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
 import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
 import java.nio.file.Path;
@@ -36,11 +39,13 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private ConfigManager configManager;
     private MessageService messageService;
     private RaidScheduler raidScheduler;
+    private SqliteDatabase sqliteDatabase;
     private PlayerDataRepository playerDataRepository;
+    private RaidRecoveryRepository recoveryRepository;
     private RaidRegionService regionService;
     private TemporaryBlockTracker temporaryBlockTracker;
     private SoulMarkerService soulMarkerService;
-    private RaidEncounterManager encounterManager;
+    private DefaultRaidEncounterManager encounterManager;
 
     @Override
     public void onEnable() {
@@ -67,13 +72,18 @@ public final class DragonRaidPlugin extends JavaPlugin {
         PluginConfig.DatabaseSettings dbSettings = configManager.pluginConfig().database();
         Path databasePath = getDataPath().resolve(dbSettings.file());
         try {
-            this.playerDataRepository = new SqlitePlayerDataRepository(
+            this.sqliteDatabase = new SqliteDatabase(
                 databasePath,
                 dbSettings.poolSize(),
                 raidScheduler.asyncExecutor()
             );
+            this.playerDataRepository = new SqlitePlayerDataRepository(sqliteDatabase);
+            this.recoveryRepository = new SqliteRaidRecoveryRepository(sqliteDatabase);
         } catch (RuntimeException ex) {
-            getLogger().log(Level.SEVERE, "Failed to initialize SQLite repository at " + databasePath, ex);
+            getLogger().log(Level.SEVERE, "Failed to initialize SQLite database at " + databasePath, ex);
+            if (sqliteDatabase != null) {
+                sqliteDatabase.close();
+            }
             raidScheduler.cancelAll();
             getServer().getPluginManager().disablePlugin(this);
             return;
@@ -92,8 +102,10 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 regionService,
                 temporaryBlockTracker,
                 soulMarkerService,
+                recoveryRepository,
                 getLogger()
             );
+            raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
 
             getServer().getPluginManager().registerEvents(
                 new ArenaProtectionListener(
@@ -142,12 +154,19 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 getLogger().log(Level.WARNING, "Failed to shut down raid encounter manager", ex);
             }
         }
-        // Close repository first so queued async DB writes flush before asyncScheduler tasks are cancelled.
+        // Close repositories and shared database first so queued/sync DB writes flush before asyncScheduler tasks cancel.
         if (playerDataRepository != null) {
             try {
                 playerDataRepository.close();
             } catch (Exception ex) {
                 getLogger().log(Level.WARNING, "Failed to close player data repository during shutdown", ex);
+            }
+        }
+        if (sqliteDatabase != null) {
+            try {
+                sqliteDatabase.close();
+            } catch (Exception ex) {
+                getLogger().log(Level.WARNING, "Failed to close SQLite database during shutdown", ex);
             }
         }
         if (raidScheduler != null) {

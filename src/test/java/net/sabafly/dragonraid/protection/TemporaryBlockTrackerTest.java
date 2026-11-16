@@ -12,10 +12,12 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
 import java.util.UUID;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker.TrackOutcome;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
+import net.sabafly.dragonraid.storage.RaidRecoveryRepository.PendingBlockRollback;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
@@ -107,6 +109,43 @@ class TemporaryBlockTrackerTest {
         verify(b1).setBlockData(orig1, false);
         verify(b2).setBlockData(orig2, false);
         verify(b3).setBlockData(orig3, false);
+    }
+
+    @Test
+    void exportAndRecoverPendingRollbacks_restoresSerializedBlocksAcrossChunks() {
+        BlockData airData = mockAirData();
+        TemporaryBlockTracker serializerTracker = new TemporaryBlockTracker(
+                data -> "minecraft:air",
+                str -> airData);
+
+        UUID alice = UUID.randomUUID();
+        serializerTracker.tryRecordPlayerPlacement(loc(1, 64, 1), alice, airData, 10, 10);
+        serializerTracker.tryRecordPlayerPlacement(loc(20, 65, 20), alice, airData, 10, 10);
+
+        List<PendingBlockRollback> exported = serializerTracker.exportPendingRollbacks();
+        assertEquals(2, exported.size());
+        // Export does not clear tracker
+        assertEquals(2, serializerTracker.totalCount());
+
+        Block b1 = mock(Block.class);
+        Block b2 = mock(Block.class);
+        when(world.getBlockAt(1, 64, 1)).thenReturn(b1);
+        when(world.getBlockAt(20, 65, 20)).thenReturn(b2);
+
+        RaidScheduler scheduler = mock(RaidScheduler.class);
+        when(scheduler.runAtRegion(eq(world), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(3).run();
+            return TaskHandle.retired();
+        });
+
+        List<BlockPosKey> restored = serializerTracker.rollbackPendingEntries(
+                scheduler,
+                id -> worldId.equals(id) ? world : null,
+                exported).join();
+
+        assertEquals(2, restored.size());
+        verify(b1).setBlockData(airData, false);
+        verify(b2).setBlockData(airData, false);
     }
 
     private Location loc(int x, int y, int z) {

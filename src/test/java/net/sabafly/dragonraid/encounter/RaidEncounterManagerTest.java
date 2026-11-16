@@ -38,6 +38,8 @@ import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.RaidRegionService;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
+import net.sabafly.dragonraid.storage.SqliteDatabase;
+import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -155,6 +157,7 @@ class RaidEncounterManagerTest {
                 regionService,
                 blockTracker,
                 soulMarkerService,
+                null,
                 Logger.getLogger("EncounterTest"),
                 () -> endWorld,
                 () -> onlinePlayers.values(),
@@ -326,6 +329,272 @@ class RaidEncounterManagerTest {
         manager.onPlayerJoin(alice);
         assertTrue(manager.isDowned(alice.getUniqueId()));
         assertTrue(manager.isParticipant(alice.getUniqueId()));
+        verify(bob, never()).setGameMode(GameMode.SPECTATOR);
+    }
+
+    @Test
+    void pendingCleanupPlayersPreservedAcrossSubsequentEncounterStart() {
+        Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+        Player bob = addPlayer("Bob", new Location(endWorld, 1.0, 64.0, 0.0));
+        startActiveEncounter(alice, BossConfig.Difficulty.HARD);
+
+        // Alice gets downed, disconnects, and expires to DEAD_SPECTATOR (or stays downed offline)
+        manager.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        assertTrue(manager.isDowned(alice.getUniqueId()));
+        when(alice.isOnline()).thenReturn(false);
+        onlinePlayers.remove(alice.getUniqueId());
+        manager.onPlayerQuit(alice);
+
+        // Raid ends via adminReset while Alice is offline -> saved in pendingCleanupPlayers
+        manager.adminReset(bob);
+        assertEquals(RaidState.IDLE, manager.state());
+
+        // Bob starts a NEW raid and locks in before Alice returns
+        startActiveEncounter(bob, BossConfig.Difficulty.NORMAL);
+
+        // Now Alice reconnects -> her cleanup record MUST still exist and restore her state
+        when(alice.isOnline()).thenReturn(true);
+        when(alice.isInvisible()).thenReturn(true);
+        when(alice.isInvulnerable()).thenReturn(true);
+        when(alice.isCollidable()).thenReturn(false);
+        onlinePlayers.put(alice.getUniqueId(), alice);
+
+        manager.onPlayerJoin(alice);
+        verify(alice, atLeastOnce()).setInvisible(false);
+        verify(alice, atLeastOnce()).setInvulnerable(false);
+        verify(alice, atLeastOnce()).setCollidable(true);
+    }
+
+    @Test
+    void voidRescueInProgress_cancelsIncomingDamageWithoutOverwritingRescueLocation() {
+        CompletableFuture<Location> delayedRescue = new CompletableFuture<>();
+        when(regionService.findNearestSafeArenaEdgeAsync(any(), anyDouble())).thenReturn(delayedRescue);
+
+        Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+        Player bob = addPlayer("Bob", new Location(endWorld, 5.0, 64.0, 0.0));
+        startActiveEncounter(alice, BossConfig.Difficulty.NORMAL);
+
+        // Alice falls into void
+        Location voidLoc = new Location(endWorld, 50.0, -4.0, 0.0);
+        when(alice.getLocation()).thenReturn(voidLoc);
+        manager.tickActiveEncounter();
+
+        // While rescue future is still pending, lethal VOID damage fires
+        EntityDamageEvent voidDamage = mockDamageEvent(50.0, EntityDamageEvent.DamageCause.VOID);
+        manager.onPlayerDamage(alice, voidDamage);
+        verify(voidDamage).setCancelled(true);
+        // Must still be ALIVE until rescue resolves, NOT clamped prematurely
+        assertEquals(ParticipantState.ALIVE, manager.participantState(alice.getUniqueId()).orElseThrow());
+
+        // Complete rescue to safe ledge (12.5, 68.0, 4.5)
+        Location rescuedLedge = new Location(endWorld, 12.5, 68.0, 4.5);
+        delayedRescue.complete(rescuedLedge);
+
+        assertTrue(manager.isDowned(alice.getUniqueId()));
+        verify(alice).teleportAsync(rescuedLedge);
+        verify(soulMarkerService, atLeastOnce()).spawnOrUpdateMarker(
+                eq(alice.getUniqueId()), eq("Alice"), eq(rescuedLedge), eq(null), eq(0.0), any());
+        verify(bob, never()).setGameMode(GameMode.SPECTATOR);
+    }
+
+    @Test
+    void partySizeEnforcement_enforcesMinPlayersAndMaxPlayersCap() throws Exception {
+        String updatedCfg = Files.readString(tempDir.resolve("config.yml"), StandardCharsets.UTF_8)
+                .replace("min-players: 1", "min-players: 2")
+                .replace("max-players: 8", "max-players: 2")
+                .replace("enforce-max-players: false", "enforce-max-players: true");
+        Files.writeString(tempDir.resolve("config.yml"), updatedCfg, StandardCharsets.UTF_8);
+        configManager.reload();
+
+        // 1 player < minPlayers(2) -> rejected
+        Player alice = addPlayer("Alice", new Location(endWorld, 10.0, 64.0, 0.0));
+        manager.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        assertEquals(RaidState.IDLE, manager.state());
+
+        // 2 players -> countdown starts
+        Player bob = addPlayer("Bob", new Location(endWorld, 12.0, 64.0, 0.0));
+        manager.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        assertEquals(RaidState.COUNTDOWN, manager.state());
+
+        // 3rd player joins in safe-zone during countdown -> capped to maxPlayers(2), safe-zone player locked out
+        Player charlie = addPlayer("Charlie", new Location(endWorld, 100.5, 50.0, 0.5));
+        Runnable countdown = capturedGlobalTimers.get(capturedGlobalTimers.size() - 1);
+        int secs = configManager.pluginConfig().encounter().pullCountdownSeconds();
+        for (int i = 0; i < secs; i++) {
+            countdown.run();
+        }
+        assertEquals(RaidState.ACTIVE, manager.state());
+        assertEquals(2, manager.activeScaling().orElseThrow().partySize());
+        assertTrue(manager.isParticipant(alice.getUniqueId()));
+        assertTrue(manager.isParticipant(bob.getUniqueId()));
+        assertFalse(manager.isParticipant(charlie.getUniqueId()));
+        verify(charlie, atLeastOnce()).teleportAsync(new Location(endWorld, 100.5, 50.0, 0.5));
+    }
+
+    @Test
+    void shutdownAndStartupRecovery_persistsOfflineCleanupsAndPendingBlocksInSqlite() {
+        Path dbPath = tempDir.resolve("recovery-encounter.db");
+        UUID worldId = endWorld.getUID();
+        BlockData origData = mock(BlockData.class);
+        when(origData.clone()).thenReturn(origData);
+        TemporaryBlockTracker tracker = new TemporaryBlockTracker(d -> "minecraft:air", s -> origData);
+
+        try (SqliteDatabase db = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository recoveryRepo = new SqliteRaidRecoveryRepository(db);
+            DefaultRaidEncounterManager firstRun = new DefaultRaidEncounterManager(
+                    configManager,
+                    messageService,
+                    scheduler,
+                    regionService,
+                    tracker,
+                    soulMarkerService,
+                    recoveryRepo,
+                    Logger.getLogger("RecoveryTest1"),
+                    () -> endWorld,
+                    () -> onlinePlayers.values(),
+                    id -> onlinePlayers.get(id),
+                    nowMillis::get,
+                    w -> livingDragonPresent.get());
+
+            Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+            Player bob = addPlayer("Bob", new Location(endWorld, 2.0, 64.0, 0.0));
+            firstRun.adminStart(alice, BossConfig.Difficulty.HARD);
+            Runnable countdown = capturedGlobalTimers.get(capturedGlobalTimers.size() - 1);
+            for (int i = 0; i < configManager.pluginConfig().encounter().pullCountdownSeconds(); i++) {
+                countdown.run();
+            }
+            assertEquals(RaidState.ACTIVE, firstRun.state());
+
+            // Alice becomes DEAD_SPECTATOR and disconnects; Bob places a temporary block
+            firstRun.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+            nowMillis.addAndGet(45_000L);
+            firstRun.tickActiveEncounter();
+            assertTrue(firstRun.isDeadSpectator(alice.getUniqueId()));
+
+            when(alice.isOnline()).thenReturn(false);
+            onlinePlayers.remove(alice.getUniqueId());
+            firstRun.onPlayerQuit(alice);
+
+            tracker.tryRecordPlayerPlacement(new Location(endWorld, 7, 65, 7), bob.getUniqueId(), origData, 64, 512);
+
+            // Server shutdown
+            firstRun.shutdown();
+        }
+
+        // Simulate restart with fresh DB + tracker + encounter manager
+        org.bukkit.block.Block worldBlock = mock(org.bukkit.block.Block.class);
+        when(endWorld.getBlockAt(7, 65, 7)).thenReturn(worldBlock);
+
+        try (SqliteDatabase db2 = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository recoveryRepo2 = new SqliteRaidRecoveryRepository(db2);
+            TemporaryBlockTracker tracker2 = new TemporaryBlockTracker(d -> "minecraft:air", s -> origData);
+            DefaultRaidEncounterManager secondRun = new DefaultRaidEncounterManager(
+                    configManager,
+                    messageService,
+                    scheduler,
+                    regionService,
+                    tracker2,
+                    soulMarkerService,
+                    recoveryRepo2,
+                    Logger.getLogger("RecoveryTest2"),
+                    () -> endWorld,
+                    () -> onlinePlayers.values(),
+                    id -> onlinePlayers.get(id),
+                    nowMillis::get,
+                    w -> livingDragonPresent.get());
+
+            // Startup block recovery restores (7, 65, 7) and removes persisted row
+            secondRun.recoverPendingBlockRollbacks(id -> worldId.equals(id) ? endWorld : null);
+            verify(worldBlock).setBlockData(origData, false);
+            assertTrue(recoveryRepo2.loadPendingBlockRollbacksSync().isEmpty());
+
+            // Offline Alice rejoins after restart -> restored from SPECTATOR to SURVIVAL & moved to safe-zone
+            Player aliceRejoined = mock(Player.class);
+            UUID aliceId = recoveryRepo2.loadPendingPlayerCleanupsSync().keySet().iterator().next();
+            when(aliceRejoined.getUniqueId()).thenReturn(aliceId);
+            when(aliceRejoined.getName()).thenReturn("Alice");
+            when(aliceRejoined.isOnline()).thenReturn(true);
+            when(aliceRejoined.getWorld()).thenReturn(endWorld);
+            when(aliceRejoined.getLocation()).thenReturn(new Location(endWorld, 0.0, 64.0, 0.0));
+            when(aliceRejoined.getGameMode()).thenReturn(GameMode.SPECTATOR);
+            when(aliceRejoined.teleportAsync(any())).thenReturn(CompletableFuture.completedFuture(true));
+
+            secondRun.onPlayerJoin(aliceRejoined);
+            verify(aliceRejoined).setGameMode(GameMode.SURVIVAL);
+            verify(aliceRejoined).teleportAsync(new Location(endWorld, 100.5, 50.0, 0.5));
+            assertTrue(recoveryRepo2.loadPendingPlayerCleanupsSync().isEmpty());
+        }
+    }
+
+    @Test
+    void queuedEntitySnapshotUpdates_handlePendingThenFlushedMonitorTicks() {
+        List<Runnable> queuedEntityTasks = new ArrayList<>();
+        RaidScheduler queuedScheduler = mock(RaidScheduler.class);
+        lenient().when(queuedScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+        lenient().when(queuedScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+        lenient().when(queuedScheduler.runAtEntityLater(any(), any(), anyLong())).thenReturn(TaskHandle.retired());
+        lenient().when(queuedScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            capturedGlobalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(queuedScheduler.runGlobalLater(any(), anyLong())).thenAnswer(inv -> {
+            capturedDelayedTasks.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+
+        DefaultRaidEncounterManager asyncMgr = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                queuedScheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                null,
+                Logger.getLogger("QueuedEncounterTest"),
+                () -> endWorld,
+                () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id),
+                nowMillis::get,
+                w -> livingDragonPresent.get());
+
+        Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+        Player bob = addPlayer("Bob", new Location(endWorld, 5.0, 64.0, 0.0));
+        asyncMgr.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        Runnable countdown = capturedGlobalTimers.get(capturedGlobalTimers.size() - 1);
+        for (int i = 0; i < configManager.pluginConfig().encounter().pullCountdownSeconds(); i++) {
+            countdown.run();
+        }
+        assertEquals(RaidState.ACTIVE, asyncMgr.state());
+
+        // Flush initial captureOriginalState / title tasks
+        while (!queuedEntityTasks.isEmpty()) {
+            queuedEntityTasks.removeFirst().run();
+        }
+
+        // Alice moves into void without triggering onPlayerMove yet; entity task hasn't flushed snapshot
+        when(alice.getLocation()).thenReturn(new Location(endWorld, 40.0, -3.0, 0.0));
+        asyncMgr.tickActiveEncounter();
+        // Before entity task runs, stale snapshot hasn't triggered void rescue yet
+        assertEquals(ParticipantState.ALIVE, asyncMgr.participantState(alice.getUniqueId()).orElseThrow());
+        assertFalse(queuedEntityTasks.isEmpty());
+
+        // Flush queued entity snapshot refresh tasks, then run monitor tick again
+        while (!queuedEntityTasks.isEmpty()) {
+            queuedEntityTasks.removeFirst().run();
+        }
+        asyncMgr.tickActiveEncounter();
+        while (!queuedEntityTasks.isEmpty()) {
+            queuedEntityTasks.removeFirst().run();
+        }
+
+        assertTrue(asyncMgr.isDowned(alice.getUniqueId()));
+        verify(alice, atLeastOnce()).teleportAsync(new Location(endWorld, 10.5, 66.0, 0.5));
         verify(bob, never()).setGameMode(GameMode.SPECTATOR);
     }
 

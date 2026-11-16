@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.protection;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -9,7 +10,10 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
+import net.sabafly.dragonraid.storage.RaidRecoveryRepository.PendingBlockRollback;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
@@ -18,7 +22,8 @@ import org.jetbrains.annotations.Nullable;
 
 /**
  * Thread-safe lightweight tracker for temporary blocks and liquids placed during a raid encounter,
- * supporting per-player and global caps plus Folia {@code RegionScheduler}-dispatched rollback.
+ * supporting per-player and global caps, snapshot export for restart recovery, and Folia
+ * {@code RegionScheduler}-dispatched rollback.
  */
 public final class TemporaryBlockTracker {
 
@@ -35,9 +40,25 @@ public final class TemporaryBlockTracker {
     public record TrackedBlock(BlockPosKey key, @Nullable UUID ownerId, BlockData originalData) {
     }
 
+    private record BlockRestoration(BlockPosKey key, BlockData data) {
+    }
+
     private final Object lock = new Object();
     private final Map<BlockPosKey, TrackedBlock> entries = new LinkedHashMap<>();
     private final Map<UUID, Integer> playerCounts = new HashMap<>();
+    private final Function<BlockData, String> blockDataSerializer;
+    private final Function<String, BlockData> blockDataDeserializer;
+
+    public TemporaryBlockTracker() {
+        this(BlockData::getAsString, Bukkit::createBlockData);
+    }
+
+    public TemporaryBlockTracker(
+            Function<BlockData, String> blockDataSerializer,
+            Function<String, BlockData> blockDataDeserializer) {
+        this.blockDataSerializer = Objects.requireNonNull(blockDataSerializer, "blockDataSerializer");
+        this.blockDataDeserializer = Objects.requireNonNull(blockDataDeserializer, "blockDataDeserializer");
+    }
 
     /**
      * Records a player-initiated placement (block or bucket fluid) enforcing both per-player and total limits.
@@ -145,6 +166,28 @@ public final class TemporaryBlockTracker {
     }
 
     /**
+     * Exports a serialized snapshot of all currently tracked blocks for durable persistence.
+     */
+    public List<PendingBlockRollback> exportPendingRollbacks() {
+        List<TrackedBlock> snapshot;
+        synchronized (lock) {
+            if (entries.isEmpty()) {
+                return List.of();
+            }
+            snapshot = new ArrayList<>(entries.values());
+        }
+        List<PendingBlockRollback> exported = new ArrayList<>(snapshot.size());
+        for (TrackedBlock tracked : snapshot) {
+            BlockPosKey key = tracked.key();
+            String serialized = blockDataSerializer.apply(tracked.originalData());
+            if (serialized != null && !serialized.isBlank()) {
+                exported.add(new PendingBlockRollback(key.worldId(), key.x(), key.y(), key.z(), serialized));
+            }
+        }
+        return List.copyOf(exported);
+    }
+
+    /**
      * Clears all tracked entries without modifying the world.
      */
     public void clear() {
@@ -177,31 +220,94 @@ public final class TemporaryBlockTracker {
         }
 
         UUID targetWorldId = world.getUID();
-        Map<Long, List<TrackedBlock>> byChunk = new LinkedHashMap<>();
+        List<BlockRestoration> restorations = new ArrayList<>(snapshot.size());
         for (TrackedBlock tracked : snapshot) {
-            if (!tracked.key().worldId().equals(targetWorldId)) {
+            if (tracked.key().worldId().equals(targetWorldId)) {
+                restorations.add(new BlockRestoration(tracked.key(), tracked.originalData()));
+            }
+        }
+        return dispatchChunkRollbacks(scheduler, world, restorations)
+                .thenApply(List::size);
+    }
+
+    /**
+     * Restores persisted {@link PendingBlockRollback} entries across their target worlds and chunks
+     * via Folia {@code RegionScheduler}, returning the keys that were successfully restored.
+     */
+    public CompletableFuture<List<BlockPosKey>> rollbackPendingEntries(
+            RaidScheduler scheduler,
+            Function<UUID, @Nullable World> worldLookup,
+            List<PendingBlockRollback> pending) {
+        Objects.requireNonNull(scheduler, "scheduler");
+        Objects.requireNonNull(worldLookup, "worldLookup");
+        Objects.requireNonNull(pending, "pending");
+        if (pending.isEmpty()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+
+        Map<UUID, List<BlockRestoration>> byWorld = new LinkedHashMap<>();
+        for (PendingBlockRollback entry : pending) {
+            try {
+                BlockData data = blockDataDeserializer.apply(entry.blockDataString());
+                if (data != null) {
+                    byWorld.computeIfAbsent(entry.worldId(), ignored -> new ArrayList<>())
+                            .add(new BlockRestoration(entry.toPosKey(), data));
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Skip invalid serialized block data safely.
+            }
+        }
+
+        List<CompletableFuture<List<BlockPosKey>>> worldFutures = new ArrayList<>();
+        for (Map.Entry<UUID, List<BlockRestoration>> worldEntry : byWorld.entrySet()) {
+            World world = worldLookup.apply(worldEntry.getKey());
+            if (world == null) {
                 continue;
             }
-            byChunk.computeIfAbsent(tracked.key().chunkKey(), ignored -> new ArrayList<>()).add(tracked);
+            worldFutures.add(dispatchChunkRollbacks(scheduler, world, worldEntry.getValue()));
         }
 
-        if (byChunk.isEmpty()) {
-            return CompletableFuture.completedFuture(0);
+        if (worldFutures.isEmpty()) {
+            return CompletableFuture.completedFuture(List.of());
         }
 
-        AtomicInteger restored = new AtomicInteger(0);
+        return CompletableFuture.allOf(worldFutures.toArray(CompletableFuture[]::new))
+                .thenApply(ignored -> {
+                    List<BlockPosKey> restored = new ArrayList<>();
+                    for (CompletableFuture<List<BlockPosKey>> future : worldFutures) {
+                        restored.addAll(future.join());
+                    }
+                    return Collections.unmodifiableList(restored);
+                });
+    }
+
+    private CompletableFuture<List<BlockPosKey>> dispatchChunkRollbacks(
+            RaidScheduler scheduler,
+            World world,
+            List<BlockRestoration> restorations) {
+        if (restorations.isEmpty()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        Map<Long, List<BlockRestoration>> byChunk = new LinkedHashMap<>();
+        for (BlockRestoration item : restorations) {
+            byChunk.computeIfAbsent(item.key().chunkKey(), ignored -> new ArrayList<>()).add(item);
+        }
+
+        List<BlockPosKey> restoredKeys = Collections.synchronizedList(new ArrayList<>(restorations.size()));
+        AtomicInteger completedCount = new AtomicInteger(0);
         List<CompletableFuture<Void>> chunkFutures = new ArrayList<>(byChunk.size());
-        for (List<TrackedBlock> chunkBlocks : byChunk.values()) {
+        for (List<BlockRestoration> chunkBlocks : byChunk.values()) {
             BlockPosKey first = chunkBlocks.getFirst().key();
             CompletableFuture<Void> chunkFuture = new CompletableFuture<>();
             chunkFutures.add(chunkFuture);
             scheduler.runAtRegion(world, first.chunkX(), first.chunkZ(), () -> {
                 try {
-                    for (TrackedBlock tracked : chunkBlocks) {
-                        BlockPosKey key = tracked.key();
+                    for (BlockRestoration item : chunkBlocks) {
+                        BlockPosKey key = item.key();
                         Block block = world.getBlockAt(key.x(), key.y(), key.z());
-                        block.setBlockData(tracked.originalData(), false);
-                        restored.incrementAndGet();
+                        block.setBlockData(item.data(), false);
+                        restoredKeys.add(key);
+                        completedCount.incrementAndGet();
                     }
                     chunkFuture.complete(null);
                 } catch (RuntimeException ex) {
@@ -211,6 +317,6 @@ public final class TemporaryBlockTracker {
         }
 
         return CompletableFuture.allOf(chunkFutures.toArray(CompletableFuture[]::new))
-                .thenApply(ignored -> restored.get());
+                .thenApply(ignored -> List.copyOf(restoredKeys));
     }
 }

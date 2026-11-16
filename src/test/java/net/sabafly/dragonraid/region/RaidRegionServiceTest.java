@@ -10,6 +10,10 @@ import static org.mockito.Mockito.when;
 
 import java.nio.file.Path;
 import net.sabafly.dragonraid.config.ConfigManager;
+import net.sabafly.dragonraid.config.RegionConfig;
+import net.sabafly.dragonraid.config.RegionConfig.ArenaRegion;
+import net.sabafly.dragonraid.config.RegionConfig.Point3D;
+import net.sabafly.dragonraid.config.RegionConfig.Shape;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
 import org.bukkit.Location;
@@ -117,6 +121,62 @@ class RaidRegionServiceTest {
 
         assertEquals(100.5, rescued.getX(), 1e-6);
         assertEquals(50.0, rescued.getY(), 1e-6);
+        assertEquals(0.5, rescued.getZ(), 1e-6);
+    }
+
+    @Test
+    void clampToArenaAnchor_clampsFinalYIncludingOffsetInsideArenaBounds() {
+        RegionConfig current = configManager.pluginConfig().regions();
+        // Cylinder with maxY = 100 and center.y = 99
+        ArenaRegion cylinder = new ArenaRegion(
+                Shape.CYLINDER,
+                new Point3D(0.0, 99.0, 0.0),
+                120.0,
+                current.arena().min(),
+                current.arena().max(),
+                0,
+                100);
+        configManager.updateRegions(new RegionConfig(cylinder, current.safeZone(), 0.0));
+
+        Location cylinderAnchor = regionService.clampToArenaAnchor(new Location(endWorld, 150.0, -5.0, 0.0), 5.0);
+        assertTrue(cylinderAnchor.getY() <= 98.0); // maxY - 2.0 headroom
+        assertTrue(cylinderAnchor.getY() >= 1.0);
+
+        // Cuboid with maxY = 100 and center.y = 99
+        ArenaRegion cuboid = new ArenaRegion(
+                Shape.CUBOID,
+                new Point3D(0.0, 99.0, 0.0),
+                120.0,
+                new Point3D(-100.0, 0.0, -100.0),
+                new Point3D(100.0, 100.0, 100.0),
+                0,
+                100);
+        configManager.updateRegions(new RegionConfig(cuboid, current.safeZone(), 0.0));
+
+        Location cuboidAnchor = regionService.clampToArenaAnchor(new Location(endWorld, 150.0, -5.0, 0.0), 5.0);
+        assertTrue(cuboidAnchor.getY() <= 98.0);
+        assertTrue(cuboidAnchor.getY() >= 1.0);
+    }
+
+    @Test
+    void findNearestSafeArenaEdgeAsync_skipsLedgeWhenOffsetLandingHasCeilingObstruction() {
+        Block air = mockBlock(Material.AIR, false, true, false);
+        Block endStone = mockBlock(Material.END_STONE, true, false, false);
+        when(endWorld.getBlockAt(any(int.class), any(int.class), any(int.class))).thenReturn(air);
+
+        // Solid roof column from Y=67 up to Y=110 blocks landing on Y=64 ledge with yOffset=1.0
+        when(endWorld.getBlockAt(0, 64, 0)).thenReturn(endStone);
+        for (int roofY = 67; roofY <= 110; roofY++) {
+            when(endWorld.getBlockAt(0, roofY, 0)).thenReturn(endStone);
+        }
+        // Lower clear ledge at (0, 50, 0) has full air above it (51..53)
+        when(endWorld.getBlockAt(0, 50, 0)).thenReturn(endStone);
+
+        Location fallLoc = new Location(endWorld, 5.0, -2.0, 0.0);
+        Location rescued = regionService.findNearestSafeArenaEdgeAsync(fallLoc, 1.0).join();
+
+        assertEquals(0.5, rescued.getX(), 1e-6);
+        assertEquals(52.0, rescued.getY(), 1e-6); // 50 + 1.0 + 1.0 offset
         assertEquals(0.5, rescued.getZ(), 1e-6);
     }
 
