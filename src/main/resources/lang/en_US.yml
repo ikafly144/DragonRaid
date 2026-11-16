@@ -22,6 +22,13 @@ command:
   ready-toggled: "<prefix><aqua>Ready status: <state></aqua>"
   ready-state-true: "<green>Ready</green>"
   ready-state-false: "<gray>Not Ready</gray>"
+  ready-not-available: "<prefix><yellow>Ready status cannot be toggled while a raid is active.</yellow>"
+  start-no-players: "<prefix><red>No eligible players found in the End world to start the raid.</red>"
+  start-too-few-players: "<prefix><red>Not enough players to start the raid (<current>/<min> required).</red>"
+  start-too-many-players: "<prefix><red>Too many players in the raid area (<current>/<max> allowed).</red>"
+  region-invalid-arg: "<prefix><red>Invalid region parameter: <details></red>"
+  region-locked-during-raid: "<prefix><red>Arena region bounds cannot be modified while a raid is active or temporary blocks are pending rollback.</red>"
+  rollback-pending: "<prefix><yellow>Cannot start a new raid until pending temporary block rollbacks finish.</yellow>"
   altar-only-mode: "<prefix><yellow>Currently, raids can only be started from the Exit Portal Altar.</yellow>"
   start-triggered: "<prefix><gold>Started pull countdown for <difficulty> raid.</gold>"
   already-running: "<prefix><red>A raid encounter is already in progress.</red>"
@@ -39,6 +46,7 @@ raid:
   pull-countdown-title: "<gold><bold>PULL IN <seconds></bold></gold>"
   pull-countdown-subtitle: "<gray>Difficulty: <difficulty> | Players: <players></gray>"
   pull-cancelled: "<prefix><yellow>Pull countdown cancelled because players returned to the safe zone.</yellow>"
+  pull-cancelled-min-players: "<prefix><yellow>Pull countdown cancelled because party size fell below the minimum (<min>).</yellow>"
   raid-start-title: "<dark_purple><bold>RAID START</bold></dark_purple>"
   raid-start-subtitle: "<light_purple><boss> (<difficulty>) — Party Size N=<players></light_purple>"
   late-join-locked: "<prefix><yellow>A raid is currently in progress. Please wait in the safe zone until the attempt ends.</yellow>"
@@ -50,6 +58,10 @@ raid:
   arena-protected: "<prefix><red>Original End terrain cannot be broken during the raid.</red>"
   bed-blocked: "<prefix><red>Beds and respawn anchors cannot be used during the raid.</red>"
   temp-block-limit: "<prefix><yellow>Temporary block placement limit (<limit>) reached.</yellow>"
+  temp-block-disabled: "<prefix><red>Placing temporary blocks is disabled during the raid.</red>"
+  water-bucket-blocked: "<prefix><red>Using water buckets is disabled during the raid.</red>"
+  ender-pearl-blocked: "<prefix><red>Using Ender Pearls is disabled during the raid.</red>"
+  wind-charge-blocked: "<prefix><red>Using Wind Charges is disabled during the raid.</red>"
   item-loss-protected: "<prefix><aqua>Your items and experience were preserved by raid protection.</aqua>"
 
 revive:
@@ -63,6 +75,7 @@ revive:
   revived-success: "<prefix><green><target> was revived by <reviver>! (Revives left: <remaining>)</green>"
   no-revives-left: "<prefix><red>No revives remaining for this attempt.</red>"
   expired-spectator: "<prefix><dark_red><player>'s revive timer expired — moved to spectator state.</dark_red>"
+  downed-action-blocked: "<red>You are downed and cannot act. Wait for an ally to revive you.</red>"
 
 boss:
   normal:

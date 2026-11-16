@@ -1,12 +1,6 @@
 package net.sabafly.dragonraid.storage;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import net.sabafly.dragonraid.storage.PointTransactionResult.FailureReason;
-import org.sqlite.SQLiteConfig;
-
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -20,18 +14,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * SQLite-backed {@link PlayerDataRepository} using HikariCP, WAL mode, parameterized SQL,
@@ -40,21 +25,10 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
     private static final int DEFAULT_POOL_SIZE = 4;
-    private static final int BUSY_TIMEOUT_MS = 5000;
     private static final Duration DEFAULT_CLOSE_DRAIN_TIMEOUT = Duration.ofSeconds(5);
 
-    private final HikariDataSource dataSource;
-    private final Executor asyncExecutor;
-    private final long closeDrainTimeoutNanos;
-    // SQLite permits one concurrent writer per database; serializing write transactions in-JVM
-    // eliminates SQLITE_BUSY contention while reads proceed concurrently under WAL mode.
-    private final ReentrantLock writeLock = new ReentrantLock(true);
-    private final AtomicBoolean closing = new AtomicBoolean(false);
-    private final AtomicBoolean closed = new AtomicBoolean(false);
-    private final Set<PendingTask> pendingTasks = ConcurrentHashMap.newKeySet();
-
-    private record PendingTask(CompletableFuture<Void> internalDone, CompletableFuture<?> publicFuture) {
-    }
+    private final SqliteDatabase database;
+    private final boolean ownsDatabase;
 
     public SqlitePlayerDataRepository(Path databasePath, Executor asyncExecutor) {
         this(databasePath, DEFAULT_POOL_SIZE, asyncExecutor, DEFAULT_CLOSE_DRAIN_TIMEOUT);
@@ -65,42 +39,22 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
     }
 
     SqlitePlayerDataRepository(Path databasePath, int poolSize, Executor asyncExecutor, Duration closeDrainTimeout) {
-        Objects.requireNonNull(databasePath, "databasePath must not be null");
-        Objects.requireNonNull(asyncExecutor, "asyncExecutor must not be null");
-        Objects.requireNonNull(closeDrainTimeout, "closeDrainTimeout must not be null");
-        if (poolSize < 1) {
-            throw new IllegalArgumentException("poolSize must be >= 1");
-        }
-        if (closeDrainTimeout.isNegative()) {
-            throw new IllegalArgumentException("closeDrainTimeout must not be negative");
-        }
-        this.asyncExecutor = asyncExecutor;
-        this.closeDrainTimeoutNanos = closeDrainTimeout.toNanos();
+        this(new SqliteDatabase(databasePath, poolSize, asyncExecutor, closeDrainTimeout), true);
+    }
 
-        Path normalizedPath = databasePath.toAbsolutePath().normalize();
-        createParentDirectories(normalizedPath);
+    public SqlitePlayerDataRepository(SqliteDatabase database) {
+        this(database, false);
+    }
 
-        SQLiteConfig sqliteConfig = new SQLiteConfig();
-        sqliteConfig.setJournalMode(SQLiteConfig.JournalMode.WAL);
-        sqliteConfig.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
-        sqliteConfig.enforceForeignKeys(true);
-        sqliteConfig.setBusyTimeout(BUSY_TIMEOUT_MS);
-        sqliteConfig.setTransactionMode(SQLiteConfig.TransactionMode.IMMEDIATE);
-
-        HikariConfig hikariConfig = new HikariConfig();
-        hikariConfig.setPoolName("DragonRaid-SQLite");
-        hikariConfig.setDriverClassName("org.sqlite.JDBC");
-        hikariConfig.setJdbcUrl("jdbc:sqlite:" + normalizedPath);
-        hikariConfig.setMaximumPoolSize(poolSize);
-        hikariConfig.setMinimumIdle(1);
-        hikariConfig.setConnectionTimeout(10_000L);
-        hikariConfig.setDataSourceProperties(sqliteConfig.toProperties());
-
-        this.dataSource = new HikariDataSource(hikariConfig);
+    private SqlitePlayerDataRepository(SqliteDatabase database, boolean ownsDatabase) {
+        this.database = Objects.requireNonNull(database, "database must not be null");
+        this.ownsDatabase = ownsDatabase;
         try {
             initializeSchema();
         } catch (RuntimeException ex) {
-            this.dataSource.close();
+            if (ownsDatabase) {
+                database.close();
+            }
             throw ex;
         }
     }
@@ -429,51 +383,8 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
     @Override
     public void close() {
-        if (!closing.compareAndSet(false, true)) {
-            return;
-        }
-        List<PendingTask> timedOut = List.of();
-        try {
-            drainPendingTasks();
-        } finally {
-            closed.set(true);
-            timedOut = List.copyOf(pendingTasks);
-            for (PendingTask leftover : timedOut) {
-                pendingTasks.remove(leftover);
-                leftover.internalDone().complete(null);
-            }
-            dataSource.close();
-        }
-        for (PendingTask leftover : timedOut) {
-            ForkJoinPool.commonPool().execute(() -> leftover.publicFuture().completeExceptionally(
-                new CancellationException("SqlitePlayerDataRepository closed before completion")
-            ));
-        }
-    }
-
-    private void drainPendingTasks() {
-        long deadline = System.nanoTime() + closeDrainTimeoutNanos;
-        while (!pendingTasks.isEmpty()) {
-            long remainingNanos = deadline - System.nanoTime();
-            if (remainingNanos <= 0L) {
-                break;
-            }
-            CompletableFuture<?>[] snapshot = pendingTasks.stream()
-                .map(PendingTask::internalDone)
-                .toArray(CompletableFuture[]::new);
-            if (snapshot.length == 0) {
-                break;
-            }
-            try {
-                CompletableFuture.allOf(snapshot).get(remainingNanos, TimeUnit.NANOSECONDS);
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (TimeoutException ex) {
-                break;
-            } catch (ExecutionException ex) {
-                // Individual task failures are propagated on each public future.
-            }
+        if (ownsDatabase) {
+            database.close();
         }
     }
 
@@ -664,119 +575,27 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
     }
 
     private <T> CompletableFuture<T> supplyAsync(java.util.function.Supplier<T> supplier) {
-        ensureAccepting();
-        CompletableFuture<Void> internalDone = new CompletableFuture<>();
-        CompletableFuture<T> publicFuture = new CompletableFuture<>();
-        PendingTask task = new PendingTask(internalDone, publicFuture);
-        pendingTasks.add(task);
-        if (closing.get()) {
-            pendingTasks.remove(task);
-            throw new IllegalStateException("SqlitePlayerDataRepository is already closed");
-        }
-        internalDone.whenComplete((ignored, error) -> pendingTasks.remove(task));
-        try {
-            asyncExecutor.execute(() -> {
-                if (internalDone.isDone() || publicFuture.isDone()) {
-                    internalDone.complete(null);
-                    return;
-                }
-                try {
-                    T result = supplier.get();
-                    publicFuture.complete(result);
-                } catch (Throwable ex) {
-                    publicFuture.completeExceptionally(ex);
-                } finally {
-                    internalDone.complete(null);
-                }
-            });
-        } catch (Throwable ex) {
-            pendingTasks.remove(task);
-            publicFuture.completeExceptionally(ex);
-            internalDone.complete(null);
-            throw ex;
-        }
-        return publicFuture;
+        return database.supplyAsync(supplier);
     }
 
     private CompletableFuture<Void> runAsync(Runnable runnable) {
-        return supplyAsync(() -> {
-            runnable.run();
-            return null;
-        });
+        return database.runAsync(runnable);
     }
 
-    private <T> T withReadConnection(SqlFunction<Connection, T> action) {
-        ensureOpen();
-        try (Connection conn = dataSource.getConnection()) {
-            return action.apply(conn);
-        } catch (SQLException ex) {
-            throw new IllegalStateException("SQLite read operation failed", ex);
-        }
+    private <T> T withReadConnection(SqliteDatabase.SqlFunction<Connection, T> action) {
+        return database.withReadConnection(action);
     }
 
-    private <T> T withWriteTransaction(SqlTxFunction<T> action) {
-        ensureOpen();
-        writeLock.lock();
-        try (Connection conn = dataSource.getConnection()) {
-            boolean originalAutoCommit = conn.getAutoCommit();
-            conn.setAutoCommit(false);
-            TransactionContext tx = new TransactionContext();
-            try {
-                T result = action.apply(conn, tx);
-                if (tx.rollbackOnly) {
-                    conn.rollback();
-                } else {
-                    conn.commit();
-                }
-                return result;
-            } catch (Throwable ex) {
-                try {
-                    conn.rollback();
-                } catch (SQLException suppressed) {
-                    ex.addSuppressed(suppressed);
-                }
-                if (ex instanceof SQLException sqlEx) {
-                    throw new IllegalStateException("SQLite write transaction failed", sqlEx);
-                }
-                if (ex instanceof RuntimeException runtimeEx) {
-                    throw runtimeEx;
-                }
-                throw new IllegalStateException("SQLite write transaction failed", ex);
-            } finally {
-                try {
-                    conn.setAutoCommit(originalAutoCommit);
-                } catch (SQLException ignored) {
-                    // Connection will be closed/reset by HikariCP.
-                }
-            }
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to obtain SQLite write connection", ex);
-        } finally {
-            writeLock.unlock();
-        }
+    private <T> T withWriteTransaction(SqliteDatabase.SqlTxFunction<T> action) {
+        return database.withWriteTransaction(action);
     }
 
     private void ensureAccepting() {
-        if (closing.get() || closed.get()) {
-            throw new IllegalStateException("SqlitePlayerDataRepository is already closed");
-        }
+        database.ensureAccepting();
     }
 
     private void ensureOpen() {
-        if (closed.get()) {
-            throw new IllegalStateException("SqlitePlayerDataRepository is already closed");
-        }
-    }
-
-    private static void createParentDirectories(Path databasePath) {
-        Path parent = databasePath.getParent();
-        if (parent != null) {
-            try {
-                Files.createDirectories(parent);
-            } catch (IOException ex) {
-                throw new IllegalStateException("Failed to create database directory: " + parent, ex);
-            }
-        }
+        database.ensureOpen();
     }
 
     private static String normalizeName(String name) {
@@ -802,23 +621,5 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
         CounterColumn(String columnName) {
             this.columnName = columnName;
         }
-    }
-
-    private static final class TransactionContext {
-        private boolean rollbackOnly;
-
-        void markRollbackOnly() {
-            this.rollbackOnly = true;
-        }
-    }
-
-    @FunctionalInterface
-    private interface SqlFunction<I, O> {
-        O apply(I input) throws SQLException;
-    }
-
-    @FunctionalInterface
-    private interface SqlTxFunction<O> {
-        O apply(Connection connection, TransactionContext tx) throws SQLException;
     }
 }

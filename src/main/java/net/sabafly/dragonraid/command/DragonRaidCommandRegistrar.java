@@ -2,6 +2,7 @@ package net.sabafly.dragonraid.command;
 
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -226,7 +227,48 @@ public final class DragonRaidCommandRegistrar {
             .requires(source -> RaidPermissions.hasPermission(source.getSender(), RaidPermissions.ADMIN_REGION))
             .then(buildRegionActionNode(RegionAction.INFO, false))
             .then(buildRegionActionNode(RegionAction.SET_ARENA, true))
-            .then(buildRegionActionNode(RegionAction.SET_SAFEZONE, true));
+            .then(buildRegionActionNode(RegionAction.SET_SAFEZONE, true))
+            .then(Commands.literal("set-arena-radius")
+                .then(Commands.argument("radius", DoubleArgumentType.doubleArg(1.0))
+                    .executes(ctx -> {
+                        double radius = DoubleArgumentType.getDouble(ctx, "radius");
+                        handler.adminSetArenaRadius(ctx.getSource().getSender(), radius);
+                        return Command.SINGLE_SUCCESS;
+                    })))
+            .then(Commands.literal("set-void-y")
+                .then(Commands.argument("y", DoubleArgumentType.doubleArg())
+                    .executes(ctx -> {
+                        double y = DoubleArgumentType.getDouble(ctx, "y");
+                        handler.adminSetVoidY(ctx.getSource().getSender(), y);
+                        return Command.SINGLE_SUCCESS;
+                    })))
+            .then(buildBoundsNode("set-arena-bounds", true))
+            .then(buildBoundsNode("set-safezone-bounds", false));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildBoundsNode(String literal, boolean isArena) {
+        return Commands.literal(literal)
+            .then(Commands.argument("minX", DoubleArgumentType.doubleArg())
+                .then(Commands.argument("minY", DoubleArgumentType.doubleArg())
+                    .then(Commands.argument("minZ", DoubleArgumentType.doubleArg())
+                        .then(Commands.argument("maxX", DoubleArgumentType.doubleArg())
+                            .then(Commands.argument("maxY", DoubleArgumentType.doubleArg())
+                                .then(Commands.argument("maxZ", DoubleArgumentType.doubleArg())
+                                    .executes(ctx -> {
+                                        CommandSender sender = ctx.getSource().getSender();
+                                        double minX = DoubleArgumentType.getDouble(ctx, "minX");
+                                        double minY = DoubleArgumentType.getDouble(ctx, "minY");
+                                        double minZ = DoubleArgumentType.getDouble(ctx, "minZ");
+                                        double maxX = DoubleArgumentType.getDouble(ctx, "maxX");
+                                        double maxY = DoubleArgumentType.getDouble(ctx, "maxY");
+                                        double maxZ = DoubleArgumentType.getDouble(ctx, "maxZ");
+                                        if (isArena) {
+                                            handler.adminSetArenaBounds(sender, minX, minY, minZ, maxX, maxY, maxZ);
+                                        } else {
+                                            handler.adminSetSafeZoneBounds(sender, minX, minY, minZ, maxX, maxY, maxZ);
+                                        }
+                                        return Command.SINGLE_SUCCESS;
+                                    })))))));
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> buildRegionActionNode(RegionAction action, boolean requirePlayer) {

@@ -37,6 +37,7 @@ class ConfigManagerTest {
         assertTrue(cfg.protection().keepInventoryOnRaidDeath());
         assertTrue(cfg.protection().disableBedAndAnchorExplosions());
         assertTrue(cfg.protection().protectOriginalArenaTerrain());
+        assertFalse(cfg.revive().downOnDisconnect());
 
         // Region checks
         assertTrue(cfg.regions().arena().contains(0.0, 64.0, 0.0));

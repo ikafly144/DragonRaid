@@ -22,6 +22,13 @@ command:
   ready-toggled: "<prefix><aqua>準備状態: <state></aqua>"
   ready-state-true: "<green>準備完了</green>"
   ready-state-false: "<gray>未準備</gray>"
+  ready-not-available: "<prefix><yellow>レイド進行中は準備状態を切り替えられません。</yellow>"
+  start-no-players: "<prefix><red>エンドワールドに開始可能なプレイヤーが見つかりません。</red>"
+  start-too-few-players: "<prefix><red>参加人数が不足しています（現在 <current>人 / 最小 <min>人）。</red>"
+  start-too-many-players: "<prefix><red>参加人数が上限を超えています（現在 <current>人 / 最大 <max>人）。</red>"
+  region-invalid-arg: "<prefix><red>リージョンパラメータが不正です: <details></red>"
+  region-locked-during-raid: "<prefix><red>レイド進行中または一時ブロック復元待ちのため、アリーナ境界を変更できません。</red>"
+  rollback-pending: "<prefix><yellow>一時ブロックの復元が完了するまで新しいレイドを開始できません。</yellow>"
   altar-only-mode: "<prefix><yellow>現在、帰還ポータル祭壇からのみ開始できます。</yellow>"
   start-triggered: "<prefix><gold><difficulty> レイドの開始カウントダウンを開始しました。</gold>"
   already-running: "<prefix><red>現在レイドが進行中です。</red>"
@@ -39,6 +46,7 @@ raid:
   pull-countdown-title: "<gold><bold>開戦まで <seconds></bold></gold>"
   pull-countdown-subtitle: "<gray>難易度: <difficulty> | 参加人数: <players>人</gray>"
   pull-cancelled: "<prefix><yellow>参加者が待機エリアに戻ったためカウントダウンを中断しました。</yellow>"
+  pull-cancelled-min-players: "<prefix><yellow>参加人数が最小人数（<min>人）を下回ったためカウントダウンを中断しました。</yellow>"
   raid-start-title: "<dark_purple><bold>RAID START</bold></dark_purple>"
   raid-start-subtitle: "<light_purple><boss> (<difficulty>) — 参加人数 N=<players></light_purple>"
   late-join-locked: "<prefix><yellow>現在レイド戦闘中のため、安全待機エリアで観戦待機となります。</yellow>"
@@ -50,6 +58,10 @@ raid:
   arena-protected: "<prefix><red>戦闘中は元から存在するエンドの地形を破壊できません。</red>"
   bed-blocked: "<prefix><red>レイド戦闘中はベッドやリスポーンアンカーを使用できません。</red>"
   temp-block-limit: "<prefix><yellow>一時ブロックの設置上限（<limit>個）に達しました。</yellow>"
+  temp-block-disabled: "<prefix><red>レイド戦闘中は一時ブロックの設置が禁止されています。</red>"
+  water-bucket-blocked: "<prefix><red>レイド戦闘中は水バケツの使用が禁止されています。</red>"
+  ender-pearl-blocked: "<prefix><red>レイド戦闘中はエンダーパールの使用が禁止されています。</red>"
+  wind-charge-blocked: "<prefix><red>レイド戦闘中はウィンドチャージの使用が禁止されています。</red>"
   item-loss-protected: "<prefix><aqua>レイド保護により装備・所持品は保持されました。</aqua>"
 
 revive:
@@ -63,6 +75,7 @@ revive:
   revived-success: "<prefix><green><target> が <reviver> によって蘇生されました！（残り蘇生回数: <remaining>）</green>"
   no-revives-left: "<prefix><red>この試行の蘇生回数上限に達しています。</red>"
   expired-spectator: "<prefix><dark_red><player> は蘇生制限時間を超過し、観戦状態へ移行しました。</dark_red>"
+  downed-action-blocked: "<red>ダウン状態のため行動できません。味方の蘇生を待ってください。</red>"
 
 boss:
   normal:

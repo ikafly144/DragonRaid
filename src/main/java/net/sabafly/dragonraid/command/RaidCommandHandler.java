@@ -122,6 +122,48 @@ public interface RaidCommandHandler {
     void adminRegion(CommandSender sender, @Nullable Location location, RegionAction action);
 
     /**
+     * Updates the arena radius (converting to cylinder if needed) and persists to config.
+     */
+    default void adminSetArenaRadius(CommandSender sender, double radius) {
+        adminRegion(sender, null, RegionAction.INFO);
+    }
+
+    /**
+     * Updates the void Y-threshold for downed rescue interception and persists to config.
+     */
+    default void adminSetVoidY(CommandSender sender, double voidY) {
+        adminRegion(sender, null, RegionAction.INFO);
+    }
+
+    /**
+     * Sets cuboid arena bounds and persists to config.
+     */
+    default void adminSetArenaBounds(
+            CommandSender sender,
+            double minX,
+            double minY,
+            double minZ,
+            double maxX,
+            double maxY,
+            double maxZ) {
+        adminRegion(sender, null, RegionAction.INFO);
+    }
+
+    /**
+     * Sets cuboid safe-zone bounds and persists to config.
+     */
+    default void adminSetSafeZoneBounds(
+            CommandSender sender,
+            double minX,
+            double minY,
+            double minZ,
+            double maxX,
+            double maxY,
+            double maxZ) {
+        adminRegion(sender, null, RegionAction.INFO);
+    }
+
+    /**
      * Force-starts a DragonRaid encounter at the specified difficulty.
      *
      * @param sender the command sender

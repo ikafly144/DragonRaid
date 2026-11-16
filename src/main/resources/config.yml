@@ -114,6 +114,8 @@ revive:
   void-rescue-y-offset: 2.0
   wipe-delay-seconds: 5
   wipe-if-all-leave-arena: true
+  # If true, disconnecting during active combat transitions ALIVE -> DOWNED (otherwise state is preserved)
+  down-on-disconnect: false
 
 protection:
   # Prevent item & XP loss on raid death, void fall, or wipe

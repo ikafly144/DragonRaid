@@ -1,5 +1,6 @@
 package net.sabafly.dragonraid.command;
 
+import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
 import net.sabafly.dragonraid.config.RegionConfig.ArenaRegion;
@@ -7,6 +8,7 @@ import net.sabafly.dragonraid.config.RegionConfig.Point3D;
 import net.sabafly.dragonraid.config.RegionConfig.SafeZoneRegion;
 import net.sabafly.dragonraid.config.RegionConfig.Shape;
 import net.sabafly.dragonraid.config.RegionConfig.SpawnPoint;
+import net.sabafly.dragonraid.encounter.RaidEncounterManager;
 import net.sabafly.dragonraid.i18n.MessageService;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
@@ -44,6 +46,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     private final PlayerDataRepository repository;
     private final Logger logger;
     private final Function<String, Optional<Player>> onlinePlayerLookup;
+    private final @Nullable RaidEncounterManager encounterManager;
 
     /**
      * Creates a command handler backed by Bukkit's online player registry.
@@ -67,7 +70,30 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             scheduler,
             repository,
             logger,
-            name -> Optional.ofNullable(Bukkit.getPlayerExact(name))
+            name -> Optional.ofNullable(Bukkit.getPlayerExact(name)),
+            null
+        );
+    }
+
+    /**
+     * Creates a command handler backed by Bukkit's online player registry and an active encounter manager.
+     */
+    public DefaultRaidCommandHandler(
+        ConfigManager configManager,
+        MessageService messageService,
+        RaidScheduler scheduler,
+        PlayerDataRepository repository,
+        Logger logger,
+        @Nullable RaidEncounterManager encounterManager
+    ) {
+        this(
+            configManager,
+            messageService,
+            scheduler,
+            repository,
+            logger,
+            name -> Optional.ofNullable(Bukkit.getPlayerExact(name)),
+            encounterManager
         );
     }
 
@@ -89,12 +115,28 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         Logger logger,
         Function<String, Optional<Player>> onlinePlayerLookup
     ) {
+        this(configManager, messageService, scheduler, repository, logger, onlinePlayerLookup, null);
+    }
+
+    /**
+     * Full constructor injecting all dependencies including {@link RaidEncounterManager}.
+     */
+    public DefaultRaidCommandHandler(
+        ConfigManager configManager,
+        MessageService messageService,
+        RaidScheduler scheduler,
+        PlayerDataRepository repository,
+        Logger logger,
+        Function<String, Optional<Player>> onlinePlayerLookup,
+        @Nullable RaidEncounterManager encounterManager
+    ) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.repository = Objects.requireNonNull(repository, "repository");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.onlinePlayerLookup = Objects.requireNonNull(onlinePlayerLookup, "onlinePlayerLookup");
+        this.encounterManager = encounterManager;
     }
 
     @Override
@@ -162,7 +204,11 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             messageService.send(player, "command.altar-only-mode");
             return;
         }
-        messageService.send(player, "command.milestone-ready");
+        if (encounterManager != null) {
+            encounterManager.toggleReady(player);
+        } else {
+            messageService.send(player, "command.milestone-ready");
+        }
     }
 
     @Override
@@ -172,7 +218,11 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             messageService.send(sender, "command.altar-only-mode");
             return;
         }
-        messageService.send(sender, "command.milestone-start");
+        if (encounterManager != null) {
+            encounterManager.triggerStart(sender);
+        } else {
+            messageService.send(sender, "command.milestone-start");
+        }
     }
 
     @Override
@@ -203,7 +253,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                 double x = location.getX();
                 double y = location.getY();
                 double z = location.getZ();
-                persistRegions(sender, "arena", latest -> new RegionConfig(
+                persistArenaRegions(sender, "arena", latest -> new RegionConfig(
                         recenterArena(latest.arena(), x, y, z),
                         latest.safeZone(),
                         latest.voidYThreshold()
@@ -229,9 +279,139 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     }
 
     @Override
+    public void adminSetArenaRadius(CommandSender sender, double radius) {
+        Objects.requireNonNull(sender, "sender");
+        if (!Double.isFinite(radius) || radius <= 0.0) {
+            messageService.send(
+                    sender,
+                    "command.region-invalid-arg",
+                    Placeholder.unparsed("details", "radius must be > 0"));
+            return;
+        }
+        persistArenaRegions(sender, "arena", latest -> {
+            ArenaRegion cur = latest.arena();
+            Point3D center = cur.center();
+            ArenaRegion updated = new ArenaRegion(
+                    Shape.CYLINDER,
+                    center,
+                    radius,
+                    new Point3D(center.x() - radius, cur.minY(), center.z() - radius),
+                    new Point3D(center.x() + radius, cur.maxY(), center.z() + radius),
+                    cur.minY(),
+                    cur.maxY());
+            return new RegionConfig(updated, latest.safeZone(), latest.voidYThreshold());
+        });
+    }
+
+    @Override
+    public void adminSetVoidY(CommandSender sender, double voidY) {
+        Objects.requireNonNull(sender, "sender");
+        if (!Double.isFinite(voidY)) {
+            messageService.send(
+                    sender,
+                    "command.region-invalid-arg",
+                    Placeholder.unparsed("details", "void-y must be finite"));
+            return;
+        }
+        persistRegions(sender, "void-y", latest -> new RegionConfig(
+                latest.arena(),
+                latest.safeZone(),
+                voidY));
+    }
+
+    @Override
+    public void adminSetArenaBounds(
+            CommandSender sender,
+            double minX,
+            double minY,
+            double minZ,
+            double maxX,
+            double maxY,
+            double maxZ) {
+        Objects.requireNonNull(sender, "sender");
+        if (!areValidBounds(minX, minY, minZ, maxX, maxY, maxZ)) {
+            messageService.send(
+                    sender,
+                    "command.region-invalid-arg",
+                    Placeholder.unparsed("details", "min coordinates must be <= max coordinates"));
+            return;
+        }
+        persistArenaRegions(sender, "arena", latest -> {
+            Point3D min = new Point3D(minX, minY, minZ);
+            Point3D max = new Point3D(maxX, maxY, maxZ);
+            Point3D center = new Point3D((minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0);
+            ArenaRegion updated = new ArenaRegion(
+                    Shape.CUBOID,
+                    center,
+                    latest.arena().radius(),
+                    min,
+                    max,
+                    (int) Math.floor(minY),
+                    (int) Math.ceil(maxY));
+            return new RegionConfig(updated, latest.safeZone(), latest.voidYThreshold());
+        });
+    }
+
+    @Override
+    public void adminSetSafeZoneBounds(
+            CommandSender sender,
+            double minX,
+            double minY,
+            double minZ,
+            double maxX,
+            double maxY,
+            double maxZ) {
+        Objects.requireNonNull(sender, "sender");
+        if (!areValidBounds(minX, minY, minZ, maxX, maxY, maxZ)) {
+            messageService.send(
+                    sender,
+                    "command.region-invalid-arg",
+                    Placeholder.unparsed("details", "min coordinates must be <= max coordinates"));
+            return;
+        }
+        persistRegions(sender, "safe-zone", latest -> {
+            Point3D min = new Point3D(minX, minY, minZ);
+            Point3D max = new Point3D(maxX, maxY, maxZ);
+            Point3D center = new Point3D((minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0);
+            SpawnPoint currentSpawn = latest.safeZone().spawnPoint();
+            boolean spawnInside = currentSpawn.x() >= minX && currentSpawn.x() <= maxX
+                    && currentSpawn.y() >= minY && currentSpawn.y() <= maxY
+                    && currentSpawn.z() >= minZ && currentSpawn.z() <= maxZ;
+            SpawnPoint spawn = spawnInside
+                    ? currentSpawn
+                    : new SpawnPoint(center.x(), Math.min(maxY, minY + 1.0), center.z(),
+                            currentSpawn.yaw(), currentSpawn.pitch());
+            SafeZoneRegion updated = new SafeZoneRegion(
+                    Shape.CUBOID,
+                    center,
+                    latest.safeZone().radius(),
+                    min,
+                    max,
+                    (int) Math.floor(minY),
+                    (int) Math.ceil(maxY),
+                    spawn);
+            return new RegionConfig(latest.arena(), updated, latest.voidYThreshold());
+        });
+    }
+
+    private static boolean areValidBounds(
+            double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+        return Double.isFinite(minX) && Double.isFinite(minY) && Double.isFinite(minZ)
+                && Double.isFinite(maxX) && Double.isFinite(maxY) && Double.isFinite(maxZ)
+                && minX <= maxX && minY <= maxY && minZ <= maxZ;
+    }
+
+    @Override
     public void adminStart(CommandSender sender, Difficulty difficulty) {
         Objects.requireNonNull(sender, "sender");
         Objects.requireNonNull(difficulty, "difficulty");
+        if (encounterManager != null) {
+            BossConfig.Difficulty mapped = difficulty == Difficulty.HARD
+                    ? BossConfig.Difficulty.HARD
+                    : BossConfig.Difficulty.NORMAL;
+            encounterManager.adminStart(sender, mapped);
+            return;
+        }
         messageService.send(
             sender,
             "command.milestone-admin-start",
@@ -242,6 +422,10 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     @Override
     public void adminReset(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
+        if (encounterManager != null) {
+            encounterManager.adminReset(sender);
+            return;
+        }
         messageService.send(sender, "command.milestone-admin-reset");
     }
 
@@ -453,6 +637,40 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         }
     }
 
+    private void persistArenaRegions(CommandSender sender, String regionName, UnaryOperator<RegionConfig> updater) {
+        if (encounterManager != null && !encounterManager.tryBeginArenaRegionUpdate()) {
+            messageService.send(sender, "command.region-locked-during-raid");
+            return;
+        }
+        UnaryOperator<RegionConfig> guardedUpdater = latest -> {
+            if (encounterManager != null && !encounterManager.canModifyArenaRegion()) {
+                throw new ArenaRegionLockedException();
+            }
+            return updater.apply(latest);
+        };
+        configManager.updateRegionsAsync(guardedUpdater, scheduler.asyncExecutor())
+                .whenComplete((ignored, error) -> {
+                    if (encounterManager != null) {
+                        encounterManager.endArenaRegionUpdate();
+                    }
+                    replyOnSenderThread(sender, () -> {
+                        if (error == null) {
+                            messageService.send(sender, "command.region-updated",
+                                    Placeholder.unparsed("region", regionName));
+                        } else {
+                            Throwable cause = unwrapCause(error);
+                            if (cause instanceof ArenaRegionLockedException) {
+                                messageService.send(sender, "command.region-locked-during-raid");
+                                return;
+                            }
+                            logger.log(Level.WARNING, "Failed to update region " + regionName, cause);
+                            messageService.send(sender, "command.reload-failed",
+                                    Placeholder.unparsed("error", formatErrorDetail(cause)));
+                        }
+                    });
+                });
+    }
+
     private void persistRegions(CommandSender sender, String regionName, UnaryOperator<RegionConfig> updater) {
         configManager.updateRegionsAsync(updater, scheduler.asyncExecutor())
                 .whenComplete((ignored, error) -> replyOnSenderThread(sender, () -> {
@@ -466,6 +684,9 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                                 Placeholder.unparsed("error", formatErrorDetail(cause)));
                     }
                 }));
+    }
+
+    private static final class ArenaRegionLockedException extends RuntimeException {
     }
 
     private static Throwable unwrapCause(Throwable error) {
