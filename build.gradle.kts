@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.resource.factory.paper)
 }
 
-group = "io.github.ikafly144"
+group = "net.sabafly.dragonraid"
 version = "0.1.0-SNAPSHOT"
 description = "Timeline-based MMO raid plugin for Ender Dragon fights on Folia"
 
@@ -45,7 +45,7 @@ dependencies {
 paperPluginYaml {
     name = "DragonRaid"
     version = project.version.toString()
-    main = "io.github.ikafly144.dragonraid.DragonRaidPlugin"
+    main = "net.sabafly.dragonraid.DragonRaidPlugin"
     apiVersion = "26.3"
     foliaSupported = true
     description = project.description
@@ -83,10 +83,10 @@ tasks {
     shadowJar {
         archiveClassifier.set("")
         mergeServiceFiles()
-        relocate("com.zaxxer.hikari", "io.github.ikafly144.dragonraid.libs.hikari")
-        relocate("org.spongepowered.configurate", "io.github.ikafly144.dragonraid.libs.configurate")
-        relocate("io.leangen.geantyref", "io.github.ikafly144.dragonraid.libs.geantyref")
-        relocate("net.kyori.option", "io.github.ikafly144.dragonraid.libs.option")
+        relocate("com.zaxxer.hikari", "net.sabafly.dragonraid.libs.hikari")
+        relocate("org.spongepowered.configurate", "net.sabafly.dragonraid.libs.configurate")
+        relocate("io.leangen.geantyref", "net.sabafly.dragonraid.libs.geantyref")
+        relocate("net.kyori.option", "net.sabafly.dragonraid.libs.option")
     }
 
     assemble {
