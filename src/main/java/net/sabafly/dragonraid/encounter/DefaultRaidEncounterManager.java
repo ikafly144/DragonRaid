@@ -41,6 +41,7 @@ import net.sabafly.dragonraid.gimmick.NormalGimmickExecutor;
 import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
 import net.sabafly.dragonraid.hud.RaidHudService;
 import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.instance.RaidInstanceManager;
 import net.sabafly.dragonraid.protection.BlockPosKey;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.RaidRegionService;
@@ -102,6 +103,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private final @Nullable RaidHudService hudService;
     private final @Nullable RaidCrystalManager crystalManager;
     private final @Nullable NormalGimmickExecutor gimmickExecutor;
+    private final @Nullable RaidInstanceManager instanceManager;
     private final Logger logger;
     private final Supplier<@Nullable World> endWorldSupplier;
     private final Supplier<Collection<? extends Player>> onlinePlayersSupplier;
@@ -210,6 +212,40 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 hudService,
                 crystalManager,
                 gimmickExecutor,
+                null,
+                logger
+        );
+    }
+
+    public DefaultRaidEncounterManager(
+            ConfigManager configManager,
+            MessageService messageService,
+            RaidScheduler scheduler,
+            RaidRegionService regionService,
+            TemporaryBlockTracker blockTracker,
+            SoulMarkerService soulMarkerService,
+            @Nullable RaidRecoveryRepository recoveryRepository,
+            @Nullable PlayerDataRepository playerDataRepository,
+            @Nullable DragonBossController bossController,
+            @Nullable RaidHudService hudService,
+            @Nullable RaidCrystalManager crystalManager,
+            @Nullable NormalGimmickExecutor gimmickExecutor,
+            @Nullable RaidInstanceManager instanceManager,
+            Logger logger) {
+        this(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                recoveryRepository,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
+                instanceManager,
                 logger,
                 () -> Bukkit.getWorld(configManager.pluginConfig().world().endWorldName()),
                 Bukkit::getOnlinePlayers,
@@ -274,6 +310,49 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             Function<UUID, @Nullable Player> playerLookup,
             LongSupplier clockMillis,
             Predicate<World> livingDragonPredicate) {
+        this(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                recoveryRepository,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
+                null,
+                logger,
+                endWorldSupplier,
+                onlinePlayersSupplier,
+                playerLookup,
+                clockMillis,
+                livingDragonPredicate
+        );
+    }
+
+    DefaultRaidEncounterManager(
+            ConfigManager configManager,
+            MessageService messageService,
+            RaidScheduler scheduler,
+            RaidRegionService regionService,
+            TemporaryBlockTracker blockTracker,
+            SoulMarkerService soulMarkerService,
+            @Nullable RaidRecoveryRepository recoveryRepository,
+            @Nullable PlayerDataRepository playerDataRepository,
+            @Nullable DragonBossController bossController,
+            @Nullable RaidHudService hudService,
+            @Nullable RaidCrystalManager crystalManager,
+            @Nullable NormalGimmickExecutor gimmickExecutor,
+            @Nullable RaidInstanceManager instanceManager,
+            Logger logger,
+            Supplier<@Nullable World> endWorldSupplier,
+            Supplier<Collection<? extends Player>> onlinePlayersSupplier,
+            Function<UUID, @Nullable Player> playerLookup,
+            LongSupplier clockMillis,
+            Predicate<World> livingDragonPredicate) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
@@ -286,12 +365,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         this.hudService = hudService;
         this.crystalManager = crystalManager;
         this.gimmickExecutor = gimmickExecutor;
+        this.instanceManager = instanceManager;
         this.logger = Objects.requireNonNull(logger, "logger");
         this.endWorldSupplier = Objects.requireNonNull(endWorldSupplier, "endWorldSupplier");
         this.onlinePlayersSupplier = Objects.requireNonNull(onlinePlayersSupplier, "onlinePlayersSupplier");
         this.playerLookup = Objects.requireNonNull(playerLookup, "playerLookup");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.livingDragonPredicate = Objects.requireNonNull(livingDragonPredicate, "livingDragonPredicate");
+        if (this.crystalManager != null && this.bossController != null) {
+            this.crystalManager.setOnAllCrystalsDestroyedCallback(() -> this.bossController.stagger(5.0));
+        }
         loadPendingCleanupsFromStorage();
     }
 
@@ -754,7 +837,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             });
         }
 
-        startM3EncounterSystems(endWorld, bossConfig, scaled, activationGen);
+        startM3EncounterSystems(endWorld, party, bossConfig, scaled, activationGen);
 
         AtomicReference<TaskHandle> monitorHandle = new AtomicReference<>();
         TaskHandle scheduledMonitor = scheduler.runGlobalTimer(() -> {
@@ -781,7 +864,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         if (state != RaidState.ACTIVE) {
             return;
         }
-        World endWorld = endWorldSupplier.get();
+        World fallbackEnd = endWorldSupplier.get();
+        World endWorld = instanceManager != null ? instanceManager.activeCombatWorld(fallbackEnd) : fallbackEnd;
         if (endWorld == null) {
             return;
         }
@@ -1241,7 +1325,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     @Override
     public void adminReset(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
-        World endWorld = endWorldSupplier.get();
+        World mainEndWorld = endWorldSupplier.get();
+        World combatWorld = instanceManager != null ? instanceManager.activeCombatWorld(mainEndWorld) : mainEndWorld;
         long resetGeneration;
         synchronized (stateLock) {
             cancelHandle(countdownTask);
@@ -1254,13 +1339,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             state = RaidState.ENDING;
         }
 
-        List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
+        List<Player> viewers = combatWorld != null ? onlinePlayersInWorld(combatWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
         cleanupM3Systems(viewers, true);
-        Location safeSpawn = endWorld != null ? regionService.safeZoneSpawnLocation(endWorld) : null;
+        Location safeSpawn = mainEndWorld != null ? regionService.safeZoneSpawnLocation(mainEndWorld) : null;
         restoreAndResetParticipants(safeSpawn);
         readyPlayers.clear();
-        CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
+        if (instanceManager != null) {
+            instanceManager.destroyActiveInstance(safeSpawn);
+        }
+        CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(combatWorld);
         completeEndingWhenRolledBack(resetGeneration, rollbackFuture);
         messageService.send(sender, "command.admin-reset");
     }
@@ -1320,6 +1408,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
 
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
+        if (instanceManager != null && instanceManager.isInstanceWorld(endWorld)) {
+            World mainEnd = endWorldSupplier.get();
+            Location returnLoc = mainEnd != null ? regionService.safeZoneSpawnLocation(mainEnd) : null;
+            scheduler.runGlobalLater(() -> instanceManager.destroyActiveInstance(returnLoc), 100L);
+        }
         completeEndingWhenRolledBack(defeatGeneration, rollbackFuture);
     }
 
@@ -1679,10 +1772,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 }
             }
         }
-        World endWorld = endWorldSupplier.get();
-        List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
+        World mainEndWorld = endWorldSupplier.get();
+        World combatWorld = instanceManager != null ? instanceManager.activeCombatWorld(mainEndWorld) : mainEndWorld;
+        List<Player> viewers = combatWorld != null ? onlinePlayersInWorld(combatWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
         CompletableFuture<Void> m3CleanupFuture = cleanupM3Systems(viewers, true);
+        if (instanceManager != null) {
+            Location returnLoc = mainEndWorld != null ? regionService.safeZoneSpawnLocation(mainEndWorld) : null;
+            instanceManager.destroyActiveInstance(returnLoc);
+        }
         if (!m3CleanupFuture.isDone()) {
             try {
                 m3CleanupFuture.get(500L, TimeUnit.MILLISECONDS);
@@ -1875,7 +1973,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     private List<Player> collectPullCandidates(World endWorld) {
         List<Player> candidates = new ArrayList<>();
-        for (Player player : onlinePlayersInWorld(endWorld)) {
+        World activeInst = instanceManager != null ? instanceManager.activeCombatWorld(null) : null;
+        List<Player> pool = new ArrayList<>(onlinePlayersInWorld(endWorld));
+        if (activeInst != null && !activeInst.equals(endWorld)) {
+            pool.addAll(onlinePlayersInWorld(activeInst));
+        }
+        for (Player player : pool) {
             PlayerSnapshot snap = snapshots.get(player.getUniqueId());
             boolean inArena = snap != null ? snap.inArena() : regionService.isInArena(player.getLocation());
             boolean inSafe = snap != null ? snap.inSafeZone() : regionService.isInSafeZone(player.getLocation());
@@ -2006,6 +2109,39 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     }
 
     private void startM3EncounterSystems(
+            World fallbackEndWorld,
+            List<Player> party,
+            BossConfig bossConfig,
+            ScaledEncounterParameters scaled,
+            long expectedGeneration) {
+        if (bossController == null || gimmickExecutor == null || crystalManager == null) {
+            return;
+        }
+        if (instanceManager != null) {
+            instanceManager.getOrCreateInstance().whenComplete((instance, err) -> {
+                if (err != null || instance == null) {
+                    logger.log(Level.WARNING, "Failed to prepare temporary raid instance; falling back to End world", err);
+                    activateM3InCombatWorld(fallbackEndWorld, bossConfig, scaled, expectedGeneration);
+                    return;
+                }
+                World instWorld = instance.world();
+                Location entrySpawn = regionService.safeZoneSpawnLocation(instWorld);
+                for (Player member : party) {
+                    if (member != null && member.isOnline() && !instWorld.equals(member.getWorld())) {
+                        scheduler.runAtEntity(member, () -> {
+                            member.teleportAsync(entrySpawn);
+                            updateSnapshot(member, entrySpawn);
+                        });
+                    }
+                }
+                activateM3InCombatWorld(instWorld, bossConfig, scaled, expectedGeneration);
+            });
+            return;
+        }
+        activateM3InCombatWorld(fallbackEndWorld, bossConfig, scaled, expectedGeneration);
+    }
+
+    private void activateM3InCombatWorld(
             World endWorld,
             BossConfig bossConfig,
             ScaledEncounterParameters scaled,
@@ -2222,11 +2358,13 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             bossController.prepareForVanillaDefeat();
         }
         if (configManager.pluginConfig().world().preserveVanillaProgression() && dragon.getDragonBattle() == null) {
-            DragonBattle battle = endWorld.getEnderDragonBattle();
+            World mainEnd = endWorldSupplier.get();
+            World progressionWorld = mainEnd != null ? mainEnd : endWorld;
+            DragonBattle battle = progressionWorld.getEnderDragonBattle();
             if (battle != null) {
                 Location portalAnchor = battle.getEndPortalLocation() != null
                         ? battle.getEndPortalLocation()
-                        : new Location(endWorld, 0.0, 64.0, 0.0);
+                        : new Location(progressionWorld, 0.0, 64.0, 0.0);
                 scheduler.runAtRegion(portalAnchor, () -> {
                     if (battle.getEndPortalLocation() == null) {
                         battle.generateEndPortal(true);

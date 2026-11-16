@@ -87,53 +87,59 @@ class RaidTimelineEngineTest {
         assertEquals("phase-1", engine.currentPhase().id());
         assertEquals(List.of("PHASE:phase-1"), events);
 
-        // 5.0s delay -> SPAWN_CRYSTALS (instant)
-        tickSeconds(5.0, 1.0);
+        // 4.0s delay -> SPAWN_CRYSTALS (instant)
+        tickSeconds(4.0, 1.0);
         assertEquals("INSTANT:SPAWN_CRYSTALS", events.getLast());
 
-        // 8.0s delay -> TANK_BUSTER cast start (3.0s cast)
-        tickSeconds(8.0, 0.90);
+        // 7.0s delay -> FIREBALL_BARRAGE cast start (3.6s cast)
+        tickSeconds(7.0, 0.90);
         assertTrue(engine.isCasting());
-        assertEquals("CAST_START:TANK_BUSTER:3.0", events.getLast());
-        tickSeconds(1.5, 0.90);
+        assertEquals("CAST_START:FIREBALL_BARRAGE:3.6", events.getLast());
+        tickSeconds(1.8, 0.90);
         assertTrue(engine.isCasting());
-        assertEquals(1.5, engine.castRemainingSeconds(), 1e-6);
+        assertEquals(1.8, engine.castRemainingSeconds(), 1e-6);
 
-        // Remaining 1.5s completes TANK_BUSTER
-        tickSeconds(1.5, 0.85);
+        // Remaining 1.8s completes FIREBALL_BARRAGE
+        tickSeconds(1.8, 0.85);
         assertFalse(engine.isCasting());
-        assertEquals("CAST_COMPLETE:TANK_BUSTER", events.getLast());
+        assertEquals("CAST_COMPLETE:FIREBALL_BARRAGE", events.getLast());
 
-        // 10.0s -> STACK (4.5s), then 10.0s -> SPREAD (4.0s), then 12.0s LOOP + 5.0s -> SPAWN_CRYSTALS
-        tickSeconds(10.0, 0.80);
-        assertEquals("CAST_START:STACK:4.5", events.getLast());
-        tickSeconds(4.5, 0.80);
-        assertEquals("CAST_COMPLETE:STACK", events.getLast());
+        // 8.0s -> DRAGON_DIVE_STACK (4.0s), then 8.0s -> LIGHTNING_STORM (3.2s),
+        // then 8.0s -> ENDERMAN_ERUPTION (3.5s), then 10.0s LOOP + 4.0s -> SPAWN_CRYSTALS
+        tickSeconds(8.0, 0.80);
+        assertEquals("CAST_START:DRAGON_DIVE_STACK:4.0", events.getLast());
+        tickSeconds(4.0, 0.80);
+        assertEquals("CAST_COMPLETE:DRAGON_DIVE_STACK", events.getLast());
 
+        tickSeconds(8.0, 0.75);
+        assertEquals("CAST_START:LIGHTNING_STORM:3.2", events.getLast());
+        tickSeconds(3.2, 0.75);
+        assertEquals("CAST_COMPLETE:LIGHTNING_STORM", events.getLast());
+
+        tickSeconds(8.0, 0.75);
+        assertEquals("CAST_START:ENDERMAN_ERUPTION:3.5", events.getLast());
+        tickSeconds(3.5, 0.75);
+        assertEquals("CAST_COMPLETE:ENDERMAN_ERUPTION", events.getLast());
+
+        // LOOP waits 10.0s + step-0 4.0s = 14.0s
         tickSeconds(10.0, 0.75);
-        assertEquals("CAST_START:SPREAD:4.0", events.getLast());
+        assertEquals("CAST_COMPLETE:ENDERMAN_ERUPTION", events.getLast());
         tickSeconds(4.0, 0.75);
-        assertEquals("CAST_COMPLETE:SPREAD", events.getLast());
-
-        // LOOP waits 12.0s + step-0 5.0s = 17.0s
-        tickSeconds(12.0, 0.75);
-        assertEquals("CAST_COMPLETE:SPREAD", events.getLast());
-        tickSeconds(5.0, 0.75);
         assertEquals("INSTANT:SPAWN_CRYSTALS", events.getLast());
     }
 
     @Test
     void hpDropTriggersImmediatePhaseTransitionAndInterruptsCast() {
         engine.start();
-        tickSeconds(5.0, 1.0); // SPAWN_CRYSTALS
-        tickSeconds(8.0, 0.80); // TANK_BUSTER starts casting
+        tickSeconds(4.0, 1.0); // SPAWN_CRYSTALS
+        tickSeconds(7.0, 0.80); // FIREBALL_BARRAGE starts casting
         assertTrue(engine.isCasting());
 
         // HP drops below 0.70 into phase-2
         engine.tick(0.1, 0.68);
         assertFalse(engine.isCasting());
         assertEquals("phase-2", engine.currentPhase().id());
-        assertTrue(events.contains("CAST_INTERRUPTED:TANK_BUSTER"));
+        assertTrue(events.contains("CAST_INTERRUPTED:FIREBALL_BARRAGE"));
         assertEquals("PHASE:phase-2", events.getLast());
 
         // Minor regen back above 0.70 does NOT regress phase-2 -> phase-1
@@ -152,25 +158,25 @@ class RaidTimelineEngineTest {
     @Test
     void staggerPausesTimelineAndInterruptsActiveCast() {
         engine.start();
-        tickSeconds(5.0, 1.0);
-        tickSeconds(8.0, 0.9);
+        tickSeconds(4.0, 1.0);
+        tickSeconds(7.0, 0.9);
         assertTrue(engine.isCasting());
 
         engine.stagger(3.0);
         assertFalse(engine.isCasting());
         assertTrue(engine.isStaggered());
-        assertEquals("CAST_INTERRUPTED:TANK_BUSTER", events.getLast());
+        assertEquals("CAST_INTERRUPTED:FIREBALL_BARRAGE", events.getLast());
 
-        // While staggered, timeline does not advance toward STACK
+        // While staggered, timeline does not advance toward DRAGON_DIVE_STACK
         tickSeconds(2.9, 0.9);
         assertTrue(engine.isStaggered());
         assertFalse(engine.isCasting());
 
-        // Stagger finishes on next 0.1s tick, then 10.0s wait for STACK begins
+        // Stagger finishes on next 0.1s tick, then 8.0s wait for DRAGON_DIVE_STACK begins
         engine.tick(0.1, 0.9);
         assertFalse(engine.isStaggered());
-        tickSeconds(10.0, 0.9);
-        assertEquals("CAST_START:STACK:4.5", events.getLast());
+        tickSeconds(8.0, 0.9);
+        assertEquals("CAST_START:DRAGON_DIVE_STACK:4.0", events.getLast());
     }
 
     private void tickSeconds(double totalSeconds, double hpRatio) {

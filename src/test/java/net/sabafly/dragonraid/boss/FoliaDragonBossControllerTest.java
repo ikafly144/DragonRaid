@@ -130,8 +130,8 @@ class FoliaDragonBossControllerTest {
         assertFalse(controller.wasSummonedByPlugin());
         assertEquals(1980.0, controller.maxHp(), 1e-6);
         assertEquals(1980.0, controller.currentHp(), 1e-6);
-        assertFalse(existing.hasAI());
-        assertEquals(EnderDragon.Phase.HOVER, existing.getPhase());
+        assertTrue(existing.hasAI());
+        assertEquals(EnderDragon.Phase.CIRCLING, existing.getPhase());
         assertEquals(1, entityTimers.size());
 
         // Drive CENTER_LANDED movement
@@ -151,6 +151,14 @@ class FoliaDragonBossControllerTest {
             entityTimers.getFirst().run();
         }
         assertEquals(82.0, controller.bossLocation().getY(), 1e-3);
+
+        // Drive beginDive: ASCENDING_CHARGE -> DIVING
+        Location divePoint = new Location(endWorld, 12.0, 64.0, -8.0);
+        controller.beginDive(divePoint, 1.0);
+        assertEquals(DragonPosture.ASCENDING_CHARGE, controller.posture());
+        controller.tick(1.0);
+        assertEquals(DragonPosture.DIVING, controller.posture());
+        controller.setPosture(DragonPosture.HIGH_HOVER);
 
         // Stagger overrides posture temporarily and restores when elapsed
         controller.stagger(2.0);
@@ -209,7 +217,7 @@ class FoliaDragonBossControllerTest {
         );
 
         controller.bindOrSpawn(endWorld, 1200.0);
-        assertFalse(existing.hasAI());
+        assertTrue(existing.hasAI());
 
         controller.prepareForVanillaDefeat();
         assertTrue(existing.hasAI());
@@ -218,6 +226,7 @@ class FoliaDragonBossControllerTest {
     @Test
     void holdFirstClearIdleFollowedByBindOrSpawnPreservesOriginalFlags() {
         EnderDragon existing = mockDragon(new Location(endWorld, 0.0, 74.0, 0.0), 200.0);
+        existing.setAI(false);
         FoliaDragonBossController controller = new FoliaDragonBossController(
                 configManager,
                 scheduler,
@@ -227,13 +236,13 @@ class FoliaDragonBossControllerTest {
         );
 
         controller.holdFirstClearIdle(endWorld);
-        assertFalse(existing.hasAI());
+        assertTrue(existing.hasAI());
 
         controller.bindOrSpawn(endWorld, 1200.0).join();
-        assertFalse(existing.hasAI());
+        assertTrue(existing.hasAI());
 
         controller.cleanup(true).join();
-        assertTrue(existing.hasAI());
+        assertFalse(existing.hasAI());
     }
 
     @Test

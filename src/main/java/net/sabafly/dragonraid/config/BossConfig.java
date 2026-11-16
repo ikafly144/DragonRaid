@@ -92,8 +92,17 @@ public record BossConfig(
             parameters = Map.copyOf(parameters);
         }
 
+        public double castSeconds() {
+            return getDouble("cast-seconds", 3.5);
+        }
+
         public double castSeconds(double fallback) {
             return getDouble("cast-seconds", fallback);
+        }
+
+        public String getString(String key, String fallback) {
+            Object value = parameters.get(key);
+            return value != null ? String.valueOf(value) : fallback;
         }
 
         public double damage(double fallback) {

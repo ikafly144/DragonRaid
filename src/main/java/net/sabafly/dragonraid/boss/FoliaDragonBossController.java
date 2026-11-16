@@ -22,11 +22,13 @@ import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.boss.DragonBattle;
 import org.bukkit.entity.EnderDragon;
+import org.bukkit.util.Vector;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Folia-safe {@link DragonBossController} driving smooth custom flight/landing/hover motion
- * on the dragon entity's scheduler while suppressing vanilla random dragon AI.
+ * Folia-safe {@link DragonBossController} keeping dragon AI active (`setAI(true)`) so wing-flapping
+ * and body articulation look natural, while steering flight, ascents, high-speed dives, and laser
+ * hover orientation via velocity impulses and controlled phase transitions.
  */
 public final class FoliaDragonBossController implements DragonBossController {
 
@@ -34,9 +36,11 @@ public final class FoliaDragonBossController implements DragonBossController {
     private static final double LOW_ORBIT_Y_OFFSET = 10.0;
     private static final double CENTER_LANDED_Y_OFFSET = 2.0;
     private static final double HIGH_HOVER_Y_OFFSET = 18.0;
+    private static final double ASCEND_CHARGE_Y_OFFSET = 28.0;
     private static final double STAGGERED_Y_OFFSET = 1.5;
     private static final double ORBIT_ANGULAR_SPEED_RAD_PER_TICK = 0.045;
-    private static final double MAX_MOVE_STEP_PER_TICK = 2.2;
+    private static final double MAX_MOVE_STEP_PER_TICK = 2.6;
+    private static final double DIVE_STEP_PER_TICK = 4.2;
     private static final double DEFAULT_FALLBACK_MAX_HP = 1200.0;
 
     private final Object lock = new Object();
@@ -54,6 +58,10 @@ public final class FoliaDragonBossController implements DragonBossController {
     private volatile DragonPosture targetPosture = DragonPosture.LOW_ORBIT;
     private volatile @Nullable DragonPosture preStaggerPosture;
     private volatile double staggerRemainingSeconds;
+    private volatile double diveWindupRemainingSeconds;
+    private volatile @Nullable Location diveTargetLocation;
+    private volatile @Nullable Float customHoverYaw;
+    private volatile @Nullable Float customHoverPitch;
     private volatile double maxHp = DEFAULT_FALLBACK_MAX_HP;
     private volatile double currentHp = DEFAULT_FALLBACK_MAX_HP;
     private volatile @Nullable Location cachedLocation;
@@ -106,6 +114,10 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.targetPosture = DragonPosture.LOW_ORBIT;
             this.preStaggerPosture = null;
             this.staggerRemainingSeconds = 0.0;
+            this.diveWindupRemainingSeconds = 0.0;
+            this.diveTargetLocation = null;
+            this.customHoverYaw = null;
+            this.customHoverPitch = null;
             this.orbitAngleRad = 0.0;
             this.activeCombat = true;
             this.cachedLocation = anchor.clone();
@@ -224,7 +236,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                     this.previousGravity = dragon.hasGravity();
                 }
             }
-            suppressVanillaAi(dragon, initialAnchor.getWorld());
+            configureAnimatedDragon(dragon, initialAnchor.getWorld());
             if (applyHealth && targetMaxHp > 0.0) {
                 applyScaledHealth(dragon, targetMaxHp);
             } else {
@@ -260,13 +272,23 @@ public final class FoliaDragonBossController implements DragonBossController {
         return dragon;
     }
 
-    private void suppressVanillaAi(EnderDragon dragon, @Nullable World world) {
-        dragon.setAI(false);
+    /**
+     * Enables dragon AI (`setAI(true)`) so the client animates wings, neck, and tail naturally,
+     * while anchoring the podium to the arena center.
+     */
+    private void configureAnimatedDragon(EnderDragon dragon, @Nullable World world) {
+        dragon.setAI(true);
         dragon.setGravity(false);
-        dragon.setPhase(EnderDragon.Phase.HOVER);
+        dragon.setPhase(EnderDragon.Phase.CIRCLING);
         if (world != null) {
-            RegionConfig.Point3D center = configManager.pluginConfig().regions().arena().center();
+            RegionConfig.Point3D center = arenaCenterFor(world);
             dragon.setPodium(new Location(world, center.x(), center.y(), center.z()));
+        }
+        if (Bukkit.getServer() != null) {
+            AttributeInstance kbAttr = dragon.getAttribute(Attribute.KNOCKBACK_RESISTANCE);
+            if (kbAttr != null) {
+                kbAttr.setBaseValue(1.0);
+            }
         }
     }
 
@@ -324,12 +346,15 @@ public final class FoliaDragonBossController implements DragonBossController {
             return;
         }
 
-        // Re-assert AI suppression if vanilla flipped phase unexpectedly.
-        if (dragon.hasAI()) {
-            dragon.setAI(false);
+        // Keep AI enabled so client wing/neck/tail animations never freeze!
+        if (!dragon.hasAI()) {
+            dragon.setAI(true);
         }
-        if (dragon.getPhase() != EnderDragon.Phase.HOVER) {
-            dragon.setPhase(EnderDragon.Phase.HOVER);
+
+        DragonPosture effective = posture();
+        EnderDragon.Phase desiredPhase = desiredVanillaPhase(effective);
+        if (dragon.getPhase() != desiredPhase) {
+            dragon.setPhase(desiredPhase);
         }
 
         Location current = dragon.getLocation();
@@ -337,43 +362,91 @@ public final class FoliaDragonBossController implements DragonBossController {
             return;
         }
 
-        Location target = computeTargetLocation(world);
-        Location next = stepTowards(current, target, MAX_MOVE_STEP_PER_TICK * 2.0);
+        Location target = computeTargetLocation(world, current, effective);
+        double stepSpeed = (effective == DragonPosture.DIVING || effective == DragonPosture.ASCENDING_CHARGE)
+                ? DIVE_STEP_PER_TICK * 2.0
+                : MAX_MOVE_STEP_PER_TICK * 2.0;
+        Location next = stepTowards(current, target, stepSpeed);
         this.cachedLocation = next.clone();
 
+        Vector velocity = new Vector(
+                (next.getX() - current.getX()) * 0.5,
+                (next.getY() - current.getY()) * 0.5,
+                (next.getZ() - current.getZ()) * 0.5
+        );
+        dragon.setVelocity(velocity);
         dragon.setRotation(next.getYaw(), next.getPitch());
         dragon.teleportAsync(next);
     }
 
-    private Location computeTargetLocation(World world) {
-        RegionConfig.Point3D center = configManager.pluginConfig().regions().arena().center();
-        DragonPosture effective = posture();
+    private static EnderDragon.Phase desiredVanillaPhase(DragonPosture posture) {
+        return switch (posture) {
+            case LOW_ORBIT -> EnderDragon.Phase.CIRCLING;
+            case ASCENDING_CHARGE, DIVING -> EnderDragon.Phase.CHARGE_PLAYER;
+            case HIGH_HOVER -> EnderDragon.Phase.SEARCH_FOR_BREATH_ATTACK_TARGET;
+            case CENTER_LANDED, STAGGERED -> EnderDragon.Phase.HOVER;
+        };
+    }
+
+    private Location computeTargetLocation(World world, Location current, DragonPosture effective) {
+        RegionConfig.Point3D center = arenaCenterFor(world);
         return switch (effective) {
             case LOW_ORBIT -> {
                 orbitAngleRad = (orbitAngleRad + ORBIT_ANGULAR_SPEED_RAD_PER_TICK * 2.0) % (Math.PI * 2.0);
                 double x = center.x() + Math.cos(orbitAngleRad) * ORBIT_RADIUS;
                 double z = center.z() + Math.sin(orbitAngleRad) * ORBIT_RADIUS;
-                double y = center.y() + LOW_ORBIT_Y_OFFSET;
+                double y = center.y() + LOW_ORBIT_Y_OFFSET + Math.sin(orbitAngleRad * 2.0) * 2.5;
                 double tangentX = -Math.sin(orbitAngleRad);
                 double tangentZ = Math.cos(orbitAngleRad);
                 float yaw = computeYawDegrees(tangentX, tangentZ);
                 yield new Location(world, x, y, z, yaw, 0.0f);
+            }
+            case ASCENDING_CHARGE -> {
+                Location diveTarget = this.diveTargetLocation;
+                float yaw = diveTarget != null
+                        ? computeYawDegrees(diveTarget.getX() - current.getX(), diveTarget.getZ() - current.getZ())
+                        : current.getYaw();
+                yield new Location(
+                        world,
+                        current.getX() * 0.85 + center.x() * 0.15,
+                        center.y() + ASCEND_CHARGE_Y_OFFSET,
+                        current.getZ() * 0.85 + center.z() * 0.15,
+                        yaw,
+                        -35.0f
+                );
+            }
+            case DIVING -> {
+                Location diveTarget = this.diveTargetLocation;
+                if (diveTarget != null && diveTarget.getWorld() != null && diveTarget.getWorld().equals(world)) {
+                    double dx = diveTarget.getX() - current.getX();
+                    double dz = diveTarget.getZ() - current.getZ();
+                    float yaw = computeYawDegrees(dx, dz);
+                    yield new Location(
+                            world,
+                            diveTarget.getX(),
+                            diveTarget.getY() + 1.5,
+                            diveTarget.getZ(),
+                            yaw,
+                            55.0f
+                    );
+                }
+                yield new Location(world, center.x(), center.y() + CENTER_LANDED_Y_OFFSET, center.z(), 0.0f, 45.0f);
             }
             case CENTER_LANDED -> new Location(
                     world,
                     center.x(),
                     center.y() + CENTER_LANDED_Y_OFFSET,
                     center.z(),
-                    0.0f,
-                    10.0f
+                    customHoverYaw != null ? customHoverYaw : 0.0f,
+                    customHoverPitch != null ? customHoverPitch : 10.0f
             );
             case HIGH_HOVER -> new Location(
                     world,
                     center.x(),
                     center.y() + HIGH_HOVER_Y_OFFSET,
                     center.z(),
-                    0.0f,
-                    25.0f
+                    customHoverYaw != null ? customHoverYaw : 0.0f,
+                    customHoverPitch != null ? customHoverPitch : 25.0f
             );
             case STAGGERED -> new Location(
                     world,
@@ -384,6 +457,13 @@ public final class FoliaDragonBossController implements DragonBossController {
                     30.0f
             );
         };
+    }
+
+    private RegionConfig.Point3D arenaCenterFor(World world) {
+        if (world != null && world.getName().toLowerCase(java.util.Locale.ROOT).contains("instance")) {
+            return new RegionConfig.Point3D(0.0, 64.0, 0.0);
+        }
+        return configManager.pluginConfig().regions().arena().center();
     }
 
     static Location stepTowards(Location current, Location target, double maxStep) {
@@ -414,6 +494,14 @@ public final class FoliaDragonBossController implements DragonBossController {
     public void setPosture(DragonPosture posture) {
         Objects.requireNonNull(posture, "posture");
         synchronized (lock) {
+            if (posture != DragonPosture.DIVING && posture != DragonPosture.ASCENDING_CHARGE) {
+                this.diveWindupRemainingSeconds = 0.0;
+                this.diveTargetLocation = null;
+            }
+            if (posture != DragonPosture.HIGH_HOVER && posture != DragonPosture.CENTER_LANDED) {
+                this.customHoverYaw = null;
+                this.customHoverPitch = null;
+            }
             if (staggerRemainingSeconds > 0.0 && posture != DragonPosture.STAGGERED) {
                 this.preStaggerPosture = posture;
                 return;
@@ -426,9 +514,40 @@ public final class FoliaDragonBossController implements DragonBossController {
     }
 
     @Override
+    public void beginDive(Location diveTargetLocation, double windupSeconds) {
+        Objects.requireNonNull(diveTargetLocation, "diveTargetLocation");
+        synchronized (lock) {
+            this.diveTargetLocation = diveTargetLocation.clone();
+            this.diveWindupRemainingSeconds = Math.max(0.0, windupSeconds);
+            DragonPosture next = this.diveWindupRemainingSeconds > 0.0
+                    ? DragonPosture.ASCENDING_CHARGE
+                    : DragonPosture.DIVING;
+            if (staggerRemainingSeconds > 0.0) {
+                this.preStaggerPosture = next;
+            } else {
+                this.targetPosture = next;
+            }
+        }
+    }
+
+    @Override
+    public void setHoverAim(float aimYawDegrees, float aimPitchDegrees) {
+        synchronized (lock) {
+            this.customHoverYaw = aimYawDegrees;
+            this.customHoverPitch = aimPitchDegrees;
+        }
+    }
+
+    @Override
     public DragonPosture posture() {
         synchronized (lock) {
-            return staggerRemainingSeconds > 0.0 ? DragonPosture.STAGGERED : targetPosture;
+            if (staggerRemainingSeconds > 0.0) {
+                return DragonPosture.STAGGERED;
+            }
+            if (targetPosture == DragonPosture.ASCENDING_CHARGE && diveWindupRemainingSeconds <= 1e-6) {
+                return DragonPosture.DIVING;
+            }
+            return targetPosture;
         }
     }
 
@@ -443,6 +562,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             }
             this.staggerRemainingSeconds = Math.max(this.staggerRemainingSeconds, seconds);
             this.targetPosture = DragonPosture.STAGGERED;
+            this.diveWindupRemainingSeconds = 0.0;
         }
     }
 
@@ -463,6 +583,13 @@ public final class FoliaDragonBossController implements DragonBossController {
                     staggerRemainingSeconds = 0.0;
                     targetPosture = preStaggerPosture != null ? preStaggerPosture : DragonPosture.LOW_ORBIT;
                     preStaggerPosture = null;
+                }
+            }
+            if (diveWindupRemainingSeconds > 1e-6) {
+                diveWindupRemainingSeconds = Math.max(0.0, diveWindupRemainingSeconds - deltaSeconds);
+                if (diveWindupRemainingSeconds <= 1e-6 && targetPosture == DragonPosture.ASCENDING_CHARGE) {
+                    diveWindupRemainingSeconds = 0.0;
+                    targetPosture = DragonPosture.DIVING;
                 }
             }
         }
@@ -549,6 +676,8 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.capturedFlagsDragonId = null;
             this.activeCombat = false;
             this.staggerRemainingSeconds = 0.0;
+            this.diveWindupRemainingSeconds = 0.0;
+            this.diveTargetLocation = null;
             this.preStaggerPosture = null;
         }
         if (dragon != null && !dragon.isDead()) {
@@ -585,6 +714,10 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.summonedByPlugin = false;
             this.activeCombat = false;
             this.staggerRemainingSeconds = 0.0;
+            this.diveWindupRemainingSeconds = 0.0;
+            this.diveTargetLocation = null;
+            this.customHoverYaw = null;
+            this.customHoverPitch = null;
             this.preStaggerPosture = null;
             this.targetPosture = DragonPosture.LOW_ORBIT;
             this.cachedLocation = null;
@@ -639,7 +772,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     }
 
     private Location arenaAnchor(World world, double yOffset) {
-        RegionConfig.Point3D center = configManager.pluginConfig().regions().arena().center();
+        RegionConfig.Point3D center = arenaCenterFor(world);
         return new Location(world, center.x(), center.y() + yOffset, center.z(), 0.0f, 0.0f);
     }
 

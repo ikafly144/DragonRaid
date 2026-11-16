@@ -146,6 +146,28 @@ ability:
   hard_enrage:
     name: "終焉の滅び"
     warning: "<dark_red><bold>⚠ 時間切れ！ 「終焉の滅び」詠唱開始！</bold></dark_red>"
+  ground_slam_dive:
+    name: "終焉の急降下"
+  lightning_storm:
+    name: "紫電の雷嵐"
+  sweeping_laser:
+    name: "虚空の殲滅光線"
+  shield_wall_breath:
+    name: "破滅の奔流"
+  fireball_barrage:
+    name: "黒炎の連弾"
+  enderman_eruption:
+    name: "深淵の隆起"
+  exaflare_waves:
+    name: "終末の連爆波"
+  knockback_combo:
+    name: "覇竜の衝撃咆哮"
+  enderman_rotating_beam:
+    name: "虚空の使徒・旋回光線"
+  dual_dive_dice:
+    name: "双竜の交叉突撃"
+  tether_dive_relay:
+    name: "宿命の連撃ダイブ"
 
 altar:
   title: "<dark_purple>終焉の祭壇 — 難易度選択</dark_purple>"

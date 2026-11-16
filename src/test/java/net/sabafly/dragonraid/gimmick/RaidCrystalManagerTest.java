@@ -118,17 +118,17 @@ class RaidCrystalManagerTest {
                 }
         );
 
+        boolean[] allDestroyedTriggered = {false};
+        singleMgr.setOnAllCrystalsDestroyedCallback(() -> allDestroyedTriggered[0] = true);
+
         singleMgr.spawnWave(endWorld, 1, 80.0, 4.0);
         EnderCrystal crystal = captured[0];
         assertTrue(singleMgr.isTrackedCrystal(crystal));
 
-        // Partial hit does not remove crystal
-        assertTrue(singleMgr.onCrystalDamage(crystal, 30.0, viewer));
-        assertEquals(1, singleMgr.activeCount());
-
-        // Lethal hit removes crystal cleanly
-        assertTrue(singleMgr.onCrystalDamage(crystal, 55.0, viewer));
+        // One-hit destruction removes crystal immediately and triggers all-destroyed stagger callback
+        assertTrue(singleMgr.onCrystalDamage(crystal, 1.0, viewer));
         verify(crystal).remove();
+        assertTrue(allDestroyedTriggered[0]);
         assertEquals(0, singleMgr.activeCount());
         assertFalse(singleMgr.isTrackedCrystal(crystal));
         assertEquals(0.0, singleMgr.tick(1.0, bossLoc, List.of(viewer)), 1e-6);

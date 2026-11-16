@@ -1,4 +1,4 @@
-# DragonRaid Boss Configuration: Hard / Savage (4 Phases, ~8-12 min, aerial + combo mechanics + hard enrage)
+# DragonRaid Boss Configuration: Hard / Savage (4 Phases, ~8-12 min, Party Co-op Mechanics + Hard Enrage)
 
 difficulty: HARD
 display-name-key: boss.hard.name
@@ -36,9 +36,68 @@ abilities:
     telegraph-radius: 4.0
   stack:
     name-key: ability.stack.name
-    cast-seconds: 4.0
+    cast-seconds: 3.8
     total-damage: 44.0
     radius: 4.5
+  ground_slam_dive:
+    name-key: ability.ground_slam_dive.name
+    cast-seconds: 3.5
+    damage: 46.0
+    min-damage: 6.0
+    falloff-radius: 30.0
+  lightning_storm:
+    name-key: ability.lightning_storm.name
+    cast-seconds: 2.8
+    damage: 24.0
+    radius: 3.8
+    random-strikes: 10
+  sweeping_laser:
+    name-key: ability.sweeping_laser.name
+    cast-seconds: 4.5
+    damage: 32.0
+    beam-width: 3.0
+  shield_wall_breath:
+    name-key: ability.shield_wall_breath.name
+    cast-seconds: 4.0
+    damage: 44.0
+    shield-chip-multiplier: 0.20
+    safe-cone-half-angle: 28.0
+  fireball_barrage:
+    name-key: ability.fireball_barrage.name
+    cast-seconds: 3.2
+    damage: 22.0
+  enderman_eruption:
+    name-key: ability.enderman_eruption.name
+    cast-seconds: 3.0
+    damage: 26.0
+    radius: 3.6
+    pattern: RING_CASCADE
+  exaflare_waves:
+    name-key: ability.exaflare_waves.name
+    cast-seconds: 2.6
+    damage: 28.0
+  knockback_combo:
+    name-key: ability.knockback_combo.name
+    cast-seconds: 2.8
+    damage: 14.0
+    horizontal-impulse: 2.3
+    vertical-impulse: 0.65
+  enderman_rotating_beam:
+    name-key: ability.enderman_rotating_beam.name
+    cast-seconds: 3.5
+    damage: 28.0
+    sweep-degrees: 120.0
+  dual_dive_dice:
+    name-key: ability.dual_dive_dice.name
+    cast-seconds: 4.2
+    total-damage: 44.0
+    radius: 4.5
+  tether_dive_relay:
+    name-key: ability.tether_dive_relay.name
+    cast-seconds: 5.4
+    damage: 20.0
+    relay-hits: 3
+    vulnerability-multiplier: 3.0
   spread:
     name-key: ability.spread.name
     cast-seconds: 3.5
@@ -101,19 +160,19 @@ phases:
       - delay-seconds: 4.0
         action: SPAWN_TETHERED_CRYSTALS
         ability: crystals
-      - delay-seconds: 7.0
-        action: DONUT_OUTER_AOE
-        ability: donut_outer_aoe
+      - delay-seconds: 6.5
+        action: DUAL_DIVE_DICE
+        ability: dual_dive_dice
+      - delay-seconds: 7.5
+        action: GROUND_SLAM_DIVE
+        ability: ground_slam_dive
+      - delay-seconds: 7.5
+        action: ENDERMAN_ROTATING_BEAM
+        ability: enderman_rotating_beam
       - delay-seconds: 8.0
-        action: TANK_BUSTER
-        ability: tank_buster
-      - delay-seconds: 8.0
-        action: STACK
-        ability: stack
-      - delay-seconds: 8.0
-        action: SPREAD
-        ability: spread
-      - delay-seconds: 10.0
+        action: FIREBALL_BARRAGE
+        ability: fireball_barrage
+      - delay-seconds: 9.0
         action: LOOP
 
   - id: phase-2
@@ -124,20 +183,20 @@ phases:
     soft-enrage: false
     timeline:
       - delay-seconds: 4.0
-        action: TOWERS_AND_SPREAD
-        ability: meteor_towers
-      - delay-seconds: 9.0
-        action: LOS_BREATH
-        ability: los_breath
-      - delay-seconds: 4.5
-        action: KNOCKBACK_ROAR
-        ability: knockback_roar
-      - delay-seconds: 7.0
         action: SPAWN_TETHERED_CRYSTALS
         ability: crystals
+      - delay-seconds: 6.5
+        action: TETHER_DIVE_RELAY
+        ability: tether_dive_relay
       - delay-seconds: 8.0
-        action: TANK_BUSTER
-        ability: tank_buster
+        action: SWEEPING_LASER
+        ability: sweeping_laser
+      - delay-seconds: 7.5
+        action: SHIELD_WALL_BREATH
+        ability: shield_wall_breath
+      - delay-seconds: 7.0
+        action: KNOCKBACK_COMBO
+        ability: knockback_combo
       - delay-seconds: 9.0
         action: LOOP
 
@@ -148,19 +207,19 @@ phases:
     timeline-speed: 1.1
     soft-enrage: false
     timeline:
-      - delay-seconds: 2.0
-        action: SPAWN_UPDRAFT_FIELDS
-        ability: updraft_wind_field
       - delay-seconds: 3.0
-        action: SPAWN_CELESTIAL_CRYSTALS
-        ability: celestial_crystals
-      - delay-seconds: 10.0
-        action: DONUT_OUTER_AOE
-        ability: donut_outer_aoe
-      - delay-seconds: 12.0
-        action: KNOCKBACK_ROAR
-        ability: knockback_roar
-      - delay-seconds: 10.0
+        action: EXAFLARE_WAVES
+        ability: exaflare_waves
+      - delay-seconds: 7.0
+        action: ENDERMAN_ROTATING_BEAM
+        ability: enderman_rotating_beam
+      - delay-seconds: 7.5
+        action: DUAL_DIVE_DICE
+        ability: dual_dive_dice
+      - delay-seconds: 7.5
+        action: ENDERMAN_ERUPTION
+        ability: enderman_eruption
+      - delay-seconds: 9.0
         action: LOOP
 
   - id: final
@@ -174,19 +233,19 @@ phases:
         action: SPAWN_TETHERED_CRYSTALS
         ability: crystals
       - delay-seconds: 5.5
-        action: TOWERS_AND_SPREAD
-        ability: meteor_towers
+        action: EXAFLARE_WAVES
+        ability: exaflare_waves
       - delay-seconds: 6.5
-        action: DONUT_OUTER_AOE
-        ability: donut_outer_aoe
+        action: TETHER_DIVE_RELAY
+        ability: tether_dive_relay
       - delay-seconds: 6.5
-        action: LOS_BREATH
-        ability: los_breath
-      - delay-seconds: 4.0
-        action: KNOCKBACK_ROAR
-        ability: knockback_roar
+        action: SWEEPING_LASER
+        ability: sweeping_laser
       - delay-seconds: 6.0
-        action: TANK_BUSTER
-        ability: tank_buster
+        action: SHIELD_WALL_BREATH
+        ability: shield_wall_breath
+      - delay-seconds: 6.0
+        action: DUAL_DIVE_DICE
+        ability: dual_dive_dice
       - delay-seconds: 7.0
         action: LOOP

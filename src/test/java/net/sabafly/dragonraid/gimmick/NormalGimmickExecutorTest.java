@@ -151,7 +151,7 @@ class NormalGimmickExecutorTest {
         // 1. Unblocked -> full 24.0
         Player tank = mockPlayer("Tank", 2.0, 64.0, 0.0, false, false);
         executor.startCast(step, ability, endWorld, List.of(tank), List.of(tank), scaled, bossController);
-        verify(bossController).setPosture(DragonPosture.CENTER_LANDED);
+        verify(bossController).beginDive(any(Location.class), anyDouble());
         executor.completeCast(step, ability, List.of(tank), List.of(tank), scaled, bossController, timelineEngine);
         assertEquals(24.0, damageTaken.get(tank.getUniqueId()), 1e-6);
 
@@ -329,5 +329,88 @@ class NormalGimmickExecutorTest {
         deferredExecutor.resetState();
         queuedEntityTasks.forEach(Runnable::run);
         assertFalse(damageTaken.containsKey(target.getUniqueId()));
+    }
+
+    @Test
+    void groundSlamDive_attenuatesDamageByDistanceAndSpawnsShockwave() {
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 2);
+        BossConfig.AbilitySettings ability = normalBoss.ability("ground_slam_dive").orElseThrow();
+        BossConfig.TimelineStep step = new BossConfig.TimelineStep(7.0, "GROUND_SLAM_DIVE", "ground_slam_dive");
+
+        Player epicenter = mockPlayer("Epicenter", 0.0, 64.0, 0.0, false, false);
+        Player far = mockPlayer("Far", 21.0, 64.0, 0.0, false, false);
+        executor.startCast(step, ability, endWorld, List.of(epicenter, far), List.of(epicenter, far), scaled, bossController);
+        executor.completeCast(step, ability, List.of(epicenter, far), List.of(epicenter, far), scaled, bossController, timelineEngine);
+
+        // Epicenter takes full 36.0; far (21m / 28m falloff = 0.25 * 36 = 9.0) takes much less
+        assertEquals(36.0, damageTaken.get(epicenter.getUniqueId()), 1e-6);
+        assertEquals(9.0, damageTaken.get(far.getUniqueId()), 1e-6);
+
+        // Subsequent telegraphs tick advances the expanding shockwave ring
+        executor.tickActiveTelegraphs(List.of(epicenter, far), List.of(epicenter, far), bossController);
+        verify(telegraphService, atLeastOnce()).renderExpandingShockwave(any(), anyDouble(), any());
+    }
+
+    @Test
+    void shieldWallBreath_protectsAlliesInsideShieldBlockerRearCone() {
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 3);
+        BossConfig.AbilitySettings ability = normalBoss.ability("shield_wall_breath").orElseThrow();
+        BossConfig.TimelineStep step = new BossConfig.TimelineStep(8.0, "SHIELD_WALL_BREATH", "shield_wall_breath");
+
+        // Boss is at (0, 82, 0). Blocker is at (0, 64, 10) holding shield.
+        // Protected ally is directly behind blocker at (0, 64, 18).
+        // Exposed ally is off to the side at (15, 64, 0).
+        Player blocker = mockPlayer("Blocker", 0.0, 64.0, 10.0, true, true);
+        Player sheltered = mockPlayer("Sheltered", 0.0, 64.0, 18.0, false, false);
+        Player exposed = mockPlayer("Exposed", 15.0, 64.0, 0.0, false, false);
+
+        List<Player> party = List.of(blocker, sheltered, exposed);
+        executor.startCast(step, ability, endWorld, party, party, scaled, bossController);
+        executor.tickActiveTelegraphs(party, party, bossController);
+        executor.completeCast(step, ability, party, party, scaled, bossController, timelineEngine);
+
+        // Blocker takes 20% chip (34.0 * 0.20 = 6.8), sheltered takes 0, exposed takes full 34.0
+        assertEquals(6.8, damageTaken.get(blocker.getUniqueId()), 1e-6);
+        assertFalse(damageTaken.containsKey(sheltered.getUniqueId()));
+        assertEquals(34.0, damageTaken.get(exposed.getUniqueId()), 1e-6);
+    }
+
+    @Test
+    void hardCoopMechanics_rotatingEndermenDualDiveDiceAndTetherRelayExecuteCleanly() {
+        BossConfig hardBoss = configManager.hardBossConfig();
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), hardBoss, 4);
+
+        Player p1 = mockPlayer("P1", 0.0, 64.0, 12.0, false, false);
+        Player p2 = mockPlayer("P2", 0.0, 64.0, -12.0, false, false);
+        Player p3 = mockPlayer("P3", 2.0, 64.0, 12.0, false, false);
+        Player p4 = mockPlayer("P4", 2.0, 64.0, -12.0, false, false);
+        List<Player> party = List.of(p1, p2, p3, p4);
+
+        // 1. Dual Dive Dice (2-group odd/even simultaneous stack dive)
+        BossConfig.AbilitySettings diceAbility = hardBoss.ability("dual_dive_dice").orElseThrow();
+        BossConfig.TimelineStep diceStep = new BossConfig.TimelineStep(6.5, "DUAL_DIVE_DICE", "dual_dive_dice");
+        executor.startCast(diceStep, diceAbility, endWorld, party, party, scaled, bossController);
+        executor.completeCast(diceStep, diceAbility, party, party, scaled, bossController, timelineEngine);
+        // P1+P3 share odd dive (44 / 2 = 22), P2+P4 share even dive (44 / 2 = 22)
+        assertEquals(22.0, damageTaken.get(p1.getUniqueId()), 1e-6);
+        assertEquals(22.0, damageTaken.get(p2.getUniqueId()), 1e-6);
+        assertEquals(22.0, damageTaken.get(p3.getUniqueId()), 1e-6);
+        assertEquals(22.0, damageTaken.get(p4.getUniqueId()), 1e-6);
+
+        // 2. Tether Dive Relay (nearest player intercepts; consecutive hits apply 3x vulnerability)
+        damageTaken.clear();
+        BossConfig.AbilitySettings relayAbility = hardBoss.ability("tether_dive_relay").orElseThrow();
+        BossConfig.TimelineStep relayStep = new BossConfig.TimelineStep(6.5, "TETHER_DIVE_RELAY", "tether_dive_relay");
+        Player closeTank = mockPlayer("CloseTank", 1.0, 64.0, 0.0, false, false);
+        executor.startCast(relayStep, relayAbility, endWorld, List.of(closeTank), List.of(closeTank), scaled, bossController);
+        // Advance through cast ticks to trigger first relay hit, then completeCast for final hit
+        for (int i = 0; i < 25; i++) {
+            executor.tickActiveTelegraphs(List.of(closeTank), List.of(closeTank), bossController);
+        }
+        executor.completeCast(relayStep, relayAbility, List.of(closeTank), List.of(closeTank), scaled, bossController, timelineEngine);
+        assertTrue(damageTaken.getOrDefault(closeTank.getUniqueId(), 0.0) >= 80.0);
     }
 }

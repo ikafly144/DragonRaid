@@ -7,14 +7,15 @@ import org.bukkit.entity.EnderDragon;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Controls the EnderDragon boss entity in a Folia-safe manner, suppressing chaotic vanilla
- * dragon AI and driving deterministic raid postures, HP scaling, and regeneration.
+ * Controls the EnderDragon boss entity in a Folia-safe manner, keeping AI animations alive
+ * (`setAI(true)`) while driving natural flight, high-speed dives, sweeping laser rotation,
+ * HP scaling, and regeneration.
  */
 public interface DragonBossController {
 
     /**
      * Binds an existing living EnderDragon in {@code endWorld} or spawns a new one at the arena center,
-     * applying {@code scaledMaxHp} and starting custom flight control.
+     * applying {@code scaledMaxHp} and starting animated flight control.
      *
      * @return future completing once the dragon entity is bound/spawned, or exceptionally on spawn failure
      */
@@ -36,6 +37,21 @@ public interface DragonBossController {
     DragonPosture posture();
 
     /**
+     * Begins a True Ending-inspired dive sequence: the dragon ascends during the windup and then
+     * plunges into {@code diveTargetLocation}.
+     */
+    default void beginDive(Location diveTargetLocation, double windupSeconds) {
+        setPosture(DragonPosture.DIVING);
+    }
+
+    /**
+     * Smoothly aims the hovering dragon's yaw/pitch towards {@code aimYawDegrees} and {@code aimPitchDegrees}
+     * (used during sweeping lasers, field-wide breath, and fireball barrages).
+     */
+    default void setHoverAim(float aimYawDegrees, float aimPitchDegrees) {
+    }
+
+    /**
      * Temporarily staggers the boss on the ground for {@code seconds}, restoring its prior posture afterward.
      */
     void stagger(double seconds);
@@ -46,7 +62,7 @@ public interface DragonBossController {
     boolean isStaggered();
 
     /**
-     * Advances posture/stagger timers from the encounter coordinator tick.
+     * Advances posture/stagger/dive timers from the encounter coordinator tick.
      */
     void tick(double deltaSeconds);
 

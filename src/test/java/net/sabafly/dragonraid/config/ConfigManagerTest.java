@@ -104,7 +104,7 @@ class ConfigManagerTest {
 
         Path normalFile = tempDir.resolve("boss_normal.yml");
         String invalid = Files.readString(normalFile, StandardCharsets.UTF_8)
-                .replace("ability: tank_buster", "ability: nonexistent_skill");
+                .replace("ability: fireball_barrage", "ability: nonexistent_skill");
         Files.writeString(normalFile, invalid, StandardCharsets.UTF_8);
 
         ConfigException ex = assertThrows(ConfigException.class, manager::reload);

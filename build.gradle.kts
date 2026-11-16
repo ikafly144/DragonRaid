@@ -21,11 +21,13 @@ repositories {
     mavenCentral()
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.codemc.io/repository/maven-releases/")
+    maven("https://repo.thenextlvl.net/releases")
 }
 
 dependencies {
     compileOnly(libs.folia.api)
     compileOnly(libs.packetevents.spigot)
+    compileOnly(libs.thenextlvl.worlds)
 
     implementation(libs.configurate.yaml) {
         exclude(group = "org.yaml", module = "snakeyaml")
@@ -37,6 +39,7 @@ dependencies {
 
     testImplementation(libs.folia.api)
     testImplementation(libs.packetevents.spigot)
+    testImplementation(libs.thenextlvl.worlds)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
@@ -55,6 +58,11 @@ paperPluginYaml {
     dependencies {
         server {
             register("packetevents") {
+                load = PaperPluginYaml.Load.BEFORE
+                required = true
+                joinClasspath = true
+            }
+            register("Worlds") {
                 load = PaperPluginYaml.Load.BEFORE
                 required = true
                 joinClasspath = true
@@ -105,6 +113,12 @@ tasks {
                 "packetevents",
                 "v${libs.versions.packetevents.get()}",
                 "packetevents-spigot-${libs.versions.packetevents.get()}.jar"
+            )
+            github(
+                "TheNextLvl-net",
+                "worlds",
+                "v${libs.versions.worlds.get()}",
+                "worlds-${libs.versions.worlds.get()}.jar"
             )
         }
     }

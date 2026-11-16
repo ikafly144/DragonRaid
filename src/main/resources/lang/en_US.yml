@@ -146,6 +146,28 @@ ability:
   hard_enrage:
     name: "Cataclysm of Ruin"
     warning: "<dark_red><bold>⚠ Enrage timer reached! Casting Cataclysm of Ruin!</bold></dark_red>"
+  ground_slam_dive:
+    name: "Cataclysmic Plunge"
+  lightning_storm:
+    name: "Violet Tempest"
+  sweeping_laser:
+    name: "Oblivion Ray"
+  shield_wall_breath:
+    name: "Torrent of Ruin"
+  fireball_barrage:
+    name: "Abyssal Barrage"
+  enderman_eruption:
+    name: "Rift Eruption"
+  exaflare_waves:
+    name: "Exaflare Cascade"
+  knockback_combo:
+    name: "Sovereign Shockwave"
+  enderman_rotating_beam:
+    name: "Void Apostle Sweep"
+  dual_dive_dice:
+    name: "Twin Dragon Convergence"
+  tether_dive_relay:
+    name: "Fated Dive Relay"
 
 altar:
   title: "<dark_purple>Altar of the End — Select Difficulty</dark_purple>"

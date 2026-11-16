@@ -19,6 +19,8 @@ import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
 import net.sabafly.dragonraid.hud.AdventureRaidHudService;
 import net.sabafly.dragonraid.hud.RaidHudService;
 import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.instance.RaidInstanceManager;
+import net.sabafly.dragonraid.instance.TheNextLvlRaidInstanceManager;
 import net.sabafly.dragonraid.permission.RaidPermissions;
 import net.sabafly.dragonraid.protection.ArenaProtectionListener;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
@@ -60,6 +62,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private DragonBossController bossController;
     private RaidCrystalManager crystalManager;
     private NormalGimmickExecutor gimmickExecutor;
+    private RaidInstanceManager instanceManager;
     private DefaultRaidEncounterManager encounterManager;
     private AltarGuiService altarGuiService;
 
@@ -122,6 +125,8 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 telegraphService,
                 crystalManager
             );
+            this.instanceManager = new TheNextLvlRaidInstanceManager(raidScheduler, getLogger());
+            this.instanceManager.cleanupOrphanedInstances();
             this.encounterManager = new DefaultRaidEncounterManager(
                 configManager,
                 messageService,
@@ -135,6 +140,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 hudService,
                 crystalManager,
                 gimmickExecutor,
+                instanceManager,
                 getLogger()
             );
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
