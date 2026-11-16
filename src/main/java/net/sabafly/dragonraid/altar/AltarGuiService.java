@@ -1,8 +1,10 @@
 package net.sabafly.dragonraid.altar;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -331,10 +333,13 @@ public final class AltarGuiService {
 
         @Override
         public boolean hasCosts(Player player, List<ItemCost> costs) {
+            Map<Material, Integer> totals = aggregateCosts(costs);
+            if (totals == null) {
+                return false;
+            }
             PlayerInventory inv = player.getInventory();
-            for (ItemCost cost : costs) {
-                Material material = resolveMaterial(cost.material());
-                if (material == null || !inv.containsAtLeast(new ItemStack(material), cost.amount())) {
+            for (Map.Entry<Material, Integer> entry : totals.entrySet()) {
+                if (!inv.containsAtLeast(new ItemStack(entry.getKey()), entry.getValue())) {
                     return false;
                 }
             }
@@ -343,20 +348,42 @@ public final class AltarGuiService {
 
         @Override
         public void consumeCosts(Player player, List<ItemCost> costs) {
+            Map<Material, Integer> totals = aggregateCosts(costs);
+            if (totals == null) {
+                return;
+            }
             PlayerInventory inv = player.getInventory();
-            for (ItemCost cost : costs) {
-                Material material = resolveMaterial(cost.material());
-                if (material != null && cost.amount() > 0) {
-                    inv.removeItemAnySlot(new ItemStack(material, cost.amount()));
+            for (Map.Entry<Material, Integer> entry : totals.entrySet()) {
+                int remaining = entry.getValue();
+                Material mat = entry.getKey();
+                int maxStack = Math.max(1, mat.getMaxStackSize());
+                while (remaining > 0) {
+                    int batch = Math.min(remaining, maxStack);
+                    inv.removeItemAnySlot(new ItemStack(mat, batch));
+                    remaining -= batch;
                 }
             }
         }
+    }
 
-        private static @Nullable Material resolveMaterial(String raw) {
-            if (raw == null || raw.isBlank()) {
+    static @Nullable Map<Material, Integer> aggregateCosts(List<ItemCost> costs) {
+        Map<Material, Integer> totals = new EnumMap<>(Material.class);
+        for (ItemCost cost : costs) {
+            Material material = resolveMaterial(cost.material());
+            if (material == null) {
                 return null;
             }
-            return Material.matchMaterial(raw.trim().toUpperCase(Locale.ROOT));
+            if (cost.amount() > 0) {
+                totals.merge(material, cost.amount(), Math::addExact);
+            }
         }
+        return totals;
+    }
+
+    private static @Nullable Material resolveMaterial(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        return Material.matchMaterial(raw.trim().toUpperCase(Locale.ROOT));
     }
 }

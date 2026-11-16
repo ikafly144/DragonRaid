@@ -288,4 +288,46 @@ class NormalGimmickExecutorTest {
         assertEquals(120.0 - 0.25, executor.safeArenaRadius(), 1e-4);
         assertEquals(4.0, damageTaken.get(outside.getUniqueId()), 1e-6);
     }
+
+    @Test
+    void deferredDamageTaskIsSkippedAfterResetOrCancel() {
+        List<Runnable> queuedEntityTasks = new java.util.ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredScheduler.runAtRegion(any(Location.class), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+
+        NormalGimmickExecutor deferredExecutor = new NormalGimmickExecutor(
+                configManager,
+                new MessageService(configManager),
+                deferredScheduler,
+                telegraphService,
+                crystalManager,
+                nowMillis::get,
+                (player, amount) -> damageTaken.merge(player.getUniqueId(), amount, Double::sum),
+                (b, e) -> CompletableFuture.completedFuture(false)
+        );
+        damageTaken.clear();
+
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        BossConfig.AbilitySettings ability = normalBoss.ability("tank_buster").orElseThrow();
+        BossConfig.TimelineStep step = new BossConfig.TimelineStep(8.0, "TANK_BUSTER", "tank_buster");
+        Player target = mockPlayer("Target", 2.0, 64.0, 0.0, false, false);
+
+        deferredExecutor.startCast(step, ability, endWorld, List.of(target), List.of(target), scaled, bossController);
+        queuedEntityTasks.clear();
+        deferredExecutor.completeCast(step, ability, List.of(target), List.of(target), scaled, bossController, timelineEngine);
+        assertFalse(queuedEntityTasks.isEmpty());
+
+        // Reset before the queued entity task runs -> damage must be suppressed
+        deferredExecutor.resetState();
+        queuedEntityTasks.forEach(Runnable::run);
+        assertFalse(damageTaken.containsKey(target.getUniqueId()));
+    }
 }

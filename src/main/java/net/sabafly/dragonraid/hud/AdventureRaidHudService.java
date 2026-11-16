@@ -63,7 +63,6 @@ public final class AdventureRaidHudService implements RaidHudService {
             UUID id = viewer.getUniqueId();
             activeViewerIds.add(id);
             ViewerHudState hud = viewerBars.computeIfAbsent(id, ignored -> new ViewerHudState());
-            hud.viewerRef = new WeakReference<>(viewer);
 
             Component bossName = messageService.render(viewer, bossConfig.displayNameKey());
             Component phaseName = messageService.render(viewer, phase.nameKey());
@@ -75,13 +74,30 @@ public final class AdventureRaidHudService implements RaidHudService {
                     Placeholder.component("phase", phaseName),
                     Placeholder.unparsed("hp_percent", String.valueOf(percent))
             );
-            hud.mainBar.name(title);
-            hud.mainBar.progress((float) clamped);
-            hud.mainBar.color(color);
-
-            if (!hud.mainVisible) {
-                hud.mainVisible = true;
-                scheduler.runAtEntity(viewer, () -> viewer.showBossBar(hud.mainBar));
+            boolean scheduleShow;
+            synchronized (hud) {
+                if (hud.removed || viewerBars.get(id) != hud) {
+                    continue;
+                }
+                hud.viewerRef = new WeakReference<>(viewer);
+                hud.mainBar.name(title);
+                hud.mainBar.progress((float) clamped);
+                hud.mainBar.color(color);
+                if (!hud.mainVisible) {
+                    hud.mainVisible = true;
+                    scheduleShow = true;
+                } else {
+                    scheduleShow = false;
+                }
+            }
+            if (scheduleShow) {
+                scheduler.runAtEntity(viewer, () -> {
+                    synchronized (hud) {
+                        if (!hud.removed && hud.mainVisible && viewerBars.get(id) == hud) {
+                            viewer.showBossBar(hud.mainBar);
+                        }
+                    }
+                });
             }
         }
 
@@ -108,9 +124,21 @@ public final class AdventureRaidHudService implements RaidHudService {
                 if (viewer == null || !viewer.isOnline()) {
                     continue;
                 }
-                ViewerHudState hud = viewerBars.get(viewer.getUniqueId());
-                if (hud != null && hud.castVisible) {
-                    hud.castVisible = false;
+                UUID id = viewer.getUniqueId();
+                ViewerHudState hud = viewerBars.get(id);
+                if (hud == null) {
+                    continue;
+                }
+                boolean scheduleHide;
+                synchronized (hud) {
+                    if (hud.castVisible) {
+                        hud.castVisible = false;
+                        scheduleHide = true;
+                    } else {
+                        scheduleHide = false;
+                    }
+                }
+                if (scheduleHide) {
                     scheduler.runAtEntity(viewer, () -> viewer.hideBossBar(hud.castBar));
                 }
             }
@@ -124,7 +152,8 @@ public final class AdventureRaidHudService implements RaidHudService {
             if (viewer == null || !viewer.isOnline()) {
                 continue;
             }
-            ViewerHudState hud = viewerBars.computeIfAbsent(viewer.getUniqueId(), ignored -> new ViewerHudState());
+            UUID id = viewer.getUniqueId();
+            ViewerHudState hud = viewerBars.computeIfAbsent(id, ignored -> new ViewerHudState());
             Component abilityName = messageService.render(viewer, ability.nameKey());
             Component title = messageService.render(
                     viewer,
@@ -132,11 +161,29 @@ public final class AdventureRaidHudService implements RaidHudService {
                     Placeholder.component("ability", abilityName),
                     Placeholder.unparsed("seconds", formattedSeconds)
             );
-            hud.castBar.name(title);
-            hud.castBar.progress(progress);
-            if (!hud.castVisible) {
-                hud.castVisible = true;
-                scheduler.runAtEntity(viewer, () -> viewer.showBossBar(hud.castBar));
+            boolean scheduleShow;
+            synchronized (hud) {
+                if (hud.removed || viewerBars.get(id) != hud) {
+                    continue;
+                }
+                hud.viewerRef = new WeakReference<>(viewer);
+                hud.castBar.name(title);
+                hud.castBar.progress(progress);
+                if (!hud.castVisible) {
+                    hud.castVisible = true;
+                    scheduleShow = true;
+                } else {
+                    scheduleShow = false;
+                }
+            }
+            if (scheduleShow) {
+                scheduler.runAtEntity(viewer, () -> {
+                    synchronized (hud) {
+                        if (!hud.removed && hud.castVisible && viewerBars.get(id) == hud) {
+                            viewer.showBossBar(hud.castBar);
+                        }
+                    }
+                });
             }
         }
     }
@@ -234,10 +281,15 @@ public final class AdventureRaidHudService implements RaidHudService {
         if (hud == null) {
             return;
         }
-        boolean hideMain = hud.mainVisible;
-        boolean hideCast = hud.castVisible;
-        hud.mainVisible = false;
-        hud.castVisible = false;
+        boolean hideMain;
+        boolean hideCast;
+        synchronized (hud) {
+            hud.removed = true;
+            hideMain = hud.mainVisible;
+            hideCast = hud.castVisible;
+            hud.mainVisible = false;
+            hud.castVisible = false;
+        }
         if ((hideMain || hideCast) && viewer.isOnline()) {
             scheduler.runAtEntity(viewer, () -> {
                 if (hideMain) {
@@ -251,11 +303,17 @@ public final class AdventureRaidHudService implements RaidHudService {
     }
 
     private void hideTrackedBars(ViewerHudState hud) {
-        boolean hideMain = hud.mainVisible;
-        boolean hideCast = hud.castVisible;
-        hud.mainVisible = false;
-        hud.castVisible = false;
-        Player viewer = hud.viewerRef != null ? hud.viewerRef.get() : null;
+        boolean hideMain;
+        boolean hideCast;
+        Player viewer;
+        synchronized (hud) {
+            hud.removed = true;
+            hideMain = hud.mainVisible;
+            hideCast = hud.castVisible;
+            hud.mainVisible = false;
+            hud.castVisible = false;
+            viewer = hud.viewerRef != null ? hud.viewerRef.get() : null;
+        }
         if (viewer != null && viewer.isOnline() && (hideMain || hideCast)) {
             scheduler.runAtEntity(viewer, () -> {
                 if (hideMain) {
@@ -290,7 +348,8 @@ public final class AdventureRaidHudService implements RaidHudService {
                 BossBar.Overlay.NOTCHED_10
         );
         volatile @Nullable WeakReference<Player> viewerRef;
-        volatile boolean mainVisible;
-        volatile boolean castVisible;
+        boolean removed;
+        boolean mainVisible;
+        boolean castVisible;
     }
 }

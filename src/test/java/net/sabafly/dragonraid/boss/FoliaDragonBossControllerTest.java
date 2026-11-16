@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -13,12 +14,13 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.logging.Logger;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
@@ -60,6 +62,10 @@ class FoliaDragonBossControllerTest {
             inv.<Runnable>getArgument(1).run();
             return TaskHandle.retired();
         });
+        lenient().when(scheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
         lenient().when(scheduler.runAtEntityTimer(any(), any(), any(), anyLong(), anyLong())).thenAnswer(inv -> {
             entityTimers.add(inv.getArgument(1));
             return mock(TaskHandle.class);
@@ -68,11 +74,13 @@ class FoliaDragonBossControllerTest {
 
     private EnderDragon mockDragon(Location initialLoc, double initialHp) {
         EnderDragon dragon = mock(EnderDragon.class);
+        UUID dragonId = UUID.randomUUID();
         final Location[] locRef = {initialLoc.clone()};
         final double[] hpRef = {initialHp};
         final boolean[] aiRef = {true};
         final EnderDragon.Phase[] phaseRef = {EnderDragon.Phase.CIRCLING};
 
+        lenient().when(dragon.getUniqueId()).thenReturn(dragonId);
         lenient().when(dragon.isDead()).thenReturn(false);
         lenient().when(dragon.getWorld()).thenReturn(endWorld);
         lenient().when(dragon.getLocation()).thenAnswer(inv -> locRef[0].clone());
@@ -205,5 +213,91 @@ class FoliaDragonBossControllerTest {
 
         controller.prepareForVanillaDefeat();
         assertTrue(existing.hasAI());
+    }
+
+    @Test
+    void holdFirstClearIdleFollowedByBindOrSpawnPreservesOriginalFlags() {
+        EnderDragon existing = mockDragon(new Location(endWorld, 0.0, 74.0, 0.0), 200.0);
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                scheduler,
+                Logger.getLogger("BossControllerTest"),
+                w -> existing,
+                (w, loc) -> existing
+        );
+
+        controller.holdFirstClearIdle(endWorld);
+        assertFalse(existing.hasAI());
+
+        controller.bindOrSpawn(endWorld, 1200.0).join();
+        assertFalse(existing.hasAI());
+
+        controller.cleanup(true).join();
+        assertTrue(existing.hasAI());
+    }
+
+    @Test
+    void bindOrSpawn_propagatesSpawnException() {
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                scheduler,
+                Logger.getLogger("BossControllerTest"),
+                w -> null,
+                (w, loc) -> {
+                    throw new IllegalStateException("spawn failed");
+                }
+        );
+
+        CompletableFuture<Void> future = controller.bindOrSpawn(endWorld, 1200.0);
+        assertTrue(future.isCompletedExceptionally());
+        assertThrows(CompletionException.class, future::join);
+    }
+
+    @Test
+    void pendingDeletionBlocksStaleReuseDuringDeferredCleanup() {
+        List<Runnable> deferredEntityTasks = new ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredScheduler.runAtRegion(any(Location.class), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            deferredEntityTasks.add(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredScheduler.runAtEntityTimer(any(), any(), any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            return mock(TaskHandle.class);
+        });
+
+        EnderDragon firstSummoned = mockDragon(new Location(endWorld, 0.0, 74.0, 0.0), 200.0);
+        EnderDragon secondSummoned = mockDragon(new Location(endWorld, 0.0, 74.0, 0.0), 200.0);
+        final EnderDragon[] finderResult = {null};
+        final int[] spawnCalls = {0};
+
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                deferredScheduler,
+                Logger.getLogger("BossControllerTest"),
+                w -> finderResult[0],
+                (w, loc) -> (++spawnCalls[0] == 1) ? firstSummoned : secondSummoned
+        );
+
+        controller.bindOrSpawn(endWorld, 1200.0);
+        deferredEntityTasks.forEach(Runnable::run);
+        deferredEntityTasks.clear();
+
+        // Pretend firstSummoned is still returned by world finder until its queued remove runs
+        finderResult[0] = firstSummoned;
+        controller.cleanup(true);
+        assertEquals(1, deferredEntityTasks.size());
+
+        // Next pull must spawn secondSummoned rather than re-binding firstSummoned pending deletion
+        controller.bindOrSpawn(endWorld, 1200.0);
+        assertEquals(2, spawnCalls[0]);
+
+        // Run all queued entity tasks -> firstSummoned removed, secondSummoned NOT removed
+        deferredEntityTasks.forEach(Runnable::run);
+        verify(firstSummoned).remove();
+        verify(secondSummoned, never()).remove();
     }
 }

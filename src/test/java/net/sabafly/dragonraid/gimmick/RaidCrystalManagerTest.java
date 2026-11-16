@@ -11,6 +11,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.logging.Logger;
@@ -56,6 +57,10 @@ class RaidCrystalManagerTest {
             return TaskHandle.retired();
         });
         lenient().when(scheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(scheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
             inv.<Runnable>getArgument(1).run();
             return TaskHandle.retired();
         });
@@ -127,5 +132,46 @@ class RaidCrystalManagerTest {
         assertEquals(0, singleMgr.activeCount());
         assertFalse(singleMgr.isTrackedCrystal(crystal));
         assertEquals(0.0, singleMgr.tick(1.0, bossLoc, List.of(viewer)), 1e-6);
+    }
+
+    @Test
+    void pendingSpawnsPreventOverSpawningAndClearAllCancelsLateTasks() {
+        List<Runnable> queuedRegionTasks = new ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredScheduler.runAtRegion(any(Location.class), any())).thenAnswer(inv -> {
+            queuedRegionTasks.add(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+
+        List<EnderCrystal> spawned = new ArrayList<>();
+        RaidCrystalManager deferredMgr = new RaidCrystalManager(
+                configManager,
+                deferredScheduler,
+                telegraphService,
+                Logger.getLogger("DeferredCrystalTest"),
+                (world, loc) -> {
+                    EnderCrystal crystal = mock(EnderCrystal.class);
+                    lenient().when(crystal.getUniqueId()).thenReturn(UUID.randomUUID());
+                    lenient().when(crystal.getWorld()).thenReturn(world);
+                    lenient().when(crystal.isDead()).thenReturn(false);
+                    spawned.add(crystal);
+                    return crystal;
+                }
+        );
+
+        // Two overlapping spawnWave calls before region tasks run -> still schedules only 4 total
+        deferredMgr.spawnWave(endWorld, 4, 80.0, 4.0);
+        deferredMgr.spawnWave(endWorld, 4, 80.0, 4.0);
+        assertEquals(4, queuedRegionTasks.size());
+
+        // clearAll runs before queued spawns finish -> late tasks remove any spawned crystal and register 0
+        deferredMgr.clearAll().join();
+        queuedRegionTasks.forEach(Runnable::run);
+        assertEquals(0, deferredMgr.activeCount());
+        assertEquals(0, spawned.size());
     }
 }

@@ -134,6 +134,8 @@ class RaidEncounterM3IntegrationTest {
                 .thenReturn(CompletableFuture.completedFuture(PlayerRaidStats.empty(UUID.randomUUID(), "Alice")));
 
         bossController = mock(DragonBossController.class);
+        lenient().when(bossController.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossController.cleanup(any(Boolean.class))).thenReturn(CompletableFuture.completedFuture(null));
         lenient().when(bossController.hpRatio()).thenReturn(1.0);
         lenient().when(bossController.bossLocation()).thenReturn(new Location(endWorld, 0.0, 74.0, 0.0));
 
@@ -243,5 +245,23 @@ class RaidEncounterM3IntegrationTest {
         assertEquals(RaidState.IDLE, manager.state());
         verify(bossController).cleanup(true);
         verify(alice, atLeastOnce()).hideBossBar(any());
+    }
+
+    @Test
+    void abortsEncounterWhenBossSpawnFails() {
+        Player alice = addPlayer("Alice", 10.0, 64.0, 0.0);
+        CommandSender admin = mock(CommandSender.class);
+        lenient().when(bossController.bindOrSpawn(any(), anyDouble()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("spawn failure")));
+
+        manager.adminStart(admin, BossConfig.Difficulty.NORMAL);
+        Runnable countdownTimer = capturedGlobalTimers.getFirst();
+        for (int i = 0; i < 8; i++) {
+            countdownTimer.run();
+        }
+
+        // Encounter must abort back to IDLE instead of remaining stuck in ACTIVE without a boss
+        assertEquals(RaidState.IDLE, manager.state());
+        verify(bossController).cleanup(true);
     }
 }

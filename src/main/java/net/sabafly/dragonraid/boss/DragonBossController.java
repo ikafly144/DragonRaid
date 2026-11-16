@@ -1,5 +1,6 @@
 package net.sabafly.dragonraid.boss;
 
+import java.util.concurrent.CompletableFuture;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.EnderDragon;
@@ -14,8 +15,10 @@ public interface DragonBossController {
     /**
      * Binds an existing living EnderDragon in {@code endWorld} or spawns a new one at the arena center,
      * applying {@code scaledMaxHp} and starting custom flight control.
+     *
+     * @return future completing once the dragon entity is bound/spawned, or exceptionally on spawn failure
      */
-    void bindOrSpawn(World endWorld, double scaledMaxHp);
+    CompletableFuture<Void> bindOrSpawn(World endWorld, double scaledMaxHp);
 
     /**
      * Captures an unkilled first-clear EnderDragon into a controlled idle orbit before the raid pull begins.
@@ -101,6 +104,8 @@ public interface DragonBossController {
 
     /**
      * Stops controller tasks and either restores vanilla flags or removes a plugin-summoned dragon.
+     *
+     * @return future completing once entity cleanup tasks finish or retire
      */
-    void cleanup(boolean removeDragonIfSummoned);
+    CompletableFuture<Void> cleanup(boolean removeDragonIfSummoned);
 }

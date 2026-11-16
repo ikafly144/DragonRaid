@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -17,8 +18,10 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
+import net.sabafly.dragonraid.scheduler.TaskHandle;
 import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import net.sabafly.dragonraid.visual.TelegraphStyle;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
@@ -43,9 +46,11 @@ public final class RaidCrystalManager {
     private final Logger logger;
     private final CrystalSpawner crystalSpawner;
 
+    private final Object spawnLock = new Object();
     private final Map<UUID, TrackedCrystal> trackedCrystals = new ConcurrentHashMap<>();
     private final AtomicInteger waveCounter = new AtomicInteger(0);
     private final AtomicInteger generation = new AtomicInteger(0);
+    private int pendingSpawns;
     private volatile double bossRegenPerSecond;
 
     @FunctionalInterface
@@ -90,11 +95,17 @@ public final class RaidCrystalManager {
             double regenPerSecond) {
         Objects.requireNonNull(world, "world");
         pruneDead();
-        this.bossRegenPerSecond = Math.max(0.0, regenPerSecond);
-        int existing = trackedCrystals.size();
-        int toSpawn = Math.max(0, targetCount - existing);
-        if (toSpawn == 0) {
-            return;
+        final int toSpawn;
+        final int expectedGen;
+        synchronized (spawnLock) {
+            this.bossRegenPerSecond = Math.max(0.0, regenPerSecond);
+            int existing = trackedCrystals.size() + pendingSpawns;
+            toSpawn = Math.max(0, targetCount - existing);
+            if (toSpawn == 0) {
+                return;
+            }
+            pendingSpawns += toSpawn;
+            expectedGen = generation.get();
         }
 
         RegionConfig.ArenaRegion arena = configManager.pluginConfig().regions().arena();
@@ -103,36 +114,50 @@ public final class RaidCrystalManager {
         double phaseAngle = (waveCounter.getAndIncrement() * Math.PI) / Math.max(1, targetCount);
         double validMaxHp = Math.max(1.0, crystalMaxHp);
 
-        int expectedGen = generation.get();
         for (int i = 0; i < toSpawn; i++) {
             double angle = phaseAngle + (2.0 * Math.PI * i) / toSpawn;
             double x = center.x() + Math.cos(angle) * ringRadius;
             double z = center.z() + Math.sin(angle) * ringRadius;
             Location probeLoc = new Location(world, x, center.y() + FALLBACK_Y_OFFSET, z);
 
-            scheduler.runAtRegion(probeLoc, () -> {
-                if (generation.get() != expectedGen) {
-                    return;
-                }
-                Location spawnLoc = resolveCrystalSpawnLocation(world, x, z, center.y());
+            TaskHandle scheduled = scheduler.runAtRegion(probeLoc, () -> {
                 try {
-                    EnderCrystal crystal = crystalSpawner.spawn(world, spawnLoc);
                     if (generation.get() != expectedGen) {
-                        crystal.remove();
                         return;
                     }
+                    Location spawnLoc = resolveCrystalSpawnLocation(world, x, z, center.y());
+                    EnderCrystal crystal = crystalSpawner.spawn(world, spawnLoc);
                     crystal.setShowingBottom(false);
                     crystal.setBeamTarget(new Location(world, center.x(), center.y() + 10.0, center.z()));
                     crystal.setCustomNameVisible(true);
                     updateCrystalLabel(crystal, validMaxHp, validMaxHp);
-                    trackedCrystals.put(
-                            crystal.getUniqueId(),
-                            new TrackedCrystal(crystal, spawnLoc.clone(), validMaxHp, validMaxHp)
-                    );
+                    synchronized (spawnLock) {
+                        if (generation.get() != expectedGen) {
+                            crystal.remove();
+                            return;
+                        }
+                        trackedCrystals.put(
+                                crystal.getUniqueId(),
+                                new TrackedCrystal(crystal, spawnLoc.clone(), validMaxHp, validMaxHp)
+                        );
+                    }
                 } catch (RuntimeException ex) {
-                    logger.log(Level.WARNING, "Failed to spawn raid EndCrystal at " + spawnLoc, ex);
+                    logger.log(Level.WARNING, "Failed to spawn raid EndCrystal at " + probeLoc, ex);
+                } finally {
+                    synchronized (spawnLock) {
+                        if (generation.get() == expectedGen && pendingSpawns > 0) {
+                            pendingSpawns--;
+                        }
+                    }
                 }
             });
+            if (scheduled == null) {
+                synchronized (spawnLock) {
+                    if (generation.get() == expectedGen && pendingSpawns > 0) {
+                        pendingSpawns--;
+                    }
+                }
+            }
         }
     }
 
@@ -253,25 +278,49 @@ public final class RaidCrystalManager {
 
     /**
      * Removes all tracked raid crystals safely on their owning entity threads.
+     *
+     * @return future completing when all entity removal tasks have executed or retired
      */
-    public void clearAll() {
-        generation.incrementAndGet();
-        List<TrackedCrystal> snapshot = new ArrayList<>(trackedCrystals.values());
-        trackedCrystals.clear();
-        bossRegenPerSecond = 0.0;
+    public CompletableFuture<Void> clearAll() {
+        List<TrackedCrystal> snapshot;
+        synchronized (spawnLock) {
+            generation.incrementAndGet();
+            pendingSpawns = 0;
+            snapshot = new ArrayList<>(trackedCrystals.values());
+            trackedCrystals.clear();
+            bossRegenPerSecond = 0.0;
+        }
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (TrackedCrystal tracked : snapshot) {
             synchronized (tracked) {
                 tracked.removed = true;
             }
             EnderCrystal entity = tracked.entity;
             if (entity != null && !entity.isDead()) {
-                scheduler.runAtEntity(entity, () -> {
-                    if (!entity.isDead()) {
-                        entity.remove();
+                if (Bukkit.getServer() != null && Bukkit.isOwnedByCurrentRegion(entity)) {
+                    entity.remove();
+                    continue;
+                }
+                CompletableFuture<Void> done = new CompletableFuture<>();
+                Runnable removeTask = () -> {
+                    try {
+                        if (!entity.isDead()) {
+                            entity.remove();
+                        }
+                    } finally {
+                        done.complete(null);
                     }
-                });
+                };
+                TaskHandle handle = scheduler.runAtEntity(entity, removeTask, () -> done.complete(null));
+                if (handle == null) {
+                    done.complete(null);
+                }
+                futures.add(done);
             }
         }
+        return futures.isEmpty()
+                ? CompletableFuture.completedFuture(null)
+                : CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
     }
 
     private void pruneDead() {

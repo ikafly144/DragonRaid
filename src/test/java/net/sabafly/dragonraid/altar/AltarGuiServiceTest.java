@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -196,5 +197,22 @@ class AltarGuiServiceTest {
         String formatted = AltarGuiService.formatCosts(configManager.pluginConfig().encounter().altar().normalCosts());
         assertNotNull(formatted);
         assertEquals("END_CRYSTAL x4", formatted);
+    }
+
+    @Test
+    void aggregateCosts_sumsDuplicateMaterialsAndRejectsUnknown() {
+        Map<Material, Integer> summed = AltarGuiService.aggregateCosts(List.of(
+                new ItemCost("END_CRYSTAL", 4),
+                new ItemCost("end_crystal", 4),
+                new ItemCost("OBSIDIAN", 2)
+        ));
+        assertNotNull(summed);
+        assertEquals(8, summed.get(Material.END_CRYSTAL));
+        assertEquals(2, summed.get(Material.OBSIDIAN));
+
+        assertEquals(null, AltarGuiService.aggregateCosts(List.of(
+                new ItemCost("END_CRYSTAL", 4),
+                new ItemCost("NOT_A_MATERIAL", 1)
+        )));
     }
 }

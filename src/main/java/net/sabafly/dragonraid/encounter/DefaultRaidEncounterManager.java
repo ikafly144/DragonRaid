@@ -13,6 +13,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -751,7 +754,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             });
         }
 
-        startM3EncounterSystems(endWorld, bossConfig, scaled);
+        startM3EncounterSystems(endWorld, bossConfig, scaled, activationGen);
 
         AtomicReference<TaskHandle> monitorHandle = new AtomicReference<>();
         TaskHandle scheduledMonitor = scheduler.runGlobalTimer(() -> {
@@ -1679,7 +1682,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World endWorld = endWorldSupplier.get();
         List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
-        cleanupM3Systems(viewers, true);
+        CompletableFuture<Void> m3CleanupFuture = cleanupM3Systems(viewers, true);
+        if (!m3CleanupFuture.isDone()) {
+            try {
+                m3CleanupFuture.get(500L, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            } catch (ExecutionException | TimeoutException ex) {
+                logger.log(Level.FINE, "Timed out or failed waiting for M3 entity cleanup on shutdown", ex);
+            }
+        }
         if (recoveryRepository != null) {
             List<PendingPlayerCleanup> cleanups = new ArrayList<>(pendingCleanupPlayers.size());
             for (Map.Entry<UUID, SavedCleanupRecord> entry : pendingCleanupPlayers.entrySet()) {
@@ -1996,97 +2008,131 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private void startM3EncounterSystems(
             World endWorld,
             BossConfig bossConfig,
-            ScaledEncounterParameters scaled) {
+            ScaledEncounterParameters scaled,
+            long expectedGeneration) {
         if (bossController == null || gimmickExecutor == null || crystalManager == null) {
             return;
         }
-        crystalManager.clearAll();
-        gimmickExecutor.resetState();
-        bossController.bindOrSpawn(endWorld, scaled.scaledBossHp());
-
-        RaidTimelineEngine timeline = new RaidTimelineEngine(bossConfig, new TimelineListener() {
-            @Override
-            public void onPhaseChanged(BossConfig.PhaseConfig newPhase) {
-                gimmickExecutor.cancelActiveMechanic();
-                bossController.setPosture(NormalGimmickExecutor.defaultPostureForPhase(newPhase));
-                List<Player> viewers = onlinePlayersInWorld(endWorld);
-                if (hudService != null) {
-                    hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
-                    hudService.announcePhaseTransition(newPhase, viewers);
-                }
+        final RaidTimelineEngine timeline;
+        final CompletableFuture<Void> bossReadyFuture;
+        synchronized (stateLock) {
+            if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
+                return;
             }
+            crystalManager.clearAll();
+            gimmickExecutor.resetState();
 
-            @Override
-            public void onCastStart(
-                    BossConfig.TimelineStep step,
-                    @Nullable BossConfig.AbilitySettings ability,
-                    double totalCastSeconds) {
-                List<Player> viewers = onlinePlayersInWorld(endWorld);
-                List<Player> alive = aliveOnlineParticipants();
-                gimmickExecutor.startCast(step, ability, endWorld, alive, viewers, scaled, bossController);
-                if (hudService != null) {
-                    hudService.updateCastBossBar(ability, totalCastSeconds, totalCastSeconds, viewers);
+            timeline = new RaidTimelineEngine(bossConfig, new TimelineListener() {
+                @Override
+                public void onPhaseChanged(BossConfig.PhaseConfig newPhase) {
+                    gimmickExecutor.cancelActiveMechanic();
+                    bossController.setPosture(NormalGimmickExecutor.defaultPostureForPhase(newPhase));
+                    List<Player> viewers = onlinePlayersInWorld(endWorld);
+                    if (hudService != null) {
+                        hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
+                        hudService.announcePhaseTransition(newPhase, viewers);
+                    }
                 }
-            }
 
-            @Override
-            public void onCastTick(
-                    BossConfig.TimelineStep step,
-                    @Nullable BossConfig.AbilitySettings ability,
-                    double remainingSeconds,
-                    double totalCastSeconds) {
-                if (hudService != null) {
-                    hudService.updateCastBossBar(ability, remainingSeconds, totalCastSeconds, onlinePlayersInWorld(endWorld));
+                @Override
+                public void onCastStart(
+                        BossConfig.TimelineStep step,
+                        @Nullable BossConfig.AbilitySettings ability,
+                        double totalCastSeconds) {
+                    List<Player> viewers = onlinePlayersInWorld(endWorld);
+                    List<Player> alive = aliveOnlineParticipants();
+                    gimmickExecutor.startCast(step, ability, endWorld, alive, viewers, scaled, bossController);
+                    if (hudService != null) {
+                        hudService.updateCastBossBar(ability, totalCastSeconds, totalCastSeconds, viewers);
+                    }
                 }
-            }
 
-            @Override
-            public void onCastComplete(
-                    BossConfig.TimelineStep step,
-                    @Nullable BossConfig.AbilitySettings ability) {
-                List<Player> viewers = onlinePlayersInWorld(endWorld);
-                if (hudService != null) {
-                    hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
+                @Override
+                public void onCastTick(
+                        BossConfig.TimelineStep step,
+                        @Nullable BossConfig.AbilitySettings ability,
+                        double remainingSeconds,
+                        double totalCastSeconds) {
+                    if (hudService != null) {
+                        hudService.updateCastBossBar(ability, remainingSeconds, totalCastSeconds, onlinePlayersInWorld(endWorld));
+                    }
                 }
-                RaidTimelineEngine engine = activeTimeline;
-                if (engine != null) {
-                    gimmickExecutor.completeCast(
-                            step,
-                            ability,
-                            aliveOnlineParticipants(),
-                            viewers,
-                            scaled,
-                            bossController,
-                            engine
-                    );
-                }
-            }
 
-            @Override
-            public void onCastInterrupted(
-                    BossConfig.TimelineStep step,
-                    @Nullable BossConfig.AbilitySettings ability) {
-                if (hudService != null) {
-                    hudService.updateCastBossBar(null, 0.0, 0.0, onlinePlayersInWorld(endWorld));
+                @Override
+                public void onCastComplete(
+                        BossConfig.TimelineStep step,
+                        @Nullable BossConfig.AbilitySettings ability) {
+                    List<Player> viewers = onlinePlayersInWorld(endWorld);
+                    if (hudService != null) {
+                        hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
+                    }
+                    RaidTimelineEngine engine = activeTimeline;
+                    if (engine != null) {
+                        gimmickExecutor.completeCast(
+                                step,
+                                ability,
+                                aliveOnlineParticipants(),
+                                viewers,
+                                scaled,
+                                bossController,
+                                engine
+                        );
+                    }
                 }
-                gimmickExecutor.cancelActiveMechanic();
-            }
 
-            @Override
-            public void onInstantAction(
-                    BossConfig.TimelineStep step,
-                    @Nullable BossConfig.AbilitySettings ability) {
-                gimmickExecutor.executeInstantAction(step, ability, endWorld, scaled, onlinePlayersInWorld(endWorld));
-            }
-        });
-        this.activeTimeline = timeline;
-        timeline.start();
-        if (hudService != null) {
+                @Override
+                public void onCastInterrupted(
+                        BossConfig.TimelineStep step,
+                        @Nullable BossConfig.AbilitySettings ability) {
+                    if (hudService != null) {
+                        hudService.updateCastBossBar(null, 0.0, 0.0, onlinePlayersInWorld(endWorld));
+                    }
+                    gimmickExecutor.cancelActiveMechanic();
+                }
+
+                @Override
+                public void onInstantAction(
+                        BossConfig.TimelineStep step,
+                        @Nullable BossConfig.AbilitySettings ability) {
+                    gimmickExecutor.executeInstantAction(step, ability, endWorld, scaled, onlinePlayersInWorld(endWorld));
+                }
+            });
+            this.activeTimeline = timeline;
+            timeline.start();
+            bossReadyFuture = bossController.bindOrSpawn(endWorld, scaled.scaledBossHp());
+        }
+        if (bossReadyFuture != null) {
+            bossReadyFuture.exceptionally(ex -> {
+                logger.log(Level.SEVERE, "Boss spawn/binding failed; aborting raid encounter", ex);
+                abortOnBossSpawnFailure(endWorld, expectedGeneration);
+                return null;
+            });
+        }
+        if (hudService != null && state == RaidState.ACTIVE && encounterGeneration.get() == expectedGeneration) {
             BossConfig.PhaseConfig phase = timeline.currentPhase();
             if (phase != null) {
                 hudService.updateMainBossBar(bossConfig, phase, bossController.hpRatio(), onlinePlayersInWorld(endWorld));
             }
         }
+    }
+
+    private void abortOnBossSpawnFailure(World endWorld, long expectedGeneration) {
+        long endingGeneration;
+        synchronized (stateLock) {
+            if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
+                return;
+            }
+            cancelHandle(monitorTask);
+            monitorTask = null;
+            endingGeneration = encounterGeneration.incrementAndGet();
+            state = RaidState.ENDING;
+        }
+        List<Player> viewers = onlinePlayersInWorld(endWorld);
+        soulMarkerService.removeAllMarkers(viewers);
+        cleanupM3Systems(viewers, true);
+        restoreAndResetParticipants(regionService.safeZoneSpawnLocation(endWorld));
+        CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
+        completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
     }
 
     private void tickM3Systems(World endWorld, List<Player> endPlayers, Set<UUID> channelingRevivers) {
@@ -2194,7 +2240,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
     }
 
-    private void cleanupM3Systems(List<Player> viewers, boolean removeDragonIfSummoned) {
+    private CompletableFuture<Void> cleanupM3Systems(List<Player> viewers, boolean removeDragonIfSummoned) {
         RaidTimelineEngine timeline = this.activeTimeline;
         this.activeTimeline = null;
         if (timeline != null) {
@@ -2203,15 +2249,19 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         if (gimmickExecutor != null) {
             gimmickExecutor.resetState();
         }
-        if (crystalManager != null) {
-            crystalManager.clearAll();
-        }
+        CompletableFuture<Void> crystalFuture = crystalManager != null
+                ? crystalManager.clearAll()
+                : CompletableFuture.completedFuture(null);
         if (hudService != null) {
             hudService.clearAll(viewers);
         }
-        if (bossController != null) {
-            bossController.cleanup(removeDragonIfSummoned);
-        }
+        CompletableFuture<Void> bossFuture = bossController != null
+                ? bossController.cleanup(removeDragonIfSummoned)
+                : CompletableFuture.completedFuture(null);
+        return CompletableFuture.allOf(
+                crystalFuture != null ? crystalFuture : CompletableFuture.completedFuture(null),
+                bossFuture != null ? bossFuture : CompletableFuture.completedFuture(null)
+        );
     }
 
     private void maybeInitializeFirstClear(Player player, World endWorld) {

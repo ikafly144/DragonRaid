@@ -2,6 +2,10 @@ package net.sabafly.dragonraid.boss;
 
 import java.util.Collection;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -43,6 +47,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     private final DragonSpawner dragonSpawner;
 
     private volatile @Nullable EnderDragon activeDragon;
+    private volatile @Nullable UUID capturedFlagsDragonId;
     private volatile boolean summonedByPlugin;
     private volatile boolean previousAi = true;
     private volatile boolean previousGravity = true;
@@ -56,6 +61,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     private volatile @Nullable TaskHandle movementTask;
     private volatile boolean activeCombat;
     private final AtomicLong generation = new AtomicLong(0L);
+    private final Set<UUID> pendingDeletionDragons = ConcurrentHashMap.newKeySet();
 
     @FunctionalInterface
     interface DragonSpawner {
@@ -86,7 +92,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     }
 
     @Override
-    public void bindOrSpawn(World endWorld, double scaledMaxHp) {
+    public CompletableFuture<Void> bindOrSpawn(World endWorld, double scaledMaxHp) {
         Objects.requireNonNull(endWorld, "endWorld");
         double validMaxHp = Math.max(1.0, scaledMaxHp);
         Location anchor = arenaAnchor(endWorld, LOW_ORBIT_Y_OFFSET);
@@ -105,39 +111,63 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.cachedLocation = anchor.clone();
         }
 
-        EnderDragon existing = dragonFinder.apply(endWorld);
-        if (existing != null && !existing.isDead()) {
-            bindEntity(existing, false, validMaxHp, true, anchor, bindGeneration);
-            return;
+        EnderDragon existing = findEligibleDragon(endWorld);
+        if (existing != null) {
+            return bindEntity(existing, false, validMaxHp, true, anchor, bindGeneration);
         }
 
-        scheduler.runAtRegion(anchor, () -> {
+        CompletableFuture<Void> readyFuture = new CompletableFuture<>();
+        TaskHandle regionHandle = scheduler.runAtRegion(anchor, () -> {
             if (generation.get() != bindGeneration || !activeCombat) {
+                readyFuture.complete(null);
                 return;
             }
-            EnderDragon rechecked = dragonFinder.apply(endWorld);
-            if (rechecked != null && !rechecked.isDead()) {
-                bindEntity(rechecked, false, validMaxHp, true, anchor, bindGeneration);
+            EnderDragon rechecked = findEligibleDragon(endWorld);
+            if (rechecked != null) {
+                bindEntity(rechecked, false, validMaxHp, true, anchor, bindGeneration)
+                        .whenComplete((ignored, err) -> {
+                            if (err != null) {
+                                readyFuture.completeExceptionally(err);
+                            } else {
+                                readyFuture.complete(null);
+                            }
+                        });
                 return;
             }
             try {
                 EnderDragon spawned = dragonSpawner.spawn(endWorld, anchor);
+                if (spawned == null) {
+                    throw new IllegalStateException("Dragon spawner returned null");
+                }
                 if (generation.get() != bindGeneration || !activeCombat) {
                     spawned.remove();
+                    readyFuture.complete(null);
                     return;
                 }
-                bindEntity(spawned, true, validMaxHp, true, anchor, bindGeneration);
+                bindEntity(spawned, true, validMaxHp, true, anchor, bindGeneration)
+                        .whenComplete((ignored, err) -> {
+                            if (err != null) {
+                                readyFuture.completeExceptionally(err);
+                            } else {
+                                readyFuture.complete(null);
+                            }
+                        });
             } catch (RuntimeException ex) {
                 logger.log(Level.WARNING, "Failed to spawn raid EnderDragon", ex);
+                readyFuture.completeExceptionally(ex);
             }
         });
+        if (regionHandle == null) {
+            readyFuture.completeExceptionally(new IllegalStateException("Failed to schedule region dragon spawn"));
+        }
+        return readyFuture;
     }
 
     @Override
     public void holdFirstClearIdle(World endWorld) {
         Objects.requireNonNull(endWorld, "endWorld");
-        EnderDragon existing = dragonFinder.apply(endWorld);
-        if (existing == null || existing.isDead()) {
+        EnderDragon existing = findEligibleDragon(endWorld);
+        if (existing == null) {
             return;
         }
         final long holdGeneration;
@@ -155,7 +185,7 @@ public final class FoliaDragonBossController implements DragonBossController {
         bindEntity(existing, false, 0.0, false, anchor, holdGeneration);
     }
 
-    private void bindEntity(
+    private CompletableFuture<Void> bindEntity(
             EnderDragon dragon,
             boolean wasSummoned,
             double targetMaxHp,
@@ -164,7 +194,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             long expectedGeneration) {
         synchronized (lock) {
             if (generation.get() != expectedGeneration) {
-                return;
+                return CompletableFuture.completedFuture(null);
             }
             cancelMovementTask();
             this.activeDragon = dragon;
@@ -172,16 +202,27 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.cachedLocation = initialAnchor.clone();
         }
 
-        scheduler.runAtEntity(dragon, () -> {
+        CompletableFuture<Void> entityReady = new CompletableFuture<>();
+        Runnable entityTask = () -> {
             if (dragon.isDead() || generation.get() != expectedGeneration) {
+                if (dragon.isDead()) {
+                    entityReady.completeExceptionally(new IllegalStateException("Bound dragon died during initialization"));
+                } else {
+                    entityReady.complete(null);
+                }
                 return;
             }
             synchronized (lock) {
                 if (this.activeDragon != dragon || generation.get() != expectedGeneration) {
+                    entityReady.complete(null);
                     return;
                 }
-                this.previousAi = dragon.hasAI();
-                this.previousGravity = dragon.hasGravity();
+                UUID dragonId = dragon.getUniqueId();
+                if (!Objects.equals(this.capturedFlagsDragonId, dragonId)) {
+                    this.capturedFlagsDragonId = dragonId;
+                    this.previousAi = dragon.hasAI();
+                    this.previousGravity = dragon.hasGravity();
+                }
             }
             suppressVanillaAi(dragon, initialAnchor.getWorld());
             if (applyHealth && targetMaxHp > 0.0) {
@@ -194,7 +235,29 @@ public final class FoliaDragonBossController implements DragonBossController {
                 this.cachedLocation = loc.clone();
             }
             startMovementLoop(dragon);
-        });
+            entityReady.complete(null);
+        };
+        TaskHandle handle = scheduler.runAtEntity(
+                dragon,
+                entityTask,
+                () -> entityReady.completeExceptionally(new IllegalStateException("Dragon entity retired before binding"))
+        );
+        if (handle == null) {
+            entityReady.completeExceptionally(new IllegalStateException("Failed to schedule entity dragon binding"));
+        }
+        return entityReady;
+    }
+
+    private @Nullable EnderDragon findEligibleDragon(World endWorld) {
+        EnderDragon dragon = dragonFinder.apply(endWorld);
+        if (dragon == null || dragon.isDead()) {
+            return null;
+        }
+        UUID id = dragon.getUniqueId();
+        if (id != null && pendingDeletionDragons.contains(id)) {
+            return null;
+        }
+        return dragon;
     }
 
     private void suppressVanillaAi(EnderDragon dragon, @Nullable World world) {
@@ -476,38 +539,49 @@ public final class FoliaDragonBossController implements DragonBossController {
         EnderDragon dragon;
         boolean prevAi;
         boolean prevGravity;
+        long defeatGen;
         synchronized (lock) {
-            generation.incrementAndGet();
+            defeatGen = generation.incrementAndGet();
             cancelMovementTask();
             dragon = this.activeDragon;
             prevAi = this.previousAi;
             prevGravity = this.previousGravity;
+            this.capturedFlagsDragonId = null;
             this.activeCombat = false;
             this.staggerRemainingSeconds = 0.0;
             this.preStaggerPosture = null;
         }
         if (dragon != null && !dragon.isDead()) {
-            scheduler.runAtEntity(dragon, () -> {
-                dragon.setAI(prevAi);
-                dragon.setGravity(prevGravity);
-            });
+            Runnable restoreTask = () -> {
+                if (generation.get() == defeatGen) {
+                    dragon.setAI(prevAi);
+                    dragon.setGravity(prevGravity);
+                }
+            };
+            if (Bukkit.getServer() != null && Bukkit.isOwnedByCurrentRegion(dragon)) {
+                restoreTask.run();
+            } else {
+                scheduler.runAtEntity(dragon, restoreTask);
+            }
         }
     }
 
     @Override
-    public void cleanup(boolean removeDragonIfSummoned) {
+    public CompletableFuture<Void> cleanup(boolean removeDragonIfSummoned) {
         EnderDragon dragon;
         boolean wasSummoned;
         boolean prevAi;
         boolean prevGravity;
+        long cleanupGen;
         synchronized (lock) {
-            generation.incrementAndGet();
+            cleanupGen = generation.incrementAndGet();
             cancelMovementTask();
             dragon = this.activeDragon;
             wasSummoned = this.summonedByPlugin;
             prevAi = this.previousAi;
             prevGravity = this.previousGravity;
             this.activeDragon = null;
+            this.capturedFlagsDragonId = null;
             this.summonedByPlugin = false;
             this.activeCombat = false;
             this.staggerRemainingSeconds = 0.0;
@@ -515,20 +589,53 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.targetPosture = DragonPosture.LOW_ORBIT;
             this.cachedLocation = null;
         }
-        if (dragon != null && !dragon.isDead()) {
-            scheduler.runAtEntity(dragon, () -> {
+        if (dragon == null || dragon.isDead()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        UUID dragonId = dragon.getUniqueId();
+        boolean shouldDelete = removeDragonIfSummoned && wasSummoned;
+        if (shouldDelete && dragonId != null) {
+            pendingDeletionDragons.add(dragonId);
+        }
+        CompletableFuture<Void> cleanupDone = new CompletableFuture<>();
+        Runnable cleanupTask = () -> {
+            try {
                 if (dragon.isDead()) {
                     return;
                 }
-                if (removeDragonIfSummoned && wasSummoned) {
-                    dragon.remove();
-                } else {
+                if (shouldDelete) {
+                    if (dragonId == null || pendingDeletionDragons.contains(dragonId)) {
+                        dragon.remove();
+                    }
+                } else if (generation.get() == cleanupGen) {
                     dragon.setAI(prevAi);
                     dragon.setGravity(prevGravity);
                     dragon.setPhase(EnderDragon.Phase.CIRCLING);
                 }
-            });
+            } finally {
+                if (shouldDelete && dragonId != null) {
+                    pendingDeletionDragons.remove(dragonId);
+                }
+                cleanupDone.complete(null);
+            }
+        };
+        if (Bukkit.getServer() != null && Bukkit.isOwnedByCurrentRegion(dragon)) {
+            cleanupTask.run();
+            return cleanupDone;
         }
+        TaskHandle handle = scheduler.runAtEntity(dragon, cleanupTask, () -> {
+            if (shouldDelete && dragonId != null) {
+                pendingDeletionDragons.remove(dragonId);
+            }
+            cleanupDone.complete(null);
+        });
+        if (handle == null) {
+            if (shouldDelete && dragonId != null) {
+                pendingDeletionDragons.remove(dragonId);
+            }
+            cleanupDone.complete(null);
+        }
+        return cleanupDone;
     }
 
     private Location arenaAnchor(World world, double yOffset) {

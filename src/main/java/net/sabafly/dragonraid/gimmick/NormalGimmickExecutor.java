@@ -70,6 +70,7 @@ public final class NormalGimmickExecutor {
     private final Map<UUID, Boolean> lastBlockingState = new ConcurrentHashMap<>();
     private final AtomicInteger towerRotationIndex = new AtomicInteger(0);
     private final AtomicInteger mechanicGeneration = new AtomicInteger(0);
+    private final AtomicInteger sessionGeneration = new AtomicInteger(0);
 
     private volatile @Nullable ActiveMechanic activeMechanic;
     private volatile double safeArenaRadius;
@@ -118,6 +119,7 @@ public final class NormalGimmickExecutor {
      * Resets mechanic state and soft enrage radius for a fresh encounter attempt.
      */
     public void resetState() {
+        this.sessionGeneration.incrementAndGet();
         this.mechanicGeneration.incrementAndGet();
         this.activeMechanic = null;
         this.shieldRaiseMillis.clear();
@@ -200,6 +202,7 @@ public final class NormalGimmickExecutor {
         Objects.requireNonNull(scaled, "scaled");
         Objects.requireNonNull(bossController, "bossController");
 
+        this.mechanicGeneration.incrementAndGet();
         String action = step.action().toUpperCase(java.util.Locale.ROOT);
         switch (action) {
             case "TANK_BUSTER" -> {
@@ -347,36 +350,48 @@ public final class NormalGimmickExecutor {
         if (mech == null) {
             return;
         }
+        int expectedMechGen = mechanicGeneration.get();
+        int expectedSessionGen = sessionGeneration.get();
         Map<UUID, Player> byId = indexPlayers(aliveParticipants);
         switch (mech.type) {
             case TANK_BUSTER -> resolveTankBuster(
                     mech.ability != null ? mech.ability : ability,
                     byId.get(mech.primaryTargetId),
                     bossController,
-                    timelineEngine
+                    timelineEngine,
+                    expectedMechGen,
+                    expectedSessionGen
             );
             case STACK -> resolveStack(
                     mech.ability != null ? mech.ability : ability,
                     byId.get(mech.primaryTargetId),
                     aliveParticipants,
                     scaled,
-                    mech.soloMode
+                    mech.soloMode,
+                    expectedMechGen,
+                    expectedSessionGen
             );
             case SPREAD -> resolveSpread(
                     mech.ability != null ? mech.ability : ability,
                     mech.targetIds,
                     aliveParticipants,
-                    byId
+                    byId,
+                    expectedMechGen,
+                    expectedSessionGen
             );
             case METEOR_TOWERS -> resolveMeteorTowers(
                     mech.ability != null ? mech.ability : ability,
                     mech.towerLocations,
-                    aliveParticipants
+                    aliveParticipants,
+                    expectedMechGen,
+                    expectedSessionGen
             );
             case LOS_BREATH -> resolveLosBreath(
                     mech.ability != null ? mech.ability : ability,
                     bossController.bossLocation(),
-                    aliveParticipants
+                    aliveParticipants,
+                    expectedMechGen,
+                    expectedSessionGen
             );
         }
 
@@ -424,6 +439,7 @@ public final class NormalGimmickExecutor {
             this.softEnrageAccumulatorSeconds = Math.max(0.0, this.softEnrageAccumulatorSeconds - 1.0);
             double damagePerSec = soft.voidDamagePerSecond();
             double safeRadiusSq = this.safeArenaRadius * this.safeArenaRadius;
+            int expectedSessionGen = sessionGeneration.get();
             for (Player player : aliveParticipants) {
                 if (player == null || !player.isOnline()) {
                     continue;
@@ -435,7 +451,7 @@ public final class NormalGimmickExecutor {
                 double dx = loc.getX() - center.x();
                 double dz = loc.getZ() - center.z();
                 if (dx * dx + dz * dz > safeRadiusSq && damagePerSec > 0.0) {
-                    applyDamageOnEntityThread(player, damagePerSec);
+                    applySessionDamageOnEntityThread(player, damagePerSec, expectedSessionGen);
                 }
             }
         }
@@ -491,7 +507,9 @@ public final class NormalGimmickExecutor {
             @Nullable BossConfig.AbilitySettings ability,
             @Nullable Player target,
             DragonBossController bossController,
-            RaidTimelineEngine timelineEngine) {
+            RaidTimelineEngine timelineEngine,
+            int expectedMechGen,
+            int expectedSessionGen) {
         if (target == null || !target.isOnline()) {
             return;
         }
@@ -509,29 +527,35 @@ public final class NormalGimmickExecutor {
 
         if (justGuard) {
             double finalDamage = baseDamage * justGuardMult;
-            applyDamageOnEntityThread(target, finalDamage);
+            applyMechanicDamageOnEntityThread(target, finalDamage, expectedMechGen, expectedSessionGen);
             bossController.stagger(staggerSeconds);
             timelineEngine.stagger(staggerSeconds);
             scheduler.runAtEntity(target, () -> {
-                target.sendActionBar(messageService.render(target, "actionbar.just-guard-success"));
-                target.playSound(Sound.sound(
-                        Key.key("minecraft:block.anvil.land"),
-                        Sound.Source.PLAYER,
-                        0.8f,
-                        1.4f
-                ));
+                if (mechanicGeneration.get() == expectedMechGen && sessionGeneration.get() == expectedSessionGen) {
+                    target.sendActionBar(messageService.render(target, "actionbar.just-guard-success"));
+                    target.playSound(Sound.sound(
+                            Key.key("minecraft:block.anvil.land"),
+                            Sound.Source.PLAYER,
+                            0.8f,
+                            1.4f
+                    ));
+                }
             });
         } else if (blocking) {
             double finalDamage = baseDamage * shieldMult;
-            applyDamageOnEntityThread(target, finalDamage);
-            scheduler.runAtEntity(target, () -> target.playSound(Sound.sound(
-                    Key.key("minecraft:item.shield.block"),
-                    Sound.Source.PLAYER,
-                    0.9f,
-                    1.0f
-            )));
+            applyMechanicDamageOnEntityThread(target, finalDamage, expectedMechGen, expectedSessionGen);
+            scheduler.runAtEntity(target, () -> {
+                if (mechanicGeneration.get() == expectedMechGen && sessionGeneration.get() == expectedSessionGen) {
+                    target.playSound(Sound.sound(
+                            Key.key("minecraft:item.shield.block"),
+                            Sound.Source.PLAYER,
+                            0.9f,
+                            1.0f
+                    ));
+                }
+            });
         } else {
-            applyDamageOnEntityThread(target, baseDamage);
+            applyMechanicDamageOnEntityThread(target, baseDamage, expectedMechGen, expectedSessionGen);
         }
     }
 
@@ -540,7 +564,9 @@ public final class NormalGimmickExecutor {
             @Nullable Player target,
             List<Player> aliveParticipants,
             ScaledEncounterParameters scaled,
-            boolean soloMode) {
+            boolean soloMode,
+            int expectedMechGen,
+            int expectedSessionGen) {
         if (target == null || !target.isOnline()) {
             return;
         }
@@ -552,7 +578,7 @@ public final class NormalGimmickExecutor {
             if (target.isBlocking()) {
                 soloDamage *= 0.5;
             }
-            applyDamageOnEntityThread(target, soloDamage);
+            applyMechanicDamageOnEntityThread(target, soloDamage, expectedMechGen, expectedSessionGen);
             return;
         }
 
@@ -572,7 +598,7 @@ public final class NormalGimmickExecutor {
         }
         double splitDamage = totalDamage / soakers.size();
         for (Player soaker : soakers) {
-            applyDamageOnEntityThread(soaker, splitDamage);
+            applyMechanicDamageOnEntityThread(soaker, splitDamage, expectedMechGen, expectedSessionGen);
         }
     }
 
@@ -580,7 +606,9 @@ public final class NormalGimmickExecutor {
             @Nullable BossConfig.AbilitySettings ability,
             List<UUID> targetIds,
             List<Player> aliveParticipants,
-            Map<UUID, Player> byId) {
+            Map<UUID, Player> byId,
+            int expectedMechGen,
+            int expectedSessionGen) {
         double baseDamage = ability != null ? ability.damage(14.0) : 14.0;
         double radius = ability != null ? ability.radius(4.5) : 4.5;
         double overlapMult = ability != null ? ability.getDouble("overlap-penalty-multiplier", 2.0) : 2.0;
@@ -606,14 +634,16 @@ public final class NormalGimmickExecutor {
                 }
             }
             double finalDamage = overlapped ? baseDamage * overlapMult : baseDamage;
-            applyDamageOnEntityThread(target, finalDamage);
+            applyMechanicDamageOnEntityThread(target, finalDamage, expectedMechGen, expectedSessionGen);
         }
     }
 
     private void resolveMeteorTowers(
             @Nullable BossConfig.AbilitySettings ability,
             List<Location> towers,
-            List<Player> aliveParticipants) {
+            List<Player> aliveParticipants,
+            int expectedMechGen,
+            int expectedSessionGen) {
         double towerRadius = ability != null ? ability.getDouble("tower-radius", 3.0) : 3.0;
         double soakDamage = ability != null ? ability.getDouble("soak-damage", 8.0) : 8.0;
         double unsoakedDamage = ability != null ? ability.getDouble("unsoaked-raid-damage", 22.0) : 22.0;
@@ -634,7 +664,7 @@ public final class NormalGimmickExecutor {
                 unsoakedCount++;
             } else {
                 for (Player p : inside) {
-                    applyDamageOnEntityThread(p, soakDamage);
+                    applyMechanicDamageOnEntityThread(p, soakDamage, expectedMechGen, expectedSessionGen);
                 }
             }
         }
@@ -643,7 +673,7 @@ public final class NormalGimmickExecutor {
             double raidPenalty = unsoakedCount * unsoakedDamage;
             for (Player p : aliveParticipants) {
                 if (p != null && p.isOnline()) {
-                    applyDamageOnEntityThread(p, raidPenalty);
+                    applyMechanicDamageOnEntityThread(p, raidPenalty, expectedMechGen, expectedSessionGen);
                 }
             }
         }
@@ -652,14 +682,15 @@ public final class NormalGimmickExecutor {
     private void resolveLosBreath(
             @Nullable BossConfig.AbilitySettings ability,
             @Nullable Location bossLocation,
-            List<Player> aliveParticipants) {
+            List<Player> aliveParticipants,
+            int expectedMechGen,
+            int expectedSessionGen) {
         if (bossLocation == null || bossLocation.getWorld() == null) {
             return;
         }
         double damage = ability != null ? ability.damage(26.0) : 26.0;
         double range = ability != null ? ability.getDouble("range", 96.0) : 96.0;
         double rangeSq = range * range;
-        int expectedGen = mechanicGeneration.get();
 
         for (Player player : aliveParticipants) {
             if (player == null || !player.isOnline()) {
@@ -675,10 +706,11 @@ public final class NormalGimmickExecutor {
             Location playerEye = playerLoc.clone().add(0.0, 1.62, 0.0);
             occlusionChecker.isOccludedAsync(bossLocation, playerEye).whenComplete((occluded, ex) -> {
                 if (ex == null
-                        && mechanicGeneration.get() == expectedGen
+                        && mechanicGeneration.get() == expectedMechGen
+                        && sessionGeneration.get() == expectedSessionGen
                         && !Boolean.TRUE.equals(occluded)
                         && player.isOnline()) {
-                    applyDamageOnEntityThread(player, damage);
+                    applyMechanicDamageOnEntityThread(player, damage, expectedMechGen, expectedSessionGen);
                 }
             });
         }
@@ -793,12 +825,32 @@ public final class NormalGimmickExecutor {
         return towers;
     }
 
-    private void applyDamageOnEntityThread(Player player, double amount) {
+    private void applyMechanicDamageOnEntityThread(
+            Player player,
+            double amount,
+            int expectedMechGen,
+            int expectedSessionGen) {
         if (amount <= 0.0) {
             return;
         }
         scheduler.runAtEntity(player, () -> {
-            if (player.isOnline()) {
+            if (player.isOnline()
+                    && mechanicGeneration.get() == expectedMechGen
+                    && sessionGeneration.get() == expectedSessionGen) {
+                damageApplier.accept(player, amount);
+            }
+        });
+    }
+
+    private void applySessionDamageOnEntityThread(
+            Player player,
+            double amount,
+            int expectedSessionGen) {
+        if (amount <= 0.0) {
+            return;
+        }
+        scheduler.runAtEntity(player, () -> {
+            if (player.isOnline() && sessionGeneration.get() == expectedSessionGen) {
                 damageApplier.accept(player, amount);
             }
         });

@@ -127,4 +127,17 @@ class AdventureRaidHudServiceTest {
         hudService.clearAll(List.of(alice));
         verify(alice, times(1)).hideBossBar(mainBar);
     }
+
+    @Test
+    void clearAllWithEmptyListHidesCastBarShownWithoutMainBar() {
+        Player bob = mockPlayer("Bob", Locale.US);
+        BossConfig.AbilitySettings tankBuster = normalBoss.ability("tank_buster").orElseThrow();
+
+        hudService.updateCastBossBar(tankBuster, 2.0, 3.0, List.of(bob));
+        ArgumentCaptor<BossBar> barCaptor = ArgumentCaptor.forClass(BossBar.class);
+        verify(bob, times(1)).showBossBar(barCaptor.capture());
+
+        hudService.clearAll(List.of());
+        verify(bob, times(1)).hideBossBar(barCaptor.getValue());
+    }
 }
