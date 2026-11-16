@@ -67,8 +67,10 @@ public record PluginConfig(
         /** Computes dynamic Spread target count for party size {@code playerCount}. */
         public int spreadTargets(int playerCount) {
             int n = Math.max(1, playerCount);
+            int upper = Math.min(n, spreadMax);
+            int lower = Math.min(spreadMin, upper);
             int raw = (int) Math.ceil(n * spreadRatio);
-            return clamp(raw, spreadMin, Math.min(n, spreadMax));
+            return clamp(raw, lower, upper);
         }
 
         /** Computes dynamic End Crystal count for party size {@code playerCount}. */

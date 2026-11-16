@@ -22,8 +22,6 @@ import java.util.concurrent.CompletionException;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -101,11 +99,13 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     @Override
     public void openShop(Player player) {
         Objects.requireNonNull(player, "player");
-        sendMilestoneNotice(
-            player,
-            "Reward shop GUI is not yet available (scheduled for Milestone 4).",
-            "報酬ショップ GUI は現在未実装です（Milestone 4 で実装予定）。"
-        );
+        messageService.send(player, "command.milestone-shop");
+    }
+
+    @Override
+    public void showHelp(CommandSender sender) {
+        Objects.requireNonNull(sender, "sender");
+        messageService.send(sender, "command.help");
     }
 
     @Override
@@ -139,7 +139,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             .whenComplete((snapshot, error) -> replyOnSenderThread(sender, () -> {
                 if (error != null) {
                     logger.log(Level.WARNING, "Failed to load raid stats for " + targetPlayerName, error);
-                    sendFailure(sender, "Failed to load stats.", "統計情報の取得に失敗しました。");
+                    messageService.send(sender, "command.stats-load-failed");
                     return;
                 }
                 if (snapshot.isEmpty()) {
@@ -161,11 +161,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             messageService.send(player, "command.altar-only-mode");
             return;
         }
-        sendMilestoneNotice(
-            player,
-            "Raid ready/encounter flow is not yet available (scheduled for Milestone 2).",
-            "レイド準備・開始フローは現在未実装です（Milestone 2 で実装予定）。"
-        );
+        messageService.send(player, "command.milestone-ready");
     }
 
     @Override
@@ -175,11 +171,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             messageService.send(sender, "command.altar-only-mode");
             return;
         }
-        sendMilestoneNotice(
-            sender,
-            "Raid encounter flow is not yet available (scheduled for Milestone 2).",
-            "レイド開始フローは現在未実装です（Milestone 2 で実装予定）。"
-        );
+        messageService.send(sender, "command.milestone-start");
     }
 
     @Override
@@ -225,21 +217,17 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     public void adminStart(CommandSender sender, Difficulty difficulty) {
         Objects.requireNonNull(sender, "sender");
         Objects.requireNonNull(difficulty, "difficulty");
-        sendMilestoneNotice(
+        messageService.send(
             sender,
-            "Forced raid start (" + difficulty.cliName() + ") is not yet available (scheduled for Milestone 2).",
-            "強制レイド開始（" + difficulty.cliName() + "）は現在未実装です（Milestone 2 で実装予定）。"
+            "command.milestone-admin-start",
+            Placeholder.unparsed("difficulty", difficulty.cliName())
         );
     }
 
     @Override
     public void adminReset(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
-        sendMilestoneNotice(
-            sender,
-            "Raid encounter reset is not yet available (scheduled for Milestone 2).",
-            "レイド強制リセットは現在未実装です（Milestone 2 で実装予定）。"
-        );
+        messageService.send(sender, "command.milestone-admin-reset");
     }
 
     @Override
@@ -284,7 +272,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             .whenComplete((outcomeOpt, error) -> replyOnSenderThread(sender, () -> {
                 if (error != null) {
                     logger.log(Level.WARNING, "Failed to update points for " + targetPlayerName, error);
-                    sendFailure(sender, "Failed to update points.", "ポイント更新に失敗しました。");
+                    messageService.send(sender, "command.points-load-failed");
                     return;
                 }
                 if (outcomeOpt.isEmpty()) {
@@ -351,7 +339,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             .whenComplete((snapshot, error) -> replyOnSenderThread(sender, () -> {
                 if (error != null) {
                     logger.log(Level.WARNING, "Failed to load raid stats for " + displayName, error);
-                    sendFailure(sender, "Failed to load stats.", "統計情報の取得に失敗しました。");
+                    messageService.send(sender, "command.stats-load-failed");
                     return;
                 }
                 sendStatsLines(sender, snapshot.stats(), snapshot.currencies());
@@ -436,11 +424,16 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                 "command.player-not-found",
                 Placeholder.unparsed("target", targetPlayerName)
             );
-            case INSUFFICIENT_FUNDS -> messageService.send(sender, "shop.insufficient-points");
-            case INVALID_AMOUNT, BALANCE_OVERFLOW, NONE -> sendFailure(
+            case INSUFFICIENT_FUNDS -> messageService.send(
                 sender,
-                "Could not update points (" + result.failureReason() + ", current balance: " + result.previousBalance() + ").",
-                "ポイントを更新できませんでした（" + result.failureReason() + "、現在残高: " + result.previousBalance() + "）。"
+                "command.points-insufficient",
+                Placeholder.unparsed("target", targetPlayerName)
+            );
+            case INVALID_AMOUNT, BALANCE_OVERFLOW, NONE -> messageService.send(
+                sender,
+                "command.points-transaction-failed",
+                Placeholder.unparsed("reason", String.valueOf(result.failureReason())),
+                Placeholder.unparsed("balance", String.valueOf(result.previousBalance()))
             );
         }
     }
@@ -475,24 +468,6 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         } else {
             scheduler.runGlobal(action);
         }
-    }
-
-    private void sendMilestoneNotice(CommandSender sender, String english, String japanese) {
-        String text = isJapanese(sender) ? japanese : english;
-        sender.sendMessage(prefixComponent(sender).append(Component.text(text, NamedTextColor.YELLOW)));
-    }
-
-    private void sendFailure(CommandSender sender, String english, String japanese) {
-        String text = isJapanese(sender) ? japanese : english;
-        sender.sendMessage(prefixComponent(sender).append(Component.text(text, NamedTextColor.RED)));
-    }
-
-    private Component prefixComponent(CommandSender sender) {
-        return messageService.render(sender, "prefix");
-    }
-
-    private boolean isJapanese(CommandSender sender) {
-        return "ja_JP".equalsIgnoreCase(messageService.resolveLocale(sender));
     }
 
     private static ArenaRegion recenterArena(ArenaRegion current, Location location) {

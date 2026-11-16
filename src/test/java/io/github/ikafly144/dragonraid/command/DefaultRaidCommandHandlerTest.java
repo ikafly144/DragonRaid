@@ -216,6 +216,7 @@ class DefaultRaidCommandHandlerTest {
         List<String> newbieMsgs = captureMessages(takeSender);
         assertEquals(1, newbieMsgs.size());
         assertTrue(newbieMsgs.get(0).contains("Insufficient"));
+        assertTrue(newbieMsgs.get(0).contains("Newbie"));
     }
 
     @Test
@@ -335,6 +336,23 @@ class DefaultRaidCommandHandlerTest {
         entityQueue.removeFirst().run();
         assertEquals(30.0, configManager.pluginConfig().regions().arena().center().x(), 1e-6);
         assertEquals(1, captureMessages(admin).size());
+    }
+
+    @Test
+    void showHelpUsesLocalizedMessageServicePerLocale() {
+        Player english = mock(Player.class);
+        when(english.locale()).thenReturn(Locale.US);
+        handler.showHelp(english);
+        List<String> enMsgs = captureMessages(english);
+        assertEquals(1, enMsgs.size());
+        assertTrue(enMsgs.get(0).contains("<region|start|reset|points|reload>"));
+
+        Player japanese = mock(Player.class);
+        when(japanese.locale()).thenReturn(Locale.JAPAN);
+        handler.showHelp(japanese);
+        List<String> jaMsgs = captureMessages(japanese);
+        assertEquals(1, jaMsgs.size());
+        assertTrue(jaMsgs.get(0).contains("コマンド一覧"));
     }
 
     private static List<String> captureMessages(CommandSender sender) {

@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -230,5 +232,91 @@ class ConfigManagerTest {
                 () -> manager.updateRegionsAsync(invalid, Runnable::run).join());
         assertInstanceOf(ConfigException.class, thrown.getCause());
         assertEquals(saved, Files.readString(configFile, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void updateRegions_leavesDiskAndMemoryUntouchedWhenCompanionConfigIsInvalid(@TempDir Path tempDir)
+            throws IOException {
+        ConfigManager manager = newManager(tempDir);
+        manager.initialize();
+
+        Path configFile = tempDir.resolve("config.yml");
+        Path hardBossFile = tempDir.resolve("boss_hard.yml");
+        String originalConfig = Files.readString(configFile, StandardCharsets.UTF_8);
+        double originalRadius = manager.pluginConfig().regions().arena().radius();
+
+        // Corrupt companion boss_hard.yml after initialization.
+        String corruptedBoss = Files.readString(hardBossFile, StandardCharsets.UTF_8)
+                .replace("base-hp: 2400.0", "base-hp: -10.0");
+        Files.writeString(hardBossFile, corruptedBoss, StandardCharsets.UTF_8);
+
+        RegionConfig current = manager.pluginConfig().regions();
+        RegionConfig.ArenaRegion candidateArena = new RegionConfig.ArenaRegion(
+                RegionConfig.Shape.CYLINDER,
+                current.arena().center(),
+                180.0,
+                current.arena().min(),
+                current.arena().max(),
+                current.arena().minY(),
+                current.arena().maxY()
+        );
+        RegionConfig candidate = new RegionConfig(candidateArena, current.safeZone(), current.voidYThreshold());
+
+        ConfigException ex = assertThrows(ConfigException.class, () -> manager.updateRegions(candidate));
+        assertEquals("boss_hard.yml", ex.fileName());
+        assertEquals(originalConfig, Files.readString(configFile, StandardCharsets.UTF_8));
+        assertEquals(originalRadius, manager.pluginConfig().regions().arena().radius(), 1e-6);
+    }
+
+    @Test
+    void integerValidation_rejectsFractionalAndOutOfRangeValues(@TempDir Path tempDir) throws IOException {
+        ConfigManager manager = newManager(tempDir);
+        manager.initialize();
+
+        Path rewardsFile = tempDir.resolve("rewards.yml");
+        String originalRewards = Files.readString(rewardsFile, StandardCharsets.UTF_8);
+
+        Files.writeString(rewardsFile, originalRewards.replaceFirst("amount: 1", "amount: 1.9"), StandardCharsets.UTF_8);
+        assertThrows(ConfigException.class, manager::reload);
+
+        Files.writeString(
+                rewardsFile,
+                originalRewards.replaceFirst("dragon_token: 30", "dragon_token: 4294967297"),
+                StandardCharsets.UTF_8);
+        ConfigException overflow = assertThrows(ConfigException.class, manager::reload);
+        assertEquals("rewards.yml", overflow.fileName());
+    }
+
+    @Test
+    void bossPhaseAndSpreadTargets_handleEdgeBoundaries() {
+        BossConfig.PhaseConfig low = new BossConfig.PhaseConfig(
+                "low", "phase.low", 0.5, 0.0, 1.0, true,
+                List.of(new BossConfig.TimelineStep(1.0, "LOOP", null)));
+        BossConfig.PhaseConfig high = new BossConfig.PhaseConfig(
+                "high", "phase.high", 1.0, 0.5, 1.0, false,
+                List.of(new BossConfig.TimelineStep(1.0, "LOOP", null)));
+        BossConfig ascending = new BossConfig(
+                BossConfig.Difficulty.NORMAL,
+                "boss.normal.name",
+                1000.0,
+                10.0,
+                new BossConfig.BossReviveSettings(BossConfig.ReviveFormula.PER_PLAYER, 1.0, 0),
+                new BossConfig.EnrageSettings(
+                        new BossConfig.SoftEnrageSettings(false, "low", 0.0, 0.0),
+                        new BossConfig.HardEnrageSettings(false, 0, "ability.hard_enrage.name", 0.0)),
+                Map.of(),
+                List.of(low, high));
+
+        assertEquals("low", ascending.phaseForHpRatio(0.0).id());
+        assertEquals("low", ascending.phaseForHpRatio(0.25).id());
+        assertEquals("high", ascending.phaseForHpRatio(1.0).id());
+
+        PluginConfig.GimmickScaling scaling = new PluginConfig.GimmickScaling(
+                1, 0.25, 1, 4,
+                0.5, 2, 4,
+                3, 0.5, 6);
+        assertEquals(1, scaling.spreadTargets(1));
+        assertEquals(2, scaling.spreadTargets(2));
+        assertEquals(4, scaling.spreadTargets(10));
     }
 }

@@ -87,18 +87,19 @@ public final class DragonRaidPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        if (raidScheduler != null) {
-            try {
-                raidScheduler.cancelAll();
-            } catch (RuntimeException ex) {
-                getLogger().log(Level.WARNING, "Failed to cancel scheduled tasks during shutdown", ex);
-            }
-        }
+        // Close repository first so queued async DB writes flush before asyncScheduler tasks are cancelled.
         if (playerDataRepository != null) {
             try {
                 playerDataRepository.close();
             } catch (Exception ex) {
                 getLogger().log(Level.WARNING, "Failed to close player data repository during shutdown", ex);
+            }
+        }
+        if (raidScheduler != null) {
+            try {
+                raidScheduler.cancelAll();
+            } catch (RuntimeException ex) {
+                getLogger().log(Level.WARNING, "Failed to cancel scheduled tasks during shutdown", ex);
             }
         }
     }

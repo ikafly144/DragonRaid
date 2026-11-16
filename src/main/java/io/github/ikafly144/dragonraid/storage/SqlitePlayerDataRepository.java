@@ -13,14 +13,22 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -32,25 +40,38 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
     private static final int DEFAULT_POOL_SIZE = 4;
     private static final int BUSY_TIMEOUT_MS = 5000;
+    private static final Duration DEFAULT_CLOSE_DRAIN_TIMEOUT = Duration.ofSeconds(5);
 
     private final HikariDataSource dataSource;
     private final Executor asyncExecutor;
+    private final long closeDrainTimeoutNanos;
     // SQLite permits one concurrent writer per database; serializing write transactions in-JVM
     // eliminates SQLITE_BUSY contention while reads proceed concurrently under WAL mode.
     private final ReentrantLock writeLock = new ReentrantLock(true);
+    private final AtomicBoolean closing = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final Set<CompletableFuture<?>> pendingFutures = ConcurrentHashMap.newKeySet();
 
     public SqlitePlayerDataRepository(Path databasePath, Executor asyncExecutor) {
-        this(databasePath, DEFAULT_POOL_SIZE, asyncExecutor);
+        this(databasePath, DEFAULT_POOL_SIZE, asyncExecutor, DEFAULT_CLOSE_DRAIN_TIMEOUT);
     }
 
     public SqlitePlayerDataRepository(Path databasePath, int poolSize, Executor asyncExecutor) {
+        this(databasePath, poolSize, asyncExecutor, DEFAULT_CLOSE_DRAIN_TIMEOUT);
+    }
+
+    SqlitePlayerDataRepository(Path databasePath, int poolSize, Executor asyncExecutor, Duration closeDrainTimeout) {
         Objects.requireNonNull(databasePath, "databasePath must not be null");
         Objects.requireNonNull(asyncExecutor, "asyncExecutor must not be null");
+        Objects.requireNonNull(closeDrainTimeout, "closeDrainTimeout must not be null");
         if (poolSize < 1) {
             throw new IllegalArgumentException("poolSize must be >= 1");
         }
+        if (closeDrainTimeout.isNegative()) {
+            throw new IllegalArgumentException("closeDrainTimeout must not be negative");
+        }
         this.asyncExecutor = asyncExecutor;
+        this.closeDrainTimeoutNanos = closeDrainTimeout.toNanos();
 
         Path normalizedPath = databasePath.toAbsolutePath().normalize();
         createParentDirectories(normalizedPath);
@@ -88,7 +109,7 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
     @Override
     public CompletableFuture<Optional<PlayerRaidStats>> findByName(String name) {
-        ensureOpen();
+        ensureAccepting();
         String normalized = normalizeName(name);
         if (normalized == null) {
             return CompletableFuture.completedFuture(Optional.empty());
@@ -404,8 +425,44 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
     @Override
     public void close() {
-        if (closed.compareAndSet(false, true)) {
+        if (!closing.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            drainPendingFutures();
+        } finally {
+            closed.set(true);
+            for (CompletableFuture<?> leftover : List.copyOf(pendingFutures)) {
+                pendingFutures.remove(leftover);
+                leftover.completeExceptionally(
+                    new CancellationException("SqlitePlayerDataRepository closed before completion")
+                );
+            }
             dataSource.close();
+        }
+    }
+
+    private void drainPendingFutures() {
+        long deadline = System.nanoTime() + closeDrainTimeoutNanos;
+        while (!pendingFutures.isEmpty()) {
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0L) {
+                break;
+            }
+            CompletableFuture<?>[] snapshot = pendingFutures.toArray(CompletableFuture[]::new);
+            if (snapshot.length == 0) {
+                break;
+            }
+            try {
+                CompletableFuture.allOf(snapshot).get(remainingNanos, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (TimeoutException ex) {
+                break;
+            } catch (ExecutionException ex) {
+                // Individual task failures are already propagated on each task's CompletableFuture.
+            }
         }
     }
 
@@ -596,13 +653,38 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
     }
 
     private <T> CompletableFuture<T> supplyAsync(java.util.function.Supplier<T> supplier) {
-        ensureOpen();
-        return CompletableFuture.supplyAsync(supplier, asyncExecutor);
+        ensureAccepting();
+        CompletableFuture<T> future = new CompletableFuture<>();
+        pendingFutures.add(future);
+        if (closing.get()) {
+            pendingFutures.remove(future);
+            throw new IllegalStateException("SqlitePlayerDataRepository is already closed");
+        }
+        future.whenComplete((ignored, error) -> pendingFutures.remove(future));
+        try {
+            asyncExecutor.execute(() -> {
+                if (future.isDone()) {
+                    return;
+                }
+                try {
+                    future.complete(supplier.get());
+                } catch (Throwable ex) {
+                    future.completeExceptionally(ex);
+                }
+            });
+        } catch (Throwable ex) {
+            pendingFutures.remove(future);
+            future.completeExceptionally(ex);
+            throw ex;
+        }
+        return future;
     }
 
     private CompletableFuture<Void> runAsync(Runnable runnable) {
-        ensureOpen();
-        return CompletableFuture.runAsync(runnable, asyncExecutor);
+        return supplyAsync(() -> {
+            runnable.run();
+            return null;
+        });
     }
 
     private <T> T withReadConnection(SqlFunction<Connection, T> action) {
@@ -653,6 +735,12 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
             throw new IllegalStateException("Failed to obtain SQLite write connection", ex);
         } finally {
             writeLock.unlock();
+        }
+    }
+
+    private void ensureAccepting() {
+        if (closing.get() || closed.get()) {
+            throw new IllegalStateException("SqlitePlayerDataRepository is already closed");
         }
     }
 

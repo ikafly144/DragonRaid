@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -188,9 +187,9 @@ class FoliaRaidSchedulerTest {
         ScheduledTask taskNow = mock(ScheduledTask.class);
         ScheduledTask taskLater = mock(ScheduledTask.class);
         ScheduledTask taskTimer = mock(ScheduledTask.class);
-        when(entityScheduler.run(eq(plugin), any(), isNull())).thenReturn(taskNow);
+        when(entityScheduler.run(eq(plugin), any(), any())).thenReturn(taskNow);
         when(entityScheduler.runDelayed(eq(plugin), any(), any(), eq(8L))).thenReturn(taskLater);
-        when(entityScheduler.runAtFixedRate(eq(plugin), any(), isNull(), eq(1L), eq(5L))).thenReturn(taskTimer);
+        when(entityScheduler.runAtFixedRate(eq(plugin), any(), any(), eq(1L), eq(5L))).thenReturn(taskTimer);
 
         AtomicBoolean ranNow = new AtomicBoolean(false);
         AtomicBoolean ranLater = new AtomicBoolean(false);
@@ -202,7 +201,7 @@ class FoliaRaidSchedulerTest {
         scheduler.runAtEntityTimer(entity, () -> ranTimer.set(true), 1L, 5L);
 
         ArgumentCaptor<Consumer<ScheduledTask>> nowCaptor = ArgumentCaptor.forClass(Consumer.class);
-        verify(entityScheduler).run(eq(plugin), nowCaptor.capture(), isNull());
+        verify(entityScheduler).run(eq(plugin), nowCaptor.capture(), any());
         nowCaptor.getValue().accept(taskNow);
         assertTrue(ranNow.get());
 
@@ -215,7 +214,7 @@ class FoliaRaidSchedulerTest {
         assertTrue(retiredCalled.get());
 
         ArgumentCaptor<Consumer<ScheduledTask>> timerCaptor = ArgumentCaptor.forClass(Consumer.class);
-        verify(entityScheduler).runAtFixedRate(eq(plugin), timerCaptor.capture(), isNull(), eq(1L), eq(5L));
+        verify(entityScheduler).runAtFixedRate(eq(plugin), timerCaptor.capture(), any(), eq(1L), eq(5L));
         timerCaptor.getValue().accept(taskTimer);
         assertTrue(ranTimer.get());
     }
@@ -302,7 +301,7 @@ class FoliaRaidSchedulerTest {
         when(entityScheduler.run(eq(plugin), any(), any())).thenReturn(retiredEntityTask);
         when(regionScheduler.runAtFixedRate(eq(plugin), eq(location), any(), eq(1L), eq(10L)))
             .thenReturn(activeRegionTimer);
-        when(entityScheduler.runDelayed(eq(plugin), any(), isNull(), eq(20L))).thenReturn(activeEntityTask);
+        when(entityScheduler.runDelayed(eq(plugin), any(), any(), eq(20L))).thenReturn(activeEntityTask);
 
         scheduler.runGlobal(() -> {});
         ArgumentCaptor<Consumer<ScheduledTask>> globalCaptor = ArgumentCaptor.forClass(Consumer.class);
@@ -363,5 +362,25 @@ class FoliaRaidSchedulerTest {
             IllegalArgumentException.class,
             () -> scheduler.runAsyncTimer(() -> {}, 0L, 0L, TimeUnit.SECONDS)
         );
+    }
+
+    @Test
+    void runAtEntityLaterReleasesTrackingOnRetireEvenWhenRetiredCallbackOmitted() {
+        Entity entity = mock(Entity.class);
+        EntityScheduler entityScheduler = mock(EntityScheduler.class);
+        when(entity.getScheduler()).thenReturn(entityScheduler);
+
+        ScheduledTask scheduledTask = mock(ScheduledTask.class);
+        when(entityScheduler.runDelayed(eq(plugin), any(), any(), eq(20L))).thenReturn(scheduledTask);
+
+        TaskHandle handle = scheduler.runAtEntityLater(entity, () -> {}, 20L);
+        ArgumentCaptor<Runnable> retiredCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(entityScheduler).runDelayed(eq(plugin), any(), retiredCaptor.capture(), eq(20L));
+
+        retiredCaptor.getValue().run();
+        scheduler.cancelAll();
+
+        verify(scheduledTask, never()).cancel();
+        assertNotNull(handle);
     }
 }

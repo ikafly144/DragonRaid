@@ -157,6 +157,18 @@ public record BossConfig(
                 return phase;
             }
         }
-        return phases.getLast();
+        // Fallback includes lower-bound equality (most notably hpRatio == 0.0) regardless of phase ordering.
+        for (PhaseConfig phase : phases) {
+            if (phase.matchesHpRatio(clamped)) {
+                return phase;
+            }
+        }
+        PhaseConfig lowest = phases.getFirst();
+        for (PhaseConfig phase : phases) {
+            if (phase.hpThresholdMin() < lowest.hpThresholdMin()) {
+                lowest = phase;
+            }
+        }
+        return lowest;
     }
 }

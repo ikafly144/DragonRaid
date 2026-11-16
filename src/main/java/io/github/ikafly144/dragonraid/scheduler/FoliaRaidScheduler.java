@@ -269,9 +269,11 @@ public final class FoliaRaidScheduler implements RaidScheduler {
         Objects.requireNonNull(task, "task");
         AtomicBoolean completed = new AtomicBoolean(false);
         AtomicReference<ScheduledTask> scheduledRef = new AtomicReference<>();
-        Runnable wrappedRetired = retired == null ? null : () -> {
+        Runnable wrappedRetired = () -> {
             try {
-                retired.run();
+                if (retired != null) {
+                    retired.run();
+                }
             } finally {
                 completed.set(true);
                 ScheduledTask st = scheduledRef.get();

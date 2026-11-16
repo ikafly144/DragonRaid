@@ -1,5 +1,7 @@
 package io.github.ikafly144.dragonraid.config;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -65,10 +67,22 @@ final class ConfigValidation {
 
     static int requireInt(ConfigurationNode node, String fileName) {
         Object raw = node.rawScalar();
-        if (node.virtual() || !(raw instanceof Number number) || raw instanceof Float || raw instanceof Double) {
+        if (node.virtual() || !(raw instanceof Number number)
+                || raw instanceof Float || raw instanceof Double || raw instanceof BigDecimal) {
             throw new ConfigException(fileName, fullPath(node), "Missing integer value");
         }
-        return number.intValue();
+        if (raw instanceof BigInteger bi) {
+            try {
+                return bi.intValueExact();
+            } catch (ArithmeticException ex) {
+                throw new ConfigException(fileName, fullPath(node), "Integer value out of range: " + bi, ex);
+            }
+        }
+        long value = number.longValue();
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new ConfigException(fileName, fullPath(node), "Integer value out of range: " + value);
+        }
+        return (int) value;
     }
 
     static double requireDouble(ConfigurationNode parent, String fileName, String key) {

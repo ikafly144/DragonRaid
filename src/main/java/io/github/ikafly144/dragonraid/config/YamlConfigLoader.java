@@ -77,6 +77,27 @@ final class YamlConfigLoader {
     static PluginConfig loadPluginConfig(Path path) {
         String fileName = path.getFileName().toString();
         CommentedConfigurationNode root = loadNode(path);
+        return loadPluginConfig(root, fileName);
+    }
+
+    static PluginConfig loadPluginConfigFromString(String yamlContent, String fileName) {
+        YamlConfigurationLoader.Builder stringBuilder = YamlConfigurationLoader.builder()
+                .nodeStyle(NodeStyle.BLOCK)
+                .indent(2)
+                .defaultOptions(opts -> opts.serializers(SERIALIZERS));
+        try {
+            ConfigurationNode root = stringBuilder.buildAndLoadString(yamlContent);
+            return loadPluginConfig(root, fileName);
+        } catch (ConfigurateException ex) {
+            throw new ConfigException(
+                    fileName,
+                    formatNodePath(ex.path()),
+                    "Failed to parse YAML configuration: " + ex.getMessage(),
+                    ex);
+        }
+    }
+
+    private static PluginConfig loadPluginConfig(ConfigurationNode root, String fileName) {
         return withFileName(fileName, () -> getTyped(root, PluginConfig.class, fileName));
     }
 
@@ -100,10 +121,11 @@ final class YamlConfigLoader {
     }
 
     /**
-     * Serializes updated {@link RegionConfig} through Configurate while preserving all existing
-     * YAML comments and non-region sections in {@code config.yml}.
+     * Renders an updated {@code config.yml} string containing the serialized {@link RegionConfig}
+     * via Configurate while preserving existing YAML comments and non-region sections, without
+     * modifying the file on disk.
      */
-    static void saveRegionsPreservingComments(Path configPath, RegionConfig regions) {
+    static String renderRegionsPreservingComments(Path configPath, RegionConfig regions) {
         String fileName = configPath.getFileName().toString();
         if (!Files.exists(configPath)) {
             throw new ConfigException(fileName, "regions", "Configuration file does not exist: " + configPath);
@@ -120,10 +142,9 @@ final class YamlConfigLoader {
             wrapper.node("regions").set(RegionConfig.class, regions);
             String renderedBlock = stringBuilder.buildAndSaveString(wrapper).stripTrailing();
 
-            String updated = spliceRegionsSection(original, renderedBlock, lineSeparator);
-            Files.writeString(configPath, updated, StandardCharsets.UTF_8);
+            return spliceRegionsSection(original, renderedBlock, lineSeparator);
         } catch (IOException ex) {
-            throw new ConfigException(fileName, "regions", "Failed to save updated regions", ex);
+            throw new ConfigException(fileName, "regions", "Failed to render updated regions", ex);
         }
     }
 

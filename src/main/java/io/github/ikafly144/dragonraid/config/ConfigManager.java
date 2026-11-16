@@ -2,6 +2,7 @@ package io.github.ikafly144.dragonraid.config;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -96,13 +97,7 @@ public final class ConfigManager {
      */
     public synchronized void reload() {
         PluginConfig pluginConfig = YamlConfigLoader.loadPluginConfig(dataFolder.resolve(CONFIG_FILE));
-        BossConfig normalBoss = YamlConfigLoader.loadBossConfig(
-                dataFolder.resolve(BOSS_NORMAL_FILE), BossConfig.Difficulty.NORMAL);
-        BossConfig hardBoss = YamlConfigLoader.loadBossConfig(
-                dataFolder.resolve(BOSS_HARD_FILE), BossConfig.Difficulty.HARD);
-        RewardsConfig rewards = YamlConfigLoader.loadRewardsConfig(dataFolder.resolve(REWARDS_FILE));
-
-        this.snapshot = new ConfigSnapshot(pluginConfig, normalBoss, hardBoss, rewards);
+        this.snapshot = buildValidatedSnapshot(pluginConfig);
     }
 
     /**
@@ -116,15 +111,33 @@ public final class ConfigManager {
     }
 
     /**
-     * Validates and persists updated region settings to {@code config.yml}, then reloads atomically.
+     * Validates the candidate {@code config.yml} and all companion configuration files before writing
+     * updated region settings to disk, ensuring disk and memory stay untouched if any validation fails.
      */
     public synchronized void updateRegions(RegionConfig regions) {
         Objects.requireNonNull(regions, "regions");
         YamlConfigLoader.validateRegionConfig(regions, CONFIG_FILE);
 
         Path configPath = dataFolder.resolve(CONFIG_FILE);
-        YamlConfigLoader.saveRegionsPreservingComments(configPath, regions);
-        reload();
+        String candidateYaml = YamlConfigLoader.renderRegionsPreservingComments(configPath, regions);
+        PluginConfig candidatePluginConfig = YamlConfigLoader.loadPluginConfigFromString(candidateYaml, CONFIG_FILE);
+        ConfigSnapshot candidateSnapshot = buildValidatedSnapshot(candidatePluginConfig);
+
+        try {
+            Files.writeString(configPath, candidateYaml, StandardCharsets.UTF_8);
+        } catch (IOException ex) {
+            throw new ConfigException(CONFIG_FILE, "regions", "Failed to save updated regions", ex);
+        }
+        this.snapshot = candidateSnapshot;
+    }
+
+    private ConfigSnapshot buildValidatedSnapshot(PluginConfig pluginConfig) {
+        BossConfig normalBoss = YamlConfigLoader.loadBossConfig(
+                dataFolder.resolve(BOSS_NORMAL_FILE), BossConfig.Difficulty.NORMAL);
+        BossConfig hardBoss = YamlConfigLoader.loadBossConfig(
+                dataFolder.resolve(BOSS_HARD_FILE), BossConfig.Difficulty.HARD);
+        RewardsConfig rewards = YamlConfigLoader.loadRewardsConfig(dataFolder.resolve(REWARDS_FILE));
+        return new ConfigSnapshot(pluginConfig, normalBoss, hardBoss, rewards);
     }
 
     public Path dataFolder() {

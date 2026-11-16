@@ -6,14 +6,17 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -327,5 +330,67 @@ class SqlitePlayerDataRepositoryTest {
             new PointTransactionResult(true, 0L, 10L, 10L, FailureReason.INSUFFICIENT_FUNDS));
         assertThrows(IllegalArgumentException.class, () ->
             new PointTransactionResult(false, 0L, 0L, 0L, FailureReason.NONE));
+    }
+
+    @Test
+    void closeWaitsForInFlightAsyncWritesBeforeClosingDataSource() throws Exception {
+        Path dbFile = tempDir.resolve("drain.db");
+        ExecutorService delayedPool = Executors.newSingleThreadExecutor();
+        CountDownLatch releaseWrite = new CountDownLatch(1);
+        UUID uuid = UUID.randomUUID();
+
+        try {
+            SqlitePlayerDataRepository repo = new SqlitePlayerDataRepository(
+                dbFile, 2, delayedPool, Duration.ofSeconds(3));
+            // Block the single-threaded executor briefly so addPoints stays queued when close() begins.
+            delayedPool.execute(() -> {
+                try {
+                    releaseWrite.await(2, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            CompletableFuture<PointTransactionResult> writeFuture = repo.addPoints(uuid, "Queued", 75L);
+            Thread releaser = new Thread(() -> {
+                try {
+                    Thread.sleep(60);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+                releaseWrite.countDown();
+            });
+            releaser.start();
+
+            repo.close();
+            releaser.join(2000);
+            assertTrue(writeFuture.isDone());
+            assertTrue(writeFuture.join().success());
+
+            try (SqlitePlayerDataRepository reopened = new SqlitePlayerDataRepository(dbFile, 1, Runnable::run)) {
+                assertEquals(75L, reopened.findByUuid(uuid).join().orElseThrow().virtualPoints());
+            }
+        } finally {
+            releaseWrite.countDown();
+            delayedPool.shutdownNow();
+            delayedPool.awaitTermination(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void closeTimesOutAndFailsDroppedAsyncTasksCleanly() {
+        Path dbFile = tempDir.resolve("drop.db");
+        Executor droppingExecutor = task -> {
+            // Intentionally drop queued tasks without running them.
+        };
+        SqlitePlayerDataRepository repo = new SqlitePlayerDataRepository(
+            dbFile, 1, droppingExecutor, Duration.ofMillis(80));
+        UUID uuid = UUID.randomUUID();
+
+        CompletableFuture<PointTransactionResult> dropped = repo.addPoints(uuid, "Dropped", 25L);
+        repo.close();
+
+        assertTrue(dropped.isCompletedExceptionally());
+        assertThrows(CancellationException.class, dropped::join);
     }
 }
