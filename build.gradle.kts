@@ -82,6 +82,7 @@ tasks {
 
     shadowJar {
         archiveClassifier.set("")
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
         mergeServiceFiles()
         relocate("com.zaxxer.hikari", "net.sabafly.dragonraid.libs.hikari")
         relocate("org.spongepowered.configurate", "net.sabafly.dragonraid.libs.configurate")

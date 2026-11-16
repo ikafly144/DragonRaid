@@ -682,17 +682,17 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                 }
                 try {
                     T result = supplier.get();
-                    internalDone.complete(null);
                     publicFuture.complete(result);
                 } catch (Throwable ex) {
-                    internalDone.complete(null);
                     publicFuture.completeExceptionally(ex);
+                } finally {
+                    internalDone.complete(null);
                 }
             });
         } catch (Throwable ex) {
             pendingTasks.remove(task);
-            internalDone.complete(null);
             publicFuture.completeExceptionally(ex);
+            internalDone.complete(null);
             throw ex;
         }
         return publicFuture;

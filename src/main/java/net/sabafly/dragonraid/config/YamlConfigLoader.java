@@ -45,26 +45,20 @@ final class YamlConfigLoader {
     private YamlConfigLoader() {
     }
 
-    static YamlConfigurationLoader buildLoader(Path path) {
+    private static YamlConfigurationLoader.Builder yamlBuilder() {
         return YamlConfigurationLoader.builder()
-                .path(path)
                 .nodeStyle(NodeStyle.BLOCK)
                 .indent(2)
-                .defaultOptions(opts -> opts.serializers(SERIALIZERS))
-                .build();
+                .defaultOptions(opts -> opts.serializers(SERIALIZERS));
     }
 
     static CommentedConfigurationNode loadNode(Path path) {
-        return loadNode(path, buildLoader(path));
-    }
-
-    static CommentedConfigurationNode loadNode(Path path, YamlConfigurationLoader loader) {
         String fileName = path.getFileName().toString();
         if (!Files.exists(path)) {
             throw new ConfigException(fileName, "", "Configuration file does not exist: " + path);
         }
         try {
-            return loader.load();
+            return yamlBuilder().path(path).build().load();
         } catch (ConfigurateException ex) {
             throw new ConfigException(
                     fileName,
@@ -81,12 +75,8 @@ final class YamlConfigLoader {
     }
 
     static PluginConfig loadPluginConfigFromString(String yamlContent, String fileName) {
-        YamlConfigurationLoader.Builder stringBuilder = YamlConfigurationLoader.builder()
-                .nodeStyle(NodeStyle.BLOCK)
-                .indent(2)
-                .defaultOptions(opts -> opts.serializers(SERIALIZERS));
         try {
-            ConfigurationNode root = stringBuilder.buildAndLoadString(yamlContent);
+            ConfigurationNode root = yamlBuilder().buildAndLoadString(yamlContent);
             return loadPluginConfig(root, fileName);
         } catch (ConfigurateException ex) {
             throw new ConfigException(
@@ -134,10 +124,7 @@ final class YamlConfigLoader {
             String original = Files.readString(configPath, StandardCharsets.UTF_8);
             String lineSeparator = original.contains("\r\n") ? "\r\n" : "\n";
 
-            YamlConfigurationLoader.Builder stringBuilder = YamlConfigurationLoader.builder()
-                    .nodeStyle(NodeStyle.BLOCK)
-                    .indent(2)
-                    .defaultOptions(opts -> opts.serializers(SERIALIZERS));
+            YamlConfigurationLoader.Builder stringBuilder = yamlBuilder();
             CommentedConfigurationNode wrapper = CommentedConfigurationNode.root(stringBuilder.defaultOptions());
             wrapper.node("regions").set(RegionConfig.class, regions);
             String renderedBlock = stringBuilder.buildAndSaveString(wrapper).stripTrailing();

@@ -66,23 +66,29 @@ public final class DragonRaidPlugin extends JavaPlugin {
             return;
         }
 
-        RaidPermissions.registerDefaults(getServer().getPluginManager());
+        try {
+            RaidPermissions.registerDefaults(getServer().getPluginManager());
 
-        RaidCommandHandler commandHandler = new DefaultRaidCommandHandler(
-            configManager,
-            messageService,
-            raidScheduler,
-            playerDataRepository,
-            getLogger()
-        );
-        new DragonRaidCommandRegistrar(
-            commandHandler,
-            () -> getServer().getOnlinePlayers().stream().map(Player::getName).toList(),
-            () -> configManager.rewardsConfig().currencies().keySet()
-        ).register(this);
+            RaidCommandHandler commandHandler = new DefaultRaidCommandHandler(
+                configManager,
+                messageService,
+                raidScheduler,
+                playerDataRepository,
+                getLogger()
+            );
+            new DragonRaidCommandRegistrar(
+                commandHandler,
+                () -> getServer().getOnlinePlayers().stream().map(Player::getName).toList(),
+                () -> configManager.rewardsConfig().currencies().keySet()
+            ).register(this);
 
-        logPacketEventsStatus();
-        getLogger().info("DragonRaid enabled.");
+            logPacketEventsStatus();
+            getLogger().info("DragonRaid enabled.");
+        } catch (RuntimeException ex) {
+            getLogger().log(Level.SEVERE, "Failed during DragonRaid startup; cleaning up resources", ex);
+            onDisable();
+            getServer().getPluginManager().disablePlugin(this);
+        }
     }
 
     @Override
