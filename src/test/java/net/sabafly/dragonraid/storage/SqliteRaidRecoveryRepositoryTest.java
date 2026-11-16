@@ -99,4 +99,38 @@ class SqliteRaidRecoveryRepositoryTest {
 
         assertEquals(Map.of(player, finalRecord), repo.loadPendingPlayerCleanupsSync());
     }
+
+    @Test
+    void staleAsyncDeletesAfterSyncReplace_cannotDeleteNewSnapshotRowsEvenAfterDrainTimeout() {
+        List<Runnable> manualQueue = new java.util.ArrayList<>();
+        database = new SqliteDatabase(tempDir.resolve("epoch.db"), 2, manualQueue::add);
+        SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(database, 10L);
+
+        UUID worldId = UUID.randomUUID();
+        UUID playerId = UUID.randomUUID();
+        BlockPosKey key = new BlockPosKey(worldId, 5, 64, 5);
+        PendingBlockRollback oldBlock = new PendingBlockRollback(worldId, 5, 64, 5, "minecraft:air");
+        PendingBlockRollback newBlock = new PendingBlockRollback(worldId, 5, 64, 5, "minecraft:obsidian");
+        PendingPlayerCleanup oldCleanup = new PendingPlayerCleanup(playerId, "SURVIVAL", false, true, false, true);
+        PendingPlayerCleanup newCleanup = new PendingPlayerCleanup(playerId, "ADVENTURE", true, false, false, true);
+
+        repo.replacePendingBlockRollbacksSync(List.of(oldBlock));
+        repo.replacePendingPlayerCleanupsSync(List.of(oldCleanup));
+
+        // Enqueue async deletes that do not run before sync replacement times out on 10ms drain
+        CompletableFuture<Void> staleBlockDelete = repo.deletePendingBlockRollbacksAsync(List.of(key));
+        CompletableFuture<Void> stalePlayerDelete = repo.deletePendingPlayerCleanupAsync(playerId);
+
+        repo.replacePendingBlockRollbacksSync(List.of(newBlock));
+        repo.replacePendingPlayerCleanupsSync(List.of(newCleanup));
+
+        // Now flush the stale queued tasks -> epoch checks must ignore both stale deletes
+        for (Runnable task : List.copyOf(manualQueue)) {
+            task.run();
+        }
+        CompletableFuture.allOf(staleBlockDelete, stalePlayerDelete).join();
+
+        assertEquals(List.of(newBlock), repo.loadPendingBlockRollbacksSync());
+        assertEquals(Map.of(playerId, newCleanup), repo.loadPendingPlayerCleanupsSync());
+    }
 }

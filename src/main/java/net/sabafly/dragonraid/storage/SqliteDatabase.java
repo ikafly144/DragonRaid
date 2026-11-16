@@ -119,6 +119,7 @@ public final class SqliteDatabase implements AutoCloseable {
         pendingTasks.add(task);
         if (closing.get()) {
             pendingTasks.remove(task);
+            internalDone.complete(null);
             throw new IllegalStateException("SqliteDatabase is already closed");
         }
         internalDone.whenComplete((ignored, error) -> pendingTasks.remove(task));

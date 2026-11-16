@@ -9,12 +9,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import net.sabafly.dragonraid.protection.BlockPosKey;
 
 /**
@@ -22,16 +24,30 @@ import net.sabafly.dragonraid.protection.BlockPosKey;
  *
  * <p>Per-player async upserts and deletes are serialized per UUID in submission order so an
  * earlier delete can never overwrite a later upsert when executed on a multi-threaded executor.
+ * Monotonic snapshot epochs checked inside {@link SqliteDatabase#withWriteTransaction} also ensure
+ * stale queued async deletes cannot delete rows written by a newer synchronous snapshot.
  */
 public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepository {
 
-    private static final long DRAIN_TIMEOUT_MS = 3000L;
+    private static final long DEFAULT_DRAIN_TIMEOUT_MS = 3000L;
 
     private final SqliteDatabase database;
+    private final long drainTimeoutMs;
     private final Map<UUID, CompletableFuture<Void>> playerCleanupChains = new ConcurrentHashMap<>();
+    private final Set<CompletableFuture<Void>> pendingBlockOps = ConcurrentHashMap.newKeySet();
+    private final AtomicLong blockRollbackEpoch = new AtomicLong(0L);
+    private final AtomicLong playerCleanupEpoch = new AtomicLong(0L);
 
     public SqliteRaidRecoveryRepository(SqliteDatabase database) {
+        this(database, DEFAULT_DRAIN_TIMEOUT_MS);
+    }
+
+    SqliteRaidRecoveryRepository(SqliteDatabase database, long drainTimeoutMs) {
         this.database = Objects.requireNonNull(database, "database");
+        if (drainTimeoutMs < 0L) {
+            throw new IllegalArgumentException("drainTimeoutMs must not be negative");
+        }
+        this.drainTimeoutMs = drainTimeoutMs;
         initializeSchema();
     }
 
@@ -87,8 +103,10 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     @Override
     public void replacePendingBlockRollbacksSync(Collection<PendingBlockRollback> entries) {
         Objects.requireNonNull(entries, "entries");
+        drainFutures(pendingBlockOps);
         List<PendingBlockRollback> copy = List.copyOf(entries);
         database.withWriteTransaction((conn, tx) -> {
+            blockRollbackEpoch.incrementAndGet();
             try (Statement clear = conn.createStatement()) {
                 clear.execute("DELETE FROM pending_block_rollbacks");
             }
@@ -120,7 +138,13 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
         if (copy.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        return database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
+        long expectedEpoch = blockRollbackEpoch.get();
+        CompletableFuture<Void> op = new CompletableFuture<>();
+        pendingBlockOps.add(op);
+        database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
+            if (blockRollbackEpoch.get() != expectedEpoch) {
+                return null;
+            }
             String sql = "DELETE FROM pending_block_rollbacks WHERE world_id = ? AND x = ? AND y = ? AND z = ?";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (BlockPosKey key : copy) {
@@ -133,7 +157,15 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
                 ps.executeBatch();
             }
             return null;
-        }));
+        })).whenComplete((ok, err) -> {
+            pendingBlockOps.remove(op);
+            if (err != null) {
+                op.completeExceptionally(err);
+            } else {
+                op.complete(null);
+            }
+        });
+        return op;
     }
 
     @Override
@@ -165,7 +197,7 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     @Override
     public CompletableFuture<Void> upsertPendingPlayerCleanupAsync(PendingPlayerCleanup cleanup) {
         Objects.requireNonNull(cleanup, "cleanup");
-        return enqueuePlayerCleanupOp(cleanup.playerId(), () -> database.withWriteTransaction((conn, tx) -> {
+        return enqueuePlayerCleanupOp(cleanup.playerId(), (conn, tx) -> {
             String sql = """
                 INSERT INTO pending_player_cleanups (
                     uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone
@@ -187,15 +219,16 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
                 ps.executeUpdate();
             }
             return null;
-        }));
+        });
     }
 
     @Override
     public void replacePendingPlayerCleanupsSync(Collection<PendingPlayerCleanup> cleanups) {
         Objects.requireNonNull(cleanups, "cleanups");
-        drainPlayerCleanupChains();
+        drainFutures(playerCleanupChains.values());
         List<PendingPlayerCleanup> copy = List.copyOf(cleanups);
         database.withWriteTransaction((conn, tx) -> {
+            playerCleanupEpoch.incrementAndGet();
             try (Statement clear = conn.createStatement()) {
                 clear.execute("DELETE FROM pending_player_cleanups");
             }
@@ -225,24 +258,31 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     @Override
     public CompletableFuture<Void> deletePendingPlayerCleanupAsync(UUID playerId) {
         Objects.requireNonNull(playerId, "playerId");
-        return enqueuePlayerCleanupOp(playerId, () -> database.withWriteTransaction((conn, tx) -> {
+        return enqueuePlayerCleanupOp(playerId, (conn, tx) -> {
             String sql = "DELETE FROM pending_player_cleanups WHERE uuid = ?";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, playerId.toString());
                 ps.executeUpdate();
             }
             return null;
-        }));
+        });
     }
 
-    private CompletableFuture<Void> enqueuePlayerCleanupOp(UUID playerId, Runnable dbWrite) {
+    private CompletableFuture<Void> enqueuePlayerCleanupOp(UUID playerId, SqliteDatabase.SqlTxFunction<Void> dbTx) {
+        long expectedEpoch = playerCleanupEpoch.get();
         CompletableFuture<Void> gate = new CompletableFuture<>();
         CompletableFuture<Void> next = new CompletableFuture<>();
         CompletableFuture<Void> prev = playerCleanupChains.put(playerId, next);
         CompletableFuture<Void> ready = (prev == null)
                 ? gate
                 : prev.handle((ok, err) -> null).thenCompose(ignored -> gate);
-        CompletableFuture<Void> writeFuture = ready.thenCompose(ignored -> database.runAsync(dbWrite));
+        CompletableFuture<Void> writeFuture = ready.thenCompose(ignored ->
+                database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
+                    if (playerCleanupEpoch.get() != expectedEpoch) {
+                        return null;
+                    }
+                    return dbTx.apply(conn, tx);
+                })));
         writeFuture.whenComplete((ok, err) -> {
             playerCleanupChains.remove(playerId, next);
             if (err != null) {
@@ -255,17 +295,17 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
         return next;
     }
 
-    private void drainPlayerCleanupChains() {
-        CompletableFuture<?>[] active = playerCleanupChains.values().toArray(CompletableFuture[]::new);
+    private void drainFutures(Collection<CompletableFuture<Void>> futures) {
+        CompletableFuture<?>[] active = futures.toArray(CompletableFuture[]::new);
         if (active.length == 0) {
             return;
         }
         try {
-            CompletableFuture.allOf(active).get(DRAIN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            CompletableFuture.allOf(active).get(drainTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException ignored) {
-            // Proceed to synchronous snapshot write so shutdown still saves latest state.
+            // Stale ops that finish after drain timeout are skipped atomically via snapshot epoch checks.
         }
     }
 }

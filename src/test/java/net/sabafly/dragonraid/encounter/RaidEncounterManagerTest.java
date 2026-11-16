@@ -838,6 +838,104 @@ class RaidEncounterManagerTest {
         }
     }
 
+    @Test
+    void staleFinishWipeAfterReset_doesNotResetNextRaid_andWipingQuitMarksOffline() {
+        Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+        Player bob = addPlayer("Bob", new Location(endWorld, 2.0, 64.0, 0.0));
+        startActiveEncounter(alice, BossConfig.Difficulty.NORMAL);
+
+        // Down Alice and Bob -> enters WIPING and schedules delayed finishWipe
+        manager.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        manager.onPlayerDamage(bob, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        assertEquals(RaidState.WIPING, manager.state());
+        Runnable staleWipeTask = capturedDelayedTasks.getLast();
+
+        // Bob quits during WIPING -> marked offline (not still marked online)
+        manager.onPlayerQuit(bob);
+        assertFalse(manager.participantState(bob.getUniqueId()).isEmpty());
+
+        // Admin resets while WIPING and starts a fresh raid
+        manager.adminReset(alice);
+        assertEquals(RaidState.IDLE, manager.state());
+        startActiveEncounter(alice, BossConfig.Difficulty.NORMAL);
+        assertEquals(RaidState.ACTIVE, manager.state());
+
+        // Firing the stale finishWipe from generation 1 must NOT wipe the new generation 2 raid
+        staleWipeTask.run();
+        assertEquals(RaidState.ACTIVE, manager.state());
+        assertTrue(manager.isParticipant(alice.getUniqueId()));
+    }
+
+    @Test
+    void inFlightBlockRollbackInterruptedByShutdown_preservesBlocksInSqlite() {
+        Path dbPath = tempDir.resolve("inflight-rollback.db");
+        BlockData origData = mock(BlockData.class);
+        when(origData.clone()).thenReturn(origData);
+        TemporaryBlockTracker tracker = new TemporaryBlockTracker(d -> "minecraft:air", s -> origData);
+
+        List<Runnable> pendingRegionRollbacks = new ArrayList<>();
+        RaidScheduler deferredRegionScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredRegionScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredRegionScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredRegionScheduler.runAtEntityLater(any(), any(), anyLong())).thenReturn(TaskHandle.retired());
+        lenient().when(deferredRegionScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            capturedGlobalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredRegionScheduler.runGlobalLater(any(), anyLong())).thenAnswer(inv -> {
+            capturedDelayedTasks.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredRegionScheduler.runAtRegion(any(), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            pendingRegionRollbacks.add(inv.getArgument(3));
+            return TaskHandle.retired();
+        });
+
+        try (SqliteDatabase db = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(db);
+            DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                    configManager,
+                    messageService,
+                    deferredRegionScheduler,
+                    regionService,
+                    tracker,
+                    soulMarkerService,
+                    repo,
+                    Logger.getLogger("InFlightRollbackTest"),
+                    () -> endWorld,
+                    () -> onlinePlayers.values(),
+                    id -> onlinePlayers.get(id),
+                    nowMillis::get,
+                    w -> livingDragonPresent.get());
+
+            Player alice = addPlayer("Alice", new Location(endWorld, 0.0, 64.0, 0.0));
+            mgr.adminStart(alice, BossConfig.Difficulty.NORMAL);
+            Runnable countdown = capturedGlobalTimers.getLast();
+            for (int i = 0; i < configManager.pluginConfig().encounter().pullCountdownSeconds(); i++) {
+                countdown.run();
+            }
+            assertEquals(RaidState.ACTIVE, mgr.state());
+
+            tracker.tryRecordPlayerPlacement(new Location(endWorld, 8, 65, 8), alice.getUniqueId(), origData, 64, 512);
+            // Admin reset kicks off async region rollback (queued, not yet executed)
+            mgr.adminReset(alice);
+            assertEquals(1, pendingRegionRollbacks.size());
+            assertFalse(mgr.canModifyArenaRegion());
+
+            // Shutdown happens BEFORE the region task executes -> block must be persisted to SQLite
+            mgr.shutdown();
+            List<PendingBlockRollback> persisted = repo.loadPendingBlockRollbacksSync();
+            assertEquals(1, persisted.size());
+            assertEquals(8, persisted.getFirst().x());
+        }
+    }
+
     private void startActiveEncounter(Player initiator, BossConfig.Difficulty difficulty) {
         manager.adminStart(initiator, difficulty);
         Runnable countdown = capturedGlobalTimers.get(capturedGlobalTimers.size() - 1);

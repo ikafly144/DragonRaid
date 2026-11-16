@@ -204,7 +204,26 @@ public final class TemporaryBlockTracker {
      * @return future completing with the number of restored blocks
      */
     public CompletableFuture<Integer> rollbackAll(RaidScheduler scheduler, @Nullable World world) {
+        return rollbackAll(scheduler, world, ignored -> {});
+    }
+
+    /**
+     * Atomically snapshots and clears all tracked blocks, then restores every coordinate
+     * to its original {@link BlockData} on the owning Folia region thread grouped by chunk,
+     * invoking {@code onChunkRestored} after each chunk completes.
+     *
+     * @return future completing with the number of restored blocks
+     */
+    public CompletableFuture<Integer> rollbackAll(
+            RaidScheduler scheduler,
+            @Nullable World world,
+            Consumer<List<BlockPosKey>> onChunkRestored) {
         Objects.requireNonNull(scheduler, "scheduler");
+        Objects.requireNonNull(onChunkRestored, "onChunkRestored");
+        if (world == null) {
+            return CompletableFuture.completedFuture(0);
+        }
+
         List<TrackedBlock> snapshot;
         synchronized (lock) {
             if (entries.isEmpty()) {
@@ -215,10 +234,6 @@ public final class TemporaryBlockTracker {
             playerCounts.clear();
         }
 
-        if (world == null) {
-            return CompletableFuture.completedFuture(0);
-        }
-
         UUID targetWorldId = world.getUID();
         List<BlockRestoration> restorations = new ArrayList<>(snapshot.size());
         for (TrackedBlock tracked : snapshot) {
@@ -226,7 +241,7 @@ public final class TemporaryBlockTracker {
                 restorations.add(new BlockRestoration(tracked.key(), tracked.originalData()));
             }
         }
-        return dispatchChunkRollbacks(scheduler, world, restorations, ignored -> {})
+        return dispatchChunkRollbacks(scheduler, world, restorations, onChunkRestored)
                 .thenApply(List::size);
     }
 
@@ -314,19 +329,38 @@ public final class TemporaryBlockTracker {
             CompletableFuture<Void> chunkFuture = new CompletableFuture<>();
             chunkFutures.add(chunkFuture);
             scheduler.runAtRegion(world, first.chunkX(), first.chunkZ(), () -> {
-                try {
-                    List<BlockPosKey> chunkKeys = new ArrayList<>(chunkBlocks.size());
-                    for (BlockRestoration item : chunkBlocks) {
-                        BlockPosKey key = item.key();
+                RuntimeException failure = null;
+                List<BlockPosKey> chunkKeys = new ArrayList<>(chunkBlocks.size());
+                for (BlockRestoration item : chunkBlocks) {
+                    BlockPosKey key = item.key();
+                    try {
                         Block block = world.getBlockAt(key.x(), key.y(), key.z());
                         block.setBlockData(item.data(), false);
                         chunkKeys.add(key);
                         restoredKeys.add(key);
+                    } catch (RuntimeException ex) {
+                        if (failure == null) {
+                            failure = ex;
+                        } else {
+                            failure.addSuppressed(ex);
+                        }
                     }
-                    onChunkRestored.accept(List.copyOf(chunkKeys));
-                    chunkFuture.complete(null);
+                }
+                try {
+                    if (!chunkKeys.isEmpty()) {
+                        onChunkRestored.accept(List.copyOf(chunkKeys));
+                    }
                 } catch (RuntimeException ex) {
-                    chunkFuture.completeExceptionally(ex);
+                    if (failure == null) {
+                        failure = ex;
+                    } else {
+                        failure.addSuppressed(ex);
+                    }
+                }
+                if (failure == null) {
+                    chunkFuture.complete(null);
+                } else {
+                    chunkFuture.completeExceptionally(failure);
                 }
             });
         }

@@ -11,16 +11,15 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerDe
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityMetadata;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnEntity;
 import io.github.retrooper.packetevents.util.SpigotReflectionUtil;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntSupplier;
@@ -121,14 +120,6 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
             return;
         }
 
-        MarkerState state = markers.computeIfAbsent(downedPlayerId, ignored -> new MarkerState(
-                entityIdGenerator.getAsInt(),
-                UUID.randomUUID(),
-                entityIdGenerator.getAsInt(),
-                UUID.randomUUID(),
-                location.clone()
-        ));
-
         double maxDistSq = visuals.maxRenderDistance() * visuals.maxRenderDistance();
         World targetWorld = location.getWorld();
         int percent = Math.max(0, Math.min(100, (int) Math.round(progressRatio * 100.0)));
@@ -146,44 +137,61 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
             }
         }
 
-        synchronized (state) {
-            boolean locationChanged = !Objects.equals(state.location.getWorld(), targetWorld)
-                    || state.location.distanceSquared(location) > 1e-4;
-            if (locationChanged) {
-                for (UUID existingId : state.viewerIds) {
-                    Player oldViewer = findViewer(existingId, viewers);
-                    if (oldViewer != null && oldViewer.isOnline()) {
-                        safeDestroy(oldViewer, state);
-                    }
+        while (true) {
+            MarkerState state = markers.computeIfAbsent(downedPlayerId, ignored -> new MarkerState(
+                    entityIdGenerator.getAsInt(),
+                    UUID.randomUUID(),
+                    entityIdGenerator.getAsInt(),
+                    UUID.randomUUID(),
+                    location.clone()
+            ));
+            synchronized (state) {
+                if (state.removed || markers.get(downedPlayerId) != state) {
+                    continue;
                 }
-                state.viewerIds.clear();
-                state.location = location.clone();
-            } else {
-                // Destroy for viewers that left range or world.
-                Iterator<UUID> existingIt = state.viewerIds.iterator();
-                while (existingIt.hasNext()) {
-                    UUID existingId = existingIt.next();
-                    if (!eligibleViewers.containsKey(existingId)) {
-                        Player leftPlayer = findViewer(existingId, viewers);
-                        if (leftPlayer != null && leftPlayer.isOnline()) {
-                            safeDestroy(leftPlayer, state);
+                boolean locationChanged = !Objects.equals(state.location.getWorld(), targetWorld)
+                        || state.location.distanceSquared(location) > 1e-4;
+                if (locationChanged) {
+                    for (UUID existingId : state.viewerSessions.keySet()) {
+                        Player oldViewer = findViewer(existingId, viewers);
+                        if (oldViewer != null && oldViewer.isOnline()) {
+                            safeDestroy(oldViewer, state);
                         }
-                        existingIt.remove();
                     }
-                }
-            }
-
-            // Spawn for new viewers (only mark spawned on success) and update text metadata for existing viewers.
-            for (Player viewer : eligibleViewers.values()) {
-                Component label = renderLabel(viewer, downedPlayerName, remainingSeconds, percent);
-                boolean alreadySpawned = state.viewerIds.contains(viewer.getUniqueId());
-                if (!alreadySpawned) {
-                    if (safeSpawn(viewer, state, location, visuals.soulMarkerGlow(), label)) {
-                        state.viewerIds.add(viewer.getUniqueId());
-                    }
+                    state.viewerSessions.clear();
+                    state.location = location.clone();
                 } else {
-                    safeUpdateLabel(viewer, state, label);
+                    // Destroy for viewers that left range, world, or reconnected under a new Player instance.
+                    Iterator<Map.Entry<UUID, WeakReference<Player>>> existingIt = state.viewerSessions.entrySet().iterator();
+                    while (existingIt.hasNext()) {
+                        Map.Entry<UUID, WeakReference<Player>> existing = existingIt.next();
+                        UUID existingId = existing.getKey();
+                        Player currentViewer = eligibleViewers.get(existingId);
+                        if (currentViewer == null) {
+                            Player leftPlayer = findViewer(existingId, viewers);
+                            if (leftPlayer != null && leftPlayer.isOnline()) {
+                                safeDestroy(leftPlayer, state);
+                            }
+                            existingIt.remove();
+                        } else if (existing.getValue().get() != currentViewer) {
+                            existingIt.remove();
+                        }
+                    }
                 }
+
+                // Spawn for new/reconnected viewers (only mark spawned on success) and update text metadata for active ones.
+                for (Player viewer : eligibleViewers.values()) {
+                    Component label = renderLabel(viewer, downedPlayerName, remainingSeconds, percent);
+                    WeakReference<Player> existingRef = state.viewerSessions.get(viewer.getUniqueId());
+                    if (existingRef == null || existingRef.get() != viewer) {
+                        if (safeSpawn(viewer, state, location, visuals.soulMarkerGlow(), label)) {
+                            state.viewerSessions.put(viewer.getUniqueId(), new WeakReference<>(viewer));
+                        }
+                    } else {
+                        safeUpdateLabel(viewer, state, label);
+                    }
+                }
+                break;
             }
         }
     }
@@ -192,18 +200,22 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
     public void removeMarker(UUID downedPlayerId, Collection<? extends Player> viewers) {
         Objects.requireNonNull(downedPlayerId, "downedPlayerId");
         Objects.requireNonNull(viewers, "viewers");
-        MarkerState state = markers.remove(downedPlayerId);
+        MarkerState state = markers.get(downedPlayerId);
         if (state == null) {
             return;
         }
         synchronized (state) {
-            for (UUID viewerId : state.viewerIds) {
+            if (state.removed || !markers.remove(downedPlayerId, state)) {
+                return;
+            }
+            state.removed = true;
+            for (UUID viewerId : state.viewerSessions.keySet()) {
                 Player viewer = findViewer(viewerId, viewers);
                 if (viewer != null && viewer.isOnline()) {
                     safeDestroy(viewer, state);
                 }
             }
-            state.viewerIds.clear();
+            state.viewerSessions.clear();
         }
     }
 
@@ -212,6 +224,16 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
         Objects.requireNonNull(viewers, "viewers");
         for (UUID downedId : List.copyOf(markers.keySet())) {
             removeMarker(downedId, viewers);
+        }
+    }
+
+    @Override
+    public void invalidateViewer(UUID viewerId) {
+        Objects.requireNonNull(viewerId, "viewerId");
+        for (MarkerState state : markers.values()) {
+            synchronized (state) {
+                state.viewerSessions.remove(viewerId);
+            }
         }
     }
 
@@ -374,8 +396,9 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
         final UUID soulUuid;
         final int textEntityId;
         final UUID textUuid;
-        final Set<UUID> viewerIds = new HashSet<>();
+        final Map<UUID, WeakReference<Player>> viewerSessions = new HashMap<>();
         Location location;
+        boolean removed;
 
         MarkerState(int soulEntityId, UUID soulUuid, int textEntityId, UUID textUuid, Location location) {
             this.soulEntityId = soulEntityId;

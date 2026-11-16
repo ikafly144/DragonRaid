@@ -180,6 +180,35 @@ class RaidRegionServiceTest {
         assertEquals(0.5, rescued.getZ(), 1e-6);
     }
 
+    @Test
+    void findNearestSafeArenaEdgeAsync_skipsBlockWhoseCenterFallsOutsideSmallRadius() {
+        RegionConfig current = configManager.pluginConfig().regions();
+        // Radius = 1 around center (0,0): block (1,0) has center (1.5, 0.5) -> distance > 1.0 (OUTSIDE!)
+        ArenaRegion tinyCylinder = new ArenaRegion(
+                Shape.CYLINDER,
+                new Point3D(0.0, 64.0, 0.0),
+                1.0,
+                current.arena().min(),
+                current.arena().max(),
+                0,
+                256);
+        configManager.updateRegions(new RegionConfig(tinyCylinder, current.safeZone(), 0.0));
+
+        Block air = mockBlock(Material.AIR, false, true, false);
+        Block endStone = mockBlock(Material.END_STONE, true, false, false);
+        when(endWorld.getBlockAt(any(int.class), any(int.class), any(int.class))).thenReturn(air);
+        when(endWorld.getBlockAt(1, 63, 0)).thenReturn(endStone);
+        when(endWorld.getBlockAt(0, 63, 0)).thenReturn(endStone);
+
+        Location fallLoc = new Location(endWorld, 1.0, -2.0, 0.0);
+        Location rescued = regionService.findNearestSafeArenaEdgeAsync(fallLoc, 1.0).join();
+
+        // Must skip (1.5, 0.5) and land inside arena bounds at (0.5, 0.5)
+        assertTrue(tinyCylinder.containsHorizontal(rescued.getX(), rescued.getZ()));
+        assertEquals(0.5, rescued.getX(), 1e-6);
+        assertEquals(0.5, rescued.getZ(), 1e-6);
+    }
+
     private static Block mockBlock(Material material, boolean solid, boolean passable, boolean liquid) {
         Block block = mock(Block.class);
         lenient().when(block.getType()).thenReturn(material);

@@ -38,4 +38,10 @@ public interface SoulMarkerService {
      * Removes all currently tracked soul markers from all active viewers.
      */
     void removeAllMarkers(Collection<? extends Player> viewers);
+
+    /**
+     * Invalidates any cached spawn state for {@code viewerId} (e.g. on player reconnect) so the next
+     * update sends a fresh marker spawn rather than metadata-only updates.
+     */
+    void invalidateViewer(UUID viewerId);
 }

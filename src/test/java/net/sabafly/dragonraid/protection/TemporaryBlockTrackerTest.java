@@ -148,6 +148,59 @@ class TemporaryBlockTrackerTest {
         verify(b2).setBlockData(airData, false);
     }
 
+    @Test
+    void rollbackAllWithNullWorld_preservesEntriesForExport() {
+        BlockData airData = mockAirData();
+        TemporaryBlockTracker serializerTracker = new TemporaryBlockTracker(
+                data -> "minecraft:air",
+                str -> airData);
+        UUID alice = UUID.randomUUID();
+        serializerTracker.tryRecordPlayerPlacement(loc(3, 64, 3), alice, airData, 10, 10);
+
+        RaidScheduler scheduler = mock(RaidScheduler.class);
+        int restored = serializerTracker.rollbackAll(scheduler, null).join();
+        assertEquals(0, restored);
+        assertEquals(1, serializerTracker.totalCount());
+        assertEquals(1, serializerTracker.exportPendingRollbacks().size());
+    }
+
+    @Test
+    void chunkRollbackIsolatesPerBlockFailureAndNotifiesSuccessfulKeys() {
+        BlockData orig1 = mockAirData();
+        BlockData orig2 = mockAirData();
+        BlockData orig3 = mockAirData();
+        UUID alice = UUID.randomUUID();
+
+        tracker.tryRecordPlayerPlacement(loc(1, 64, 1), alice, orig1, 10, 10);
+        tracker.tryRecordPlayerPlacement(loc(2, 64, 1), alice, orig2, 10, 10);
+        tracker.tryRecordPlayerPlacement(loc(3, 64, 1), alice, orig3, 10, 10);
+
+        Block b1 = mock(Block.class);
+        Block b2 = mock(Block.class);
+        Block b3 = mock(Block.class);
+        org.mockito.Mockito.doThrow(new IllegalStateException("Simulated block error"))
+                .when(b2).setBlockData(orig2, false);
+        when(world.getBlockAt(1, 64, 1)).thenReturn(b1);
+        when(world.getBlockAt(2, 64, 1)).thenReturn(b2);
+        when(world.getBlockAt(3, 64, 1)).thenReturn(b3);
+
+        RaidScheduler scheduler = mock(RaidScheduler.class);
+        when(scheduler.runAtRegion(eq(world), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(3).run();
+            return TaskHandle.retired();
+        });
+
+        List<BlockPosKey> notifiedKeys = new java.util.ArrayList<>();
+        var future = tracker.rollbackAll(scheduler, world, notifiedKeys::addAll);
+
+        assertTrue(future.isCompletedExceptionally());
+        verify(b1).setBlockData(orig1, false);
+        verify(b3).setBlockData(orig3, false);
+        assertEquals(2, notifiedKeys.size());
+        assertTrue(notifiedKeys.contains(new BlockPosKey(worldId, 1, 64, 1)));
+        assertTrue(notifiedKeys.contains(new BlockPosKey(worldId, 3, 64, 1)));
+    }
+
     private Location loc(int x, int y, int z) {
         return new Location(world, x, y, z);
     }

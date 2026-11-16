@@ -174,6 +174,9 @@ public final class DefaultRaidRegionService implements RaidRegionService {
             float yaw,
             float pitch) {
         ArenaRegion arena = regions.arena();
+        if (!arena.containsHorizontal(blockX + 0.5, blockZ + 0.5)) {
+            return null;
+        }
         int minY = arena.shape() == Shape.CYLINDER ? arena.minY() : (int) Math.floor(arena.min().y());
         int maxY = arena.shape() == Shape.CYLINDER ? arena.maxY() : (int) Math.ceil(arena.max().y());
         int voidFloor = (int) Math.ceil(regions.voidYThreshold());

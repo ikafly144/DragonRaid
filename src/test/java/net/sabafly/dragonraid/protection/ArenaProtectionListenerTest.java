@@ -188,6 +188,50 @@ class ArenaProtectionListenerTest {
                 piston, List.of(originalTarget), org.bukkit.block.BlockFace.EAST);
         listener.onPistonExtend(extend);
         assertTrue(extend.isCancelled());
+
+        // Tracked piston moving tracked block in arena is still blocked so tracked coords stay consistent
+        Block trackedPiston = mockBlock(25, 64, 20, Material.PISTON);
+        Block trackedTarget = mockBlock(26, 64, 20, Material.COBBLESTONE);
+        Block pistonHeadDest = mockBlock(26, 64, 20, Material.AIR);
+        Block targetDest = mockBlock(27, 64, 20, Material.AIR);
+        when(trackedPiston.getRelative(org.bukkit.block.BlockFace.EAST)).thenReturn(pistonHeadDest);
+        when(trackedTarget.getRelative(org.bukkit.block.BlockFace.EAST)).thenReturn(targetDest);
+        tracker.tryRecordPlayerPlacement(trackedPiston.getLocation(), player.getUniqueId(), mockData(), 64, 512);
+        tracker.tryRecordPlayerPlacement(trackedTarget.getLocation(), player.getUniqueId(), mockData(), 64, 512);
+        BlockPistonExtendEvent trackedExtend = new BlockPistonExtendEvent(
+                trackedPiston, List.of(trackedTarget), org.bukkit.block.BlockFace.EAST);
+        listener.onPistonExtend(trackedExtend);
+        assertTrue(trackedExtend.isCancelled());
+
+        // Outside piston pushing a block across the arena border into arena is also cancelled
+        Block outsidePiston = mockBlock(122, 64, 0, Material.PISTON);
+        Block outsideHead = mockBlock(121, 64, 0, Material.STONE);
+        Block outsideBlock = mockBlock(121, 64, 0, Material.STONE);
+        Block insideArenaDest = mockBlock(120, 64, 0, Material.AIR);
+        when(outsidePiston.getRelative(org.bukkit.block.BlockFace.WEST)).thenReturn(outsideHead);
+        when(outsideBlock.getRelative(org.bukkit.block.BlockFace.WEST)).thenReturn(insideArenaDest);
+        BlockPistonExtendEvent pushIntoArena = new BlockPistonExtendEvent(
+                outsidePiston, List.of(outsideBlock), org.bukkit.block.BlockFace.WEST);
+        listener.onPistonExtend(pushIntoArena);
+        assertTrue(pushIntoArena.isCancelled());
+    }
+
+    @Test
+    void outsideBlockExplode_filtersAffectedInsideArenaBlocks() {
+        Block outsideOrigin = mockBlock(200, 64, 0, Material.TNT);
+        Block insideOriginal = mockBlock(10, 64, 0, Material.END_STONE);
+        Block insideTemp = mockBlock(11, 64, 0, Material.COBBLESTONE);
+        Block outsideTarget = mockBlock(199, 64, 0, Material.END_STONE);
+        tracker.tryRecordPlayerPlacement(insideTemp.getLocation(), player.getUniqueId(), mockData(), 64, 512);
+
+        List<Block> affected = new ArrayList<>(List.of(insideOriginal, insideTemp, outsideTarget));
+        BlockExplodeEvent event = new BlockExplodeEvent(
+                outsideOrigin, outsideOrigin.getState(), affected, 4.0f, org.bukkit.ExplosionResult.DESTROY);
+        listener.onBlockExplode(event);
+
+        assertFalse(event.isCancelled());
+        assertEquals(List.of(insideTemp, outsideTarget), event.blockList());
+        assertFalse(tracker.isTracked(insideTemp.getLocation()));
     }
 
     private Block mockBlock(int x, int y, int z, Material material) {

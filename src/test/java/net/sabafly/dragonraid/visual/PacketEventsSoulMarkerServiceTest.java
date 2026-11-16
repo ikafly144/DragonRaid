@@ -178,6 +178,53 @@ class PacketEventsSoulMarkerServiceTest {
         assertEquals(List.of("DESTROY", "SPAWN:12.0,-4.0"), transportLog);
     }
 
+    @Test
+    void viewerReconnectAndInvalidate_respawnMarker_andRemovedStateIsNeverReused() {
+        UUID downedId = UUID.randomUUID();
+        Location markerLoc = new Location(endWorld, 0.0, 64.0, 0.0);
+        UUID aliceUuid = UUID.randomUUID();
+
+        Player firstConn = mockViewerWithId(aliceUuid, "Alice", new Location(endWorld, 5.0, 64.0, 0.0));
+        service.spawnOrUpdateMarker(downedId, "Steve", markerLoc, 45, 0.0, List.of(firstConn));
+        assertEquals(1, events.size());
+        assertTrue(events.getFirst().startsWith("SPAWN:Alice:"));
+
+        // Reconnect before tick observed disconnect: distinct Player instance with same UUID -> must SPAWN, not UPDATE
+        events.clear();
+        Player secondConn = mockViewerWithId(aliceUuid, "Alice", new Location(endWorld, 5.0, 64.0, 0.0));
+        service.spawnOrUpdateMarker(downedId, "Steve", markerLoc, 44, 0.1, List.of(secondConn));
+        assertEquals(1, events.size());
+        assertTrue(events.getFirst().startsWith("SPAWN:Alice:"));
+
+        // Explicit invalidateViewer (even reusing the same Player instance) must force SPAWN on next update
+        events.clear();
+        service.invalidateViewer(aliceUuid);
+        service.spawnOrUpdateMarker(downedId, "Steve", markerLoc, 43, 0.2, List.of(secondConn));
+        assertEquals(1, events.size());
+        assertTrue(events.getFirst().startsWith("SPAWN:Alice:"));
+
+        // Removing marker cleans up cleanly even on subsequent removeAllMarkers
+        events.clear();
+        service.removeMarker(downedId, List.of(secondConn));
+        assertEquals(1, events.size());
+        assertTrue(events.getFirst().startsWith("DESTROY:Alice:"));
+
+        events.clear();
+        service.removeAllMarkers(List.of(secondConn));
+        assertTrue(events.isEmpty());
+    }
+
+    private Player mockViewerWithId(UUID id, String name, Location loc) {
+        Player p = mock(Player.class);
+        lenient().when(p.getUniqueId()).thenReturn(id);
+        lenient().when(p.getName()).thenReturn(name);
+        lenient().when(p.isOnline()).thenReturn(true);
+        lenient().when(p.getWorld()).thenReturn(endWorld);
+        lenient().when(p.getLocation()).thenReturn(loc);
+        lenient().when(p.locale()).thenReturn(Locale.US);
+        return p;
+    }
+
     private Player mockViewer(String name, Location loc) {
         Player p = mock(Player.class);
         UUID id = UUID.randomUUID();

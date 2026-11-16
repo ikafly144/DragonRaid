@@ -12,6 +12,7 @@ import net.sabafly.dragonraid.protection.TemporaryBlockTracker.TrackOutcome;
 import net.sabafly.dragonraid.region.RaidRegionService;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.EnderPearl;
 import org.bukkit.entity.Player;
@@ -218,10 +219,8 @@ public final class ArenaProtectionListener implements Listener {
         if (!protectionActive.getAsBoolean()) {
             return;
         }
-        if (!regionService.isInArena(event.getBlock().getLocation())) {
-            return;
-        }
-        if (protection().disableBedAndAnchorExplosions()) {
+        if (protection().disableBedAndAnchorExplosions()
+                && regionService.isInArena(event.getBlock().getLocation())) {
             event.setCancelled(true);
             event.blockList().clear();
             return;
@@ -283,27 +282,29 @@ public final class ArenaProtectionListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPistonExtend(BlockPistonExtendEvent event) {
-        if (shouldCancelPistonMovement(event.getBlock(), event.getBlocks())) {
+        if (shouldCancelPistonMovement(event.getBlock(), event.getBlocks(), event.getDirection())) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPistonRetract(BlockPistonRetractEvent event) {
-        if (shouldCancelPistonMovement(event.getBlock(), event.getBlocks())) {
+        if (shouldCancelPistonMovement(event.getBlock(), event.getBlocks(), event.getDirection())) {
             event.setCancelled(true);
         }
     }
 
-    private boolean shouldCancelPistonMovement(Block piston, List<Block> movedBlocks) {
+    private boolean shouldCancelPistonMovement(Block piston, List<Block> movedBlocks, BlockFace direction) {
         if (!protectionActive.getAsBoolean() || !protection().protectOriginalArenaTerrain()) {
             return false;
         }
-        if (regionService.isInArena(piston.getLocation()) && !blockTracker.isTracked(piston.getLocation())) {
+        if (regionService.isInArena(piston.getLocation())
+                || regionService.isInArena(piston.getRelative(direction).getLocation())) {
             return true;
         }
         for (Block block : movedBlocks) {
-            if (regionService.isInArena(block.getLocation()) && !blockTracker.isTracked(block.getLocation())) {
+            if (regionService.isInArena(block.getLocation())
+                    || regionService.isInArena(block.getRelative(direction).getLocation())) {
                 return true;
             }
         }

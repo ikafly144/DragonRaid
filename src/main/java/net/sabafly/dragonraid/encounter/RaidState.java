@@ -11,5 +11,7 @@ public enum RaidState {
     /** Combat is active; protection, scaling, downed/revive, and wipe detection are enforced. */
     ACTIVE,
     /** Wipe sequence is running before resetting the arena and returning players to safety. */
-    WIPING
+    WIPING,
+    /** Post-encounter teardown/rollback is running before returning to IDLE. */
+    ENDING
 }
