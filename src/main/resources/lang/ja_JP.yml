@@ -1,0 +1,186 @@
+# DragonRaid Japanese (ja_JP) MiniMessage Language File
+
+prefix: "<dark_purple>[<light_purple>DragonRaid</light_purple>]</dark_purple> "
+
+command:
+  no-permission: "<prefix><red>このコマンドを実行する権限がありません。</red>"
+  player-only: "<prefix><red>このコマンドはプレイヤーのみ実行できます。</red>"
+  player-not-found: "<prefix><red>プレイヤー「<target>」が見つかりません。</red>"
+  invalid-usage: "<prefix><yellow>使用法: <usage></yellow>"
+  reload-success: "<prefix><green>設定ファイルと言語ファイルをリロードしました。</green>"
+  reload-failed: "<prefix><red>リロードに失敗しました: <error></red>"
+  ready-toggled: "<prefix><aqua>準備状態: <state></aqua>"
+  ready-state-true: "<green>準備完了</green>"
+  ready-state-false: "<gray>未準備</gray>"
+  altar-only-mode: "<prefix><yellow>現在、帰還ポータル祭壇からのみ開始できます。</yellow>"
+  start-triggered: "<prefix><gold><difficulty> レイドの開始カウントダウンを開始しました。</gold>"
+  already-running: "<prefix><red>現在レイドが進行中です。</red>"
+  admin-reset: "<prefix><yellow>管理者によりレイドを強制リセットしました。</yellow>"
+  region-info: "<prefix><aqua>領域 [<region>]: <details></aqua>"
+  region-updated: "<prefix><green>領域 [<region>] を更新しました。</green>"
+  stats-header: "<dark_purple>━━━ <light_purple><player> のレイド統計</light_purple> ━━━</dark_purple>"
+  stats-clears: "<gray>討伐回数: <white>Normal <normal>回 / Hard <hard>回</white></gray>"
+  stats-best-time: "<gray>自己ベスト: <white>Normal <normal_time> / Hard <hard_time></white></gray>"
+  stats-points: "<gray>所持ポイント: <aqua><points></aqua></gray>"
+  points-updated: "<prefix><green><player> の <currency> を <amount> に更新しました（操作: <action>）。</green>"
+
+raid:
+  first-clear-init: "<prefix><light_purple>初回エンドドラゴン戦を DragonRaid (Normal) として初期化しました。中央アリーナへ入ると開戦します。</light_purple>"
+  pull-countdown-title: "<gold><bold>開戦まで <seconds></bold></gold>"
+  pull-countdown-subtitle: "<gray>難易度: <difficulty> | 参加人数: <players>人</gray>"
+  pull-cancelled: "<prefix><yellow>参加者が待機エリアに戻ったためカウントダウンを中断しました。</yellow>"
+  raid-start-title: "<dark_purple><bold>RAID START</bold></dark_purple>"
+  raid-start-subtitle: "<light_purple><boss> (<difficulty>) — 参加人数 N=<players></light_purple>"
+  late-join-locked: "<prefix><yellow>現在レイド戦闘中のため、安全待機エリアで観戦待機となります。</yellow>"
+  wipe-title: "<dark_red><bold>WIPE — 全滅</bold></dark_red>"
+  wipe-subtitle: "<gray>アリーナを初期化し、安全待機エリアへ帰還します…</gray>"
+  victory-title: "<gold><bold>VICTORY — 討伐完了！</bold></gold>"
+  victory-subtitle: "<yellow>クリアタイム: <time> | 難易度: <difficulty></yellow>"
+  victory-rewards: "<prefix><green>報酬獲得: <rewards></green>"
+  arena-protected: "<prefix><red>戦闘中は元から存在するエンドの地形を破壊できません。</red>"
+  bed-blocked: "<prefix><red>レイド戦闘中はベッドやリスポーンアンカーを使用できません。</red>"
+  temp-block-limit: "<prefix><yellow>一時ブロックの設置上限（<limit>個）に達しました。</yellow>"
+  item-loss-protected: "<prefix><aqua>レイド保護により装備・所持品は保持されました。</aqua>"
+
+revive:
+  downed-self-title: "<red><bold>戦闘不能 (DOWNED)</bold></red>"
+  downed-self-subtitle: "<gray>味方の蘇生を待ってください（スニーク/右クリック長押し 2.5秒）</gray>"
+  downed-broadcast: "<prefix><red><player> が戦闘不能になりました！ 魂マーカー付近でスニーク長押しして蘇生してください。</red>"
+  void-rescued: "<prefix><yellow>奈落から引き上げられました！</yellow>"
+  soul-marker-label: "<red>✦ <player> ✦</red>\n<yellow>残り時間: <seconds>s | 蘇生: <progress>%</yellow>"
+  soul-marker-label-no-timer: "<red>✦ <player> ✦</red>\n<yellow>スニーク長押しで蘇生 (<progress>%)</yellow>"
+  reviving-actionbar: "<green>蘇生中: <player> [<bar>] <percent>%</green>"
+  revived-success: "<prefix><green><target> が <reviver> によって蘇生されました！（残り蘇生回数: <remaining>）</green>"
+  no-revives-left: "<prefix><red>この試行の蘇生回数上限に達しています。</red>"
+  expired-spectator: "<prefix><dark_red><player> は蘇生制限時間を超過し、観戦状態へ移行しました。</dark_red>"
+
+boss:
+  normal:
+    name: "<light_purple>終焉の竜 エンダードラゴン</light_purple>"
+  hard:
+    name: "<dark_red><bold>【絶】終焉の竜 エンダードラゴン</bold></dark_red>"
+
+bossbar:
+  main: "<boss> <gray>[<difficulty>]</gray> <dark_gray>|</dark_gray> <aqua><phase></aqua> <dark_gray>|</dark_gray> <white><hp_percent>%</white>"
+  cast: "<yellow>▶ <ability> <gray>[詠唱 <seconds>s]</gray></yellow>"
+
+actionbar:
+  status: "<gray>状態: <state> <dark_gray>|</dark_gray> 残り蘇生: <yellow><revives></yellow> <dark_gray>|</dark_gray> <extra></gray>"
+  state-alive: "<green>生存</green>"
+  state-downed: "<red>ダウン</red>"
+  state-spectator: "<dark_gray>観戦</dark_gray>"
+  just-guard-success: "<gold><bold>✦ ジャストガード成功！ 強攻撃を軽減し隙を突いた！</bold></gold>"
+  mace-smash-stagger: "<aqua><bold>✦ メイススマッシュ命中！ 詠唱を中断した！</bold></aqua>"
+  abyss-talisman-saved: "<light_purple><bold>✦ 奈落の護符が発動し、致命傷を回避した！</bold></light_purple>"
+
+phase:
+  p1:
+    name: "Phase 1: 覚醒と黒曜石の包囲"
+    announce: "<light_purple>Phase 1: 覚醒と黒曜石の包囲</light_purple>"
+  p2:
+    name: "Phase 2: 蒼穹の審判と光の塔"
+    announce: "<aqua>Phase 2: 蒼穹の審判と光の塔</aqua>"
+  p3:
+    name: "Phase 3: 蒼天の翼"
+    announce: "<gold>Phase 3: 蒼天の翼 — 上昇気流発生！</gold>"
+  final:
+    name: "Final Phase: 終焉の狂宴"
+    announce: "<dark_red><bold>Final Phase: 終焉の狂宴</bold></dark_red>"
+
+ability:
+  tank_buster:
+    name: "竜顎の強襲"
+    warning: "<red>⚠ <player> に強攻撃予兆！ 盾を構えろ！</red>"
+  stack:
+    name: "虚無の頭割り"
+    warning: "<yellow>⚠ 頭割り予兆！ 対象者の円内に集合せよ！</yellow>"
+    solo-warning: "<yellow>⚠ 単体受け予兆！ 盾ガードや軽減で耐えろ！</yellow>"
+  spread:
+    name: "星滅の散開"
+    warning: "<gold>⚠ 散開予兆！ 味方と距離を取れ！</gold>"
+  meteor_towers:
+    name: "光の審判塔"
+    warning: "<aqua>⚠ 光の塔が出現！ 各塔に最低1人入って受け止めろ！</aqua>"
+  los_breath:
+    name: "終焉のブレス"
+    warning: "<dark_purple>⚠ 視線切りブレス詠唱！ 黒曜石の柱や一時壁の陰に隠れろ！</dark_purple>"
+  crystals:
+    name: "エンドクリスタル再生"
+    warning: "<light_purple>⚠ エンドクリスタルが出現！ 破壊して竜の再生を止めろ！</light_purple>"
+    tether-warning: "<red>⚠ 色付きテザークリスタル出現！ <seconds>秒以内に同時破壊せよ！</red>"
+  donut_outer_aoe:
+    name: "虚空輪の波動"
+    warning: "<red>⚠ ドーナツ＆外周連続 AoE！ 足元の予兆を見極めろ！</red>"
+  knockback_roar:
+    name: "終末の咆哮"
+    warning: "<yellow>⚠ ノックバック咆哮！ 柱を背負うか水バケツ/パールで備えろ！</yellow>"
+  updraft_wind_field:
+    name: "蒼天の上昇気流"
+    warning: "<aqua>✦ アリーナに上昇気流が発生！ エリトラ・ウィンドチャージで空へ舞え！</aqua>"
+  celestial_crystals:
+    name: "天界クリスタル"
+    warning: "<gold>⚠ 上空に天界クリスタル出現！ メイス強襲または遠距離攻撃で破壊せよ！</gold>"
+  hard_enrage:
+    name: "終焉の滅び"
+    warning: "<dark_red><bold>⚠ 時間切れ！ 「終焉の滅び」詠唱開始！</bold></dark_red>"
+
+altar:
+  title: "<dark_purple>終焉の祭壇 — 難易度選択</dark_purple>"
+  normal-name: "<green><bold>Normal 難易度</bold></green>"
+  normal-lore: "<gray>3フェーズ / 徒歩アクション主軸</gray>\n<gray>蘇生上限: N×1回 | 時間猶予制限なし</gray>\n<yellow>クリックして召喚</yellow>"
+  hard-name: "<dark_red><bold>Hard / Savage 難易度</bold></dark_red>"
+  hard-lore: "<gray>4フェーズ / 立体機動・複合ギミック・時間切れあり</gray>\n<gray>蘇生上限: ceil(N/2)回 | 蘇生猶予 45秒</gray>\n<yellow>クリックして召喚</yellow>"
+  hard-locked: "<red>Normal 難易度を1回以上クリアすると解放されます。</red>"
+  insufficient-cost: "<prefix><red>召喚に必要なアイテムが不足しています（必要: <cost>）。</red>"
+  open-shop-button: "<gold>報酬交換ショップを開く</gold>"
+
+shop:
+  title: "<dark_purple>DragonRaid 報酬交換ショップ</dark_purple>"
+  cost-line: "<gray>必要ポイント: <aqua><costs></aqua></gray>"
+  hard-clear-required: "<red>Hard / Savage 討伐実績が必要</red>"
+  click-to-buy: "<green>クリックして交換</green>"
+  insufficient-points: "<prefix><red>ポイントが不足しています。</red>"
+  inventory-full: "<prefix><red>インベントリに空きがありません。</red>"
+  purchase-success: "<prefix><green>「<item>」を交換しました！</green>"
+
+currency:
+  dragon_token:
+    name: "<light_purple>竜討伐トークン</light_purple>"
+  abyssal_scale:
+    name: "<dark_aqua>深淵の竜鱗</dark_aqua>"
+  celestial_fragment:
+    name: "<gold>天界の星片</gold>"
+
+gear:
+  dragonscale_shield:
+    name: "<light_purple><bold>竜鱗の盾</bold></light_purple>"
+    lore: "<gray>強攻撃の軽減率を大幅に高める。</gray>\n<aqua>ジャストガード成功時、周囲に衝撃波を放つ。</aqua>"
+  voidwing_elytra:
+    name: "<dark_purple><bold>虚空翼のエリトラ</bold></dark_purple>"
+    lore: "<gray>滑空速度を強化し、スニーク解放で急上昇する。</gray>"
+  dragonslayer_greatsword:
+    name: "<gold><bold>竜殺しの大剣</bold></gold>"
+    lore: "<gray>レイドボスおよびエンド系モブへの与ダメージ増加。</gray>\n<aqua>右クリックで範囲斬撃を放つ。</aqua>"
+  dragonslayer_bow:
+    name: "<aqua><bold>竜殺しの弓</bold></aqua>"
+    lore: "<gray>クリスタルやコアへの遠距離ダメージを強化する。</gray>"
+  dragonslayer_mace:
+    name: "<gold><bold>竜殺しのメイス</bold></gold>"
+    lore: "<gray>スマッシュ命中時のボーナスダメージと詠唱中断時間を延長する。</gray>"
+  abyss_talisman:
+    name: "<dark_purple><bold>奈落の護符</bold></dark_purple>"
+    lore: "<gray>長いクールタイムで奈落落下・致死ダメージを1度だけ自動回避する。</gray>"
+
+enchant:
+  dragon_bane:
+    name: "<gold>竜殺し</gold>"
+    lore: "<gray>レイドボス・エンド系モブへのダメージを増加させる。</gray>"
+  void_feather:
+    name: "<aqua>虚空の翼</aqua>"
+    lore: "<gray>エリトラ滑空と上昇ブースト性能を高める。</gray>"
+  bulwark_parry:
+    name: "<light_purple>竜鱗の受け流し</light_purple>"
+    lore: "<gray>盾の軽減率とジャストガード受付時間を延長する。</gray>"
+  abyss_ward:
+    name: "<dark_purple>奈落の加護</dark_purple>"
+    lore: "<gray>奈落の護符のクールタイムを短縮する。</gray>"
