@@ -253,7 +253,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                 double x = location.getX();
                 double y = location.getY();
                 double z = location.getZ();
-                persistRegions(sender, "arena", latest -> new RegionConfig(
+                persistArenaRegions(sender, "arena", latest -> new RegionConfig(
                         recenterArena(latest.arena(), x, y, z),
                         latest.safeZone(),
                         latest.voidYThreshold()
@@ -288,7 +288,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                     Placeholder.unparsed("details", "radius must be > 0"));
             return;
         }
-        persistRegions(sender, "arena", latest -> {
+        persistArenaRegions(sender, "arena", latest -> {
             ArenaRegion cur = latest.arena();
             Point3D center = cur.center();
             ArenaRegion updated = new ArenaRegion(
@@ -336,7 +336,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                     Placeholder.unparsed("details", "min coordinates must be <= max coordinates"));
             return;
         }
-        persistRegions(sender, "arena", latest -> {
+        persistArenaRegions(sender, "arena", latest -> {
             Point3D min = new Point3D(minX, minY, minZ);
             Point3D max = new Point3D(maxX, maxY, maxZ);
             Point3D center = new Point3D((minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0);
@@ -637,6 +637,40 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         }
     }
 
+    private void persistArenaRegions(CommandSender sender, String regionName, UnaryOperator<RegionConfig> updater) {
+        if (encounterManager != null && !encounterManager.tryBeginArenaRegionUpdate()) {
+            messageService.send(sender, "command.region-locked-during-raid");
+            return;
+        }
+        UnaryOperator<RegionConfig> guardedUpdater = latest -> {
+            if (encounterManager != null && !encounterManager.canModifyArenaRegion()) {
+                throw new ArenaRegionLockedException();
+            }
+            return updater.apply(latest);
+        };
+        configManager.updateRegionsAsync(guardedUpdater, scheduler.asyncExecutor())
+                .whenComplete((ignored, error) -> {
+                    if (encounterManager != null) {
+                        encounterManager.endArenaRegionUpdate();
+                    }
+                    replyOnSenderThread(sender, () -> {
+                        if (error == null) {
+                            messageService.send(sender, "command.region-updated",
+                                    Placeholder.unparsed("region", regionName));
+                        } else {
+                            Throwable cause = unwrapCause(error);
+                            if (cause instanceof ArenaRegionLockedException) {
+                                messageService.send(sender, "command.region-locked-during-raid");
+                                return;
+                            }
+                            logger.log(Level.WARNING, "Failed to update region " + regionName, cause);
+                            messageService.send(sender, "command.reload-failed",
+                                    Placeholder.unparsed("error", formatErrorDetail(cause)));
+                        }
+                    });
+                });
+    }
+
     private void persistRegions(CommandSender sender, String regionName, UnaryOperator<RegionConfig> updater) {
         configManager.updateRegionsAsync(updater, scheduler.asyncExecutor())
                 .whenComplete((ignored, error) -> replyOnSenderThread(sender, () -> {
@@ -650,6 +684,9 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                                 Placeholder.unparsed("error", formatErrorDetail(cause)));
                     }
                 }));
+    }
+
+    private static final class ArenaRegionLockedException extends RuntimeException {
     }
 
     private static Throwable unwrapCause(Throwable error) {

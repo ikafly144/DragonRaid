@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -12,6 +13,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
@@ -30,6 +32,7 @@ import net.sabafly.dragonraid.config.PluginConfig.ProtectionSettings;
 import net.sabafly.dragonraid.config.PluginConfig.ReviveSettings;
 import net.sabafly.dragonraid.config.PluginConfig.ScalingSettings;
 import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.protection.BlockPosKey;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.RaidRegionService;
 import net.sabafly.dragonraid.scaling.RaidScalingCalculator;
@@ -88,11 +91,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private volatile @Nullable BossConfig.Difficulty activeDifficulty;
     private volatile @Nullable ScaledEncounterParameters activeScaling;
     private final AtomicInteger remainingRevives = new AtomicInteger(0);
+    private final AtomicLong encounterGeneration = new AtomicLong(0L);
+    private final AtomicInteger arenaUpdatesInFlight = new AtomicInteger(0);
     private volatile long combatStartedMillis;
 
     private final Set<UUID> readyPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, RaidParticipant> participants = new ConcurrentHashMap<>();
     private final Map<UUID, SavedCleanupRecord> pendingCleanupPlayers = new ConcurrentHashMap<>();
+    private final Map<BlockPosKey, PendingBlockRollback> unrecoveredPersistedRollbacks = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerSnapshot> snapshots = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastRightClickMillis = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastFeedbackMillis = new ConcurrentHashMap<>();
@@ -194,11 +200,18 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             recoveryRepository.replacePendingBlockRollbacksSync(List.of());
             return;
         }
-        blockTracker.rollbackPendingEntries(scheduler, worldLookup, pending)
-                .thenCompose(recoveryRepository::deletePendingBlockRollbacksAsync)
+        for (PendingBlockRollback entry : pending) {
+            unrecoveredPersistedRollbacks.putIfAbsent(entry.toPosKey(), entry);
+        }
+        blockTracker.rollbackPendingEntries(scheduler, worldLookup, pending, restoredKeys -> {
+                    for (BlockPosKey key : restoredKeys) {
+                        unrecoveredPersistedRollbacks.remove(key);
+                    }
+                    recoveryRepository.deletePendingBlockRollbacksAsync(restoredKeys);
+                })
                 .exceptionally(ex -> {
                     logger.log(Level.WARNING, "Failed to recover pending temporary block rollbacks", ex);
-                    return null;
+                    return List.of();
                 });
     }
 
@@ -211,6 +224,31 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     public boolean isProtectionActive() {
         RaidState current = state;
         return current == RaidState.COUNTDOWN || current == RaidState.ACTIVE || current == RaidState.WIPING;
+    }
+
+    @Override
+    public boolean canModifyArenaRegion() {
+        synchronized (stateLock) {
+            return state == RaidState.IDLE
+                    && blockTracker.totalCount() == 0
+                    && unrecoveredPersistedRollbacks.isEmpty();
+        }
+    }
+
+    @Override
+    public boolean tryBeginArenaRegionUpdate() {
+        synchronized (stateLock) {
+            if (!canModifyArenaRegion()) {
+                return false;
+            }
+            arenaUpdatesInFlight.incrementAndGet();
+            return true;
+        }
+    }
+
+    @Override
+    public void endArenaRegionUpdate() {
+        arenaUpdatesInFlight.updateAndGet(v -> Math.max(0, v - 1));
     }
 
     @Override
@@ -334,7 +372,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
         int countdownSeconds;
         synchronized (stateLock) {
-            if (state != RaidState.IDLE) {
+            if (state != RaidState.IDLE || arenaUpdatesInFlight.get() > 0) {
                 if (!triggeredByArenaEntry && sender != null) {
                     messageService.send(sender, "command.already-running");
                 }
@@ -480,16 +518,18 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             if (state != RaidState.COUNTDOWN) {
                 return;
             }
+            encounterGeneration.incrementAndGet();
             participants.clear();
             for (Player member : party) {
                 UUID memberId = member.getUniqueId();
-                SavedCleanupRecord staleCleanup = pendingCleanupPlayers.remove(memberId);
+                SavedCleanupRecord staleCleanup = pendingCleanupPlayers.get(memberId);
                 RaidParticipant participant = new RaidParticipant(memberId, member.getName());
                 participant.setOnline(true);
                 participants.put(memberId, participant);
                 scheduler.runAtEntity(member, () -> {
                     if (staleCleanup != null) {
                         staleCleanup.applyTo(member);
+                        pendingCleanupPlayers.remove(memberId, staleCleanup);
                         deletePlayerCleanupAsync(memberId);
                     }
                     participant.captureOriginalState(
@@ -500,6 +540,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     );
                     persistPlayerCleanupAsync(participant, true);
                     updateSnapshot(member);
+                    participant.markInitialSnapshotReady();
                 });
             }
             readyPlayers.clear();
@@ -609,6 +650,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 } else {
                     if (!channellingAlly.getUniqueId().equals(downed.currentReviverId())) {
                         downed.setCurrentReviverId(channellingAlly.getUniqueId());
+                        downed.setReviveProgressSeconds(0.0);
                     }
                     double newProgress = downed.reviveProgressSeconds() + MONITOR_STEP_SECONDS;
                     downed.setReviveProgressSeconds(newProgress);
@@ -684,13 +726,17 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     private void initiateVoidRescue(RaidParticipant participant, Player player, Location voidLoc, double yOffset) {
         participant.setRescueInProgress(true);
+        long expectedGeneration = encounterGeneration.get();
         regionService.findNearestSafeArenaEdgeAsync(voidLoc, yOffset).whenComplete((safeLoc, error) -> {
             Location target = (error == null && safeLoc != null)
                     ? safeLoc
                     : regionService.clampToArenaAnchor(voidLoc, yOffset);
             scheduler.runAtEntity(player, () -> {
                 participant.setRescueInProgress(false);
-                if (state != RaidState.ACTIVE || !player.isOnline()) {
+                if (state != RaidState.ACTIVE
+                        || encounterGeneration.get() != expectedGeneration
+                        || participants.get(participant.playerId()) != participant
+                        || !player.isOnline()) {
                     return;
                 }
                 player.setFallDistance(0.0f);
@@ -792,6 +838,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
         Player target = playerLookup.apply(participant.playerId());
         if (target != null && target.isOnline()) {
+            long expectedGeneration = encounterGeneration.get();
             scheduler.runAtEntity(target, () -> {
                 restorePlayerFlags(participant, target);
                 double maxHp = maxHealth(target);
@@ -800,7 +847,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 if (invulTicks > 0) {
                     target.setInvulnerable(true);
                     scheduler.runAtEntityLater(target, () -> {
-                        if (participant.state() == ParticipantState.ALIVE) {
+                        if (encounterGeneration.get() == expectedGeneration
+                                && participants.get(participant.playerId()) == participant
+                                && participant.state() == ParticipantState.ALIVE) {
                             target.setInvulnerable(participant.previousInvulnerable());
                         }
                     }, invulTicks);
@@ -864,11 +913,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
         int onlineAlive = 0;
         int onlineAliveInArena = 0;
+        boolean allInitialSnapshotsReady = true;
         for (RaidParticipant p : participants.values()) {
             if (!p.isOnline() || p.state() != ParticipantState.ALIVE) {
                 continue;
             }
             onlineAlive++;
+            if (!p.isInitialSnapshotReady()) {
+                allInitialSnapshotsReady = false;
+            }
             if (p.isRescueInProgress()) {
                 onlineAliveInArena++;
                 continue;
@@ -879,7 +932,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
         }
         boolean noAlivePlayers = onlineAlive == 0;
-        boolean allLeftArena = reviveSettings.wipeIfAllLeaveArena() && onlineAlive > 0 && onlineAliveInArena == 0;
+        boolean allLeftArena = reviveSettings.wipeIfAllLeaveArena()
+                && allInitialSnapshotsReady
+                && onlineAlive > 0
+                && onlineAliveInArena == 0;
         if (noAlivePlayers || allLeftArena) {
             beginWipe(endWorld);
         }
@@ -931,6 +987,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         synchronized (stateLock) {
             cancelHandle(wipeTask);
             wipeTask = null;
+            encounterGeneration.incrementAndGet();
             activeDifficulty = null;
             activeScaling = null;
             remainingRevives.set(0);
@@ -949,6 +1006,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             countdownTask = null;
             monitorTask = null;
             wipeTask = null;
+            encounterGeneration.incrementAndGet();
         }
 
         List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
@@ -980,6 +1038,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             cancelHandle(monitorTask);
             monitorTask = null;
+            encounterGeneration.incrementAndGet();
             difficulty = activeDifficulty != null ? activeDifficulty : BossConfig.Difficulty.NORMAL;
         }
 
@@ -1085,11 +1144,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         updateSnapshot(player);
 
         // If a previous raid ended while this player was offline, restore flags and optionally move to safe zone.
-        SavedCleanupRecord cleanup = pendingCleanupPlayers.remove(id);
+        SavedCleanupRecord cleanup = pendingCleanupPlayers.get(id);
         if (cleanup != null) {
-            deletePlayerCleanupAsync(id);
             scheduler.runAtEntity(player, () -> {
                 cleanup.applyTo(player);
+                pendingCleanupPlayers.remove(id, cleanup);
+                deletePlayerCleanupAsync(id);
                 World endWorld = endWorldSupplier.get();
                 if (cleanup.teleportToSafeZone() && endWorld != null && regionService.isRaidWorld(player.getWorld())) {
                     player.teleportAsync(regionService.safeZoneSpawnLocation(endWorld));
@@ -1275,17 +1335,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             countdownTask = null;
             monitorTask = null;
             wipeTask = null;
+            encounterGeneration.incrementAndGet();
         }
         World endWorld = endWorldSupplier.get();
         List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
         for (RaidParticipant participant : participants.values()) {
             UUID id = participant.playerId();
-            Player player = playerLookup.apply(id);
-            if (player != null && player.isOnline()) {
-                restorePlayerFlags(participant, player);
-                pendingCleanupPlayers.remove(id);
-            } else if (participant.isStateCaptured()) {
+            if (participant.isStateCaptured()) {
                 pendingCleanupPlayers.put(id, new SavedCleanupRecord(
                         participant.previousGameMode(),
                         participant.previousInvisible(),
@@ -1302,10 +1359,13 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             recoveryRepository.replacePendingPlayerCleanupsSync(cleanups);
 
-            List<PendingBlockRollback> pendingBlocks = configManager.pluginConfig().protection().rollbackTemporaryBlocksOnEnd()
-                    ? blockTracker.exportPendingRollbacks()
-                    : List.of();
-            recoveryRepository.replacePendingBlockRollbacksSync(pendingBlocks);
+            Map<BlockPosKey, PendingBlockRollback> mergedBlocks = new LinkedHashMap<>(unrecoveredPersistedRollbacks);
+            if (configManager.pluginConfig().protection().rollbackTemporaryBlocksOnEnd()) {
+                for (PendingBlockRollback active : blockTracker.exportPendingRollbacks()) {
+                    mergedBlocks.putIfAbsent(active.toPosKey(), active);
+                }
+            }
+            recoveryRepository.replacePendingBlockRollbacksSync(mergedBlocks.values());
         }
         participants.clear();
         readyPlayers.clear();
@@ -1412,6 +1472,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 regionService.isInSafeZone(loc),
                 regionService.isBelowVoidThreshold(loc)
         ));
+        RaidParticipant participant = participants.get(id);
+        if (participant != null) {
+            participant.markInitialSnapshotReady();
+        }
     }
 
     private List<Player> onlinePlayersInWorld(World world) {

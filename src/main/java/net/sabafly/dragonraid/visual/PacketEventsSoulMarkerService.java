@@ -128,7 +128,6 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
                 UUID.randomUUID(),
                 location.clone()
         ));
-        state.location = location.clone();
 
         double maxDistSq = visuals.maxRenderDistance() * visuals.maxRenderDistance();
         World targetWorld = location.getWorld();
@@ -148,25 +147,40 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
         }
 
         synchronized (state) {
-            // Destroy for viewers that left range or world.
-            Iterator<UUID> existingIt = state.viewerIds.iterator();
-            while (existingIt.hasNext()) {
-                UUID existingId = existingIt.next();
-                if (!eligibleViewers.containsKey(existingId)) {
-                    Player leftPlayer = findViewer(existingId, viewers);
-                    if (leftPlayer != null && leftPlayer.isOnline()) {
-                        safeDestroy(leftPlayer, state);
+            boolean locationChanged = !Objects.equals(state.location.getWorld(), targetWorld)
+                    || state.location.distanceSquared(location) > 1e-4;
+            if (locationChanged) {
+                for (UUID existingId : state.viewerIds) {
+                    Player oldViewer = findViewer(existingId, viewers);
+                    if (oldViewer != null && oldViewer.isOnline()) {
+                        safeDestroy(oldViewer, state);
                     }
-                    existingIt.remove();
+                }
+                state.viewerIds.clear();
+                state.location = location.clone();
+            } else {
+                // Destroy for viewers that left range or world.
+                Iterator<UUID> existingIt = state.viewerIds.iterator();
+                while (existingIt.hasNext()) {
+                    UUID existingId = existingIt.next();
+                    if (!eligibleViewers.containsKey(existingId)) {
+                        Player leftPlayer = findViewer(existingId, viewers);
+                        if (leftPlayer != null && leftPlayer.isOnline()) {
+                            safeDestroy(leftPlayer, state);
+                        }
+                        existingIt.remove();
+                    }
                 }
             }
 
-            // Spawn for new viewers and update text metadata for all eligible viewers.
+            // Spawn for new viewers (only mark spawned on success) and update text metadata for existing viewers.
             for (Player viewer : eligibleViewers.values()) {
                 Component label = renderLabel(viewer, downedPlayerName, remainingSeconds, percent);
-                boolean isNewViewer = state.viewerIds.add(viewer.getUniqueId());
-                if (isNewViewer) {
-                    safeSpawn(viewer, state, location, visuals.soulMarkerGlow(), label);
+                boolean alreadySpawned = state.viewerIds.contains(viewer.getUniqueId());
+                if (!alreadySpawned) {
+                    if (safeSpawn(viewer, state, location, visuals.soulMarkerGlow(), label)) {
+                        state.viewerIds.add(viewer.getUniqueId());
+                    }
                 } else {
                     safeUpdateLabel(viewer, state, label);
                 }
@@ -223,7 +237,7 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
         );
     }
 
-    private void safeSpawn(Player viewer, MarkerState state, Location location, boolean glow, Component label) {
+    private boolean safeSpawn(Player viewer, MarkerState state, Location location, boolean glow, Component label) {
         try {
             transport.spawnMarker(
                     viewer,
@@ -235,8 +249,10 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
                     glow,
                     label
             );
+            return true;
         } catch (RuntimeException ex) {
             logger.log(Level.FINE, "Failed to spawn soul marker for " + viewer.getName(), ex);
+            return false;
         }
     }
 
@@ -349,11 +365,7 @@ public final class PacketEventsSoulMarkerService implements SoulMarkerService {
             if (api == null || !api.isInitialized()) {
                 return;
             }
-            try {
-                api.getPlayerManager().sendPacket(player, packet);
-            } catch (RuntimeException ex) {
-                logger.log(Level.FINE, "PacketEvents send failed for " + player.getName(), ex);
-            }
+            api.getPlayerManager().sendPacket(player, packet);
         }
     }
 

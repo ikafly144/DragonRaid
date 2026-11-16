@@ -21,6 +21,9 @@ import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
 
 /**
  * Bukkit/Folia event listener bridging player lifecycle, combat damage, movement,
@@ -117,6 +120,25 @@ public final class RaidPlayerLifecycleListener implements Listener {
         if (event.getWhoClicked() instanceof Player player && encounterManager.isDowned(player.getUniqueId())) {
             event.setCancelled(true);
             player.sendActionBar(messageService.render(player, "revive.downed-action-blocked"));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPlayerSwapHandItems(PlayerSwapHandItemsEvent event) {
+        Player player = event.getPlayer();
+        if (encounterManager.isDowned(player.getUniqueId())) {
+            event.setCancelled(true);
+            player.sendActionBar(messageService.render(player, "revive.downed-action-blocked"));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPlayerTeleport(PlayerTeleportEvent event) {
+        Player player = event.getPlayer();
+        TeleportCause cause = event.getCause();
+        if ((cause == TeleportCause.ENDER_PEARL || cause == TeleportCause.CONSUMABLE_EFFECT)
+                && encounterManager.isDowned(player.getUniqueId())) {
+            event.setCancelled(true);
         }
     }
 

@@ -9,7 +9,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository.PendingBlockRollback;
@@ -226,7 +226,7 @@ public final class TemporaryBlockTracker {
                 restorations.add(new BlockRestoration(tracked.key(), tracked.originalData()));
             }
         }
-        return dispatchChunkRollbacks(scheduler, world, restorations)
+        return dispatchChunkRollbacks(scheduler, world, restorations, ignored -> {})
                 .thenApply(List::size);
     }
 
@@ -238,9 +238,22 @@ public final class TemporaryBlockTracker {
             RaidScheduler scheduler,
             Function<UUID, @Nullable World> worldLookup,
             List<PendingBlockRollback> pending) {
+        return rollbackPendingEntries(scheduler, worldLookup, pending, ignored -> {});
+    }
+
+    /**
+     * Restores persisted {@link PendingBlockRollback} entries across their target worlds and chunks
+     * via Folia {@code RegionScheduler}, invoking {@code onChunkRestored} after each chunk completes.
+     */
+    public CompletableFuture<List<BlockPosKey>> rollbackPendingEntries(
+            RaidScheduler scheduler,
+            Function<UUID, @Nullable World> worldLookup,
+            List<PendingBlockRollback> pending,
+            Consumer<List<BlockPosKey>> onChunkRestored) {
         Objects.requireNonNull(scheduler, "scheduler");
         Objects.requireNonNull(worldLookup, "worldLookup");
         Objects.requireNonNull(pending, "pending");
+        Objects.requireNonNull(onChunkRestored, "onChunkRestored");
         if (pending.isEmpty()) {
             return CompletableFuture.completedFuture(List.of());
         }
@@ -264,7 +277,7 @@ public final class TemporaryBlockTracker {
             if (world == null) {
                 continue;
             }
-            worldFutures.add(dispatchChunkRollbacks(scheduler, world, worldEntry.getValue()));
+            worldFutures.add(dispatchChunkRollbacks(scheduler, world, worldEntry.getValue(), onChunkRestored));
         }
 
         if (worldFutures.isEmpty()) {
@@ -284,7 +297,8 @@ public final class TemporaryBlockTracker {
     private CompletableFuture<List<BlockPosKey>> dispatchChunkRollbacks(
             RaidScheduler scheduler,
             World world,
-            List<BlockRestoration> restorations) {
+            List<BlockRestoration> restorations,
+            Consumer<List<BlockPosKey>> onChunkRestored) {
         if (restorations.isEmpty()) {
             return CompletableFuture.completedFuture(List.of());
         }
@@ -294,7 +308,6 @@ public final class TemporaryBlockTracker {
         }
 
         List<BlockPosKey> restoredKeys = Collections.synchronizedList(new ArrayList<>(restorations.size()));
-        AtomicInteger completedCount = new AtomicInteger(0);
         List<CompletableFuture<Void>> chunkFutures = new ArrayList<>(byChunk.size());
         for (List<BlockRestoration> chunkBlocks : byChunk.values()) {
             BlockPosKey first = chunkBlocks.getFirst().key();
@@ -302,13 +315,15 @@ public final class TemporaryBlockTracker {
             chunkFutures.add(chunkFuture);
             scheduler.runAtRegion(world, first.chunkX(), first.chunkZ(), () -> {
                 try {
+                    List<BlockPosKey> chunkKeys = new ArrayList<>(chunkBlocks.size());
                     for (BlockRestoration item : chunkBlocks) {
                         BlockPosKey key = item.key();
                         Block block = world.getBlockAt(key.x(), key.y(), key.z());
                         block.setBlockData(item.data(), false);
+                        chunkKeys.add(key);
                         restoredKeys.add(key);
-                        completedCount.incrementAndGet();
                     }
+                    onChunkRestored.accept(List.copyOf(chunkKeys));
                     chunkFuture.complete(null);
                 } catch (RuntimeException ex) {
                     chunkFuture.completeExceptionally(ex);

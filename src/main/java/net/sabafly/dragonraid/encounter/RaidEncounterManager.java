@@ -23,6 +23,21 @@ public interface RaidEncounterManager {
 
     boolean isProtectionActive();
 
+    /**
+     * Returns {@code true} if no raid is active/pending and no temporary blocks are awaiting rollback.
+     */
+    boolean canModifyArenaRegion();
+
+    /**
+     * Reserves an exclusive arena-region modification slot if allowed, returning {@code false} if blocked.
+     */
+    boolean tryBeginArenaRegionUpdate();
+
+    /**
+     * Releases a previously acquired arena-region modification slot.
+     */
+    void endArenaRegionUpdate();
+
     Optional<ScaledEncounterParameters> activeScaling();
 
     int remainingRevives();

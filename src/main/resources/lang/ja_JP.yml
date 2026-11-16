@@ -27,6 +27,7 @@ command:
   start-too-few-players: "<prefix><red>参加人数が不足しています（現在 <current>人 / 最小 <min>人）。</red>"
   start-too-many-players: "<prefix><red>参加人数が上限を超えています（現在 <current>人 / 最大 <max>人）。</red>"
   region-invalid-arg: "<prefix><red>リージョンパラメータが不正です: <details></red>"
+  region-locked-during-raid: "<prefix><red>レイド進行中または一時ブロック復元待ちのため、アリーナ境界を変更できません。</red>"
   altar-only-mode: "<prefix><yellow>現在、帰還ポータル祭壇からのみ開始できます。</yellow>"
   start-triggered: "<prefix><gold><difficulty> レイドの開始カウントダウンを開始しました。</gold>"
   already-running: "<prefix><red>現在レイドが進行中です。</red>"

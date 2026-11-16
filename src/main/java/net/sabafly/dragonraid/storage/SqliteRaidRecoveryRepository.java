@@ -11,14 +11,24 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import net.sabafly.dragonraid.protection.BlockPosKey;
 
 /**
  * SQLite-backed {@link RaidRecoveryRepository} sharing the plugin's {@link SqliteDatabase}.
+ *
+ * <p>Per-player async upserts and deletes are serialized per UUID in submission order so an
+ * earlier delete can never overwrite a later upsert when executed on a multi-threaded executor.
  */
 public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepository {
 
+    private static final long DRAIN_TIMEOUT_MS = 3000L;
+
     private final SqliteDatabase database;
+    private final Map<UUID, CompletableFuture<Void>> playerCleanupChains = new ConcurrentHashMap<>();
 
     public SqliteRaidRecoveryRepository(SqliteDatabase database) {
         this.database = Objects.requireNonNull(database, "database");
@@ -155,7 +165,7 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     @Override
     public CompletableFuture<Void> upsertPendingPlayerCleanupAsync(PendingPlayerCleanup cleanup) {
         Objects.requireNonNull(cleanup, "cleanup");
-        return database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
+        return enqueuePlayerCleanupOp(cleanup.playerId(), () -> database.withWriteTransaction((conn, tx) -> {
             String sql = """
                 INSERT INTO pending_player_cleanups (
                     uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone
@@ -183,6 +193,7 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     @Override
     public void replacePendingPlayerCleanupsSync(Collection<PendingPlayerCleanup> cleanups) {
         Objects.requireNonNull(cleanups, "cleanups");
+        drainPlayerCleanupChains();
         List<PendingPlayerCleanup> copy = List.copyOf(cleanups);
         database.withWriteTransaction((conn, tx) -> {
             try (Statement clear = conn.createStatement()) {
@@ -214,7 +225,7 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     @Override
     public CompletableFuture<Void> deletePendingPlayerCleanupAsync(UUID playerId) {
         Objects.requireNonNull(playerId, "playerId");
-        return database.runAsync(() -> database.withWriteTransaction((conn, tx) -> {
+        return enqueuePlayerCleanupOp(playerId, () -> database.withWriteTransaction((conn, tx) -> {
             String sql = "DELETE FROM pending_player_cleanups WHERE uuid = ?";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, playerId.toString());
@@ -222,5 +233,39 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
             }
             return null;
         }));
+    }
+
+    private CompletableFuture<Void> enqueuePlayerCleanupOp(UUID playerId, Runnable dbWrite) {
+        CompletableFuture<Void> gate = new CompletableFuture<>();
+        CompletableFuture<Void> next = new CompletableFuture<>();
+        CompletableFuture<Void> prev = playerCleanupChains.put(playerId, next);
+        CompletableFuture<Void> ready = (prev == null)
+                ? gate
+                : prev.handle((ok, err) -> null).thenCompose(ignored -> gate);
+        CompletableFuture<Void> writeFuture = ready.thenCompose(ignored -> database.runAsync(dbWrite));
+        writeFuture.whenComplete((ok, err) -> {
+            playerCleanupChains.remove(playerId, next);
+            if (err != null) {
+                next.completeExceptionally(err);
+            } else {
+                next.complete(null);
+            }
+        });
+        gate.complete(null);
+        return next;
+    }
+
+    private void drainPlayerCleanupChains() {
+        CompletableFuture<?>[] active = playerCleanupChains.values().toArray(CompletableFuture[]::new);
+        if (active.length == 0) {
+            return;
+        }
+        try {
+            CompletableFuture.allOf(active).get(DRAIN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException ignored) {
+            // Proceed to synchronous snapshot write so shutdown still saves latest state.
+        }
     }
 }

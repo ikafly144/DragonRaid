@@ -410,6 +410,13 @@ class DefaultRaidCommandHandlerTest {
         verify(enc).triggerStart(player);
         verify(enc).adminStart(admin, net.sabafly.dragonraid.config.BossConfig.Difficulty.HARD);
         verify(enc).adminReset(admin);
+
+        // Arena region edits are blocked when encounterManager rejects tryBeginArenaRegionUpdate()
+        when(enc.tryBeginArenaRegionUpdate()).thenReturn(false);
+        double radiusBefore = configManager.pluginConfig().regions().arena().radius();
+        wired.adminSetArenaRadius(admin, 99.0);
+        wired.adminSetArenaBounds(admin, -50, 0, -50, 50, 200, 50);
+        assertEquals(radiusBefore, configManager.pluginConfig().regions().arena().radius(), 1e-6);
     }
 
     private static List<String> captureMessages(CommandSender sender) {

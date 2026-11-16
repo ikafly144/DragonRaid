@@ -27,6 +27,7 @@ command:
   start-too-few-players: "<prefix><red>Not enough players to start the raid (<current>/<min> required).</red>"
   start-too-many-players: "<prefix><red>Too many players in the raid area (<current>/<max> allowed).</red>"
   region-invalid-arg: "<prefix><red>Invalid region parameter: <details></red>"
+  region-locked-during-raid: "<prefix><red>Arena region bounds cannot be modified while a raid is active or temporary blocks are pending rollback.</red>"
   altar-only-mode: "<prefix><yellow>Currently, raids can only be started from the Exit Portal Altar.</yellow>"
   start-triggered: "<prefix><gold>Started pull countdown for <difficulty> raid.</gold>"
   already-running: "<prefix><red>A raid encounter is already in progress.</red>"

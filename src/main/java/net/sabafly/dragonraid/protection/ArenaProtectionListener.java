@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.protection;
 
 import java.util.Iterator;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
@@ -23,6 +24,8 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockFormEvent;
 import org.bukkit.event.block.BlockFromToEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
+import org.bukkit.event.block.BlockPistonRetractEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
@@ -269,13 +272,42 @@ public final class ArenaProtectionListener implements Listener {
             return;
         }
         Block clicked = event.getClickedBlock();
-        if (clicked == null || !regionService.isInArena(clicked.getLocation())) {
+        if (clicked == null || (!regionService.isInArena(clicked.getLocation()) && !regionService.isInSafeZone(clicked.getLocation()))) {
             return;
         }
         if (protection().disableBedAndAnchorExplosions() && isBedOrAnchor(clicked.getType())) {
             event.setCancelled(true);
             messageService.send(event.getPlayer(), "raid.bed-blocked");
         }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPistonExtend(BlockPistonExtendEvent event) {
+        if (shouldCancelPistonMovement(event.getBlock(), event.getBlocks())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPistonRetract(BlockPistonRetractEvent event) {
+        if (shouldCancelPistonMovement(event.getBlock(), event.getBlocks())) {
+            event.setCancelled(true);
+        }
+    }
+
+    private boolean shouldCancelPistonMovement(Block piston, List<Block> movedBlocks) {
+        if (!protectionActive.getAsBoolean() || !protection().protectOriginalArenaTerrain()) {
+            return false;
+        }
+        if (regionService.isInArena(piston.getLocation()) && !blockTracker.isTracked(piston.getLocation())) {
+            return true;
+        }
+        for (Block block : movedBlocks) {
+            if (regionService.isInArena(block.getLocation()) && !blockTracker.isTracked(block.getLocation())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isBedOrAnchor(Material material) {

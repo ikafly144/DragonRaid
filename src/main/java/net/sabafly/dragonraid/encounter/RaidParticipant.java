@@ -16,6 +16,7 @@ public final class RaidParticipant {
     private volatile ParticipantState state = ParticipantState.ALIVE;
     private volatile boolean online = true;
     private volatile boolean rescueInProgress;
+    private volatile boolean initialSnapshotReady;
 
     // Captured original player flags to restore cleanly on revive, end, reset, or rejoin.
     private volatile @Nullable GameMode previousGameMode;
@@ -68,6 +69,14 @@ public final class RaidParticipant {
 
     public void setRescueInProgress(boolean rescueInProgress) {
         this.rescueInProgress = rescueInProgress;
+    }
+
+    public boolean isInitialSnapshotReady() {
+        return initialSnapshotReady;
+    }
+
+    public void markInitialSnapshotReady() {
+        this.initialSnapshotReady = true;
     }
 
     public boolean isStateCaptured() {

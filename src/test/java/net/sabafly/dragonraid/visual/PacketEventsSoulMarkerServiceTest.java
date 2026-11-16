@@ -127,6 +127,57 @@ class PacketEventsSoulMarkerServiceTest {
         assertEquals(List.of("DESTROY:Alice:1000:1001"), events);
     }
 
+    @Test
+    void relocationDestroysAndRespawns_andFailedSpawnRetriesNextUpdate() {
+        UUID downedId = UUID.randomUUID();
+        Location initialLoc = new Location(endWorld, 0.0, 64.0, 0.0);
+        Location movedLoc = new Location(endWorld, 12.0, 66.0, -4.0);
+        Player viewer = mockViewer("Alice", new Location(endWorld, 5.0, 64.0, 0.0));
+
+        java.util.concurrent.atomic.AtomicBoolean failNextSpawn = new java.util.concurrent.atomic.AtomicBoolean(true);
+        List<String> transportLog = new ArrayList<>();
+        AtomicInteger nextId = new AtomicInteger(2000);
+        PacketEventsSoulMarkerService resilientService = new PacketEventsSoulMarkerService(
+                configManager,
+                messageService,
+                java.util.logging.Logger.getLogger("SoulRetryTest"),
+                new MarkerTransport() {
+                    @Override
+                    public void spawnMarker(
+                            Player v, int soulId, UUID sUuid, int textId, UUID tUuid,
+                            Location loc, boolean glow, Component label) {
+                        if (failNextSpawn.getAndSet(false)) {
+                            throw new IllegalStateException("Transient Netty failure");
+                        }
+                        transportLog.add("SPAWN:" + loc.getX() + "," + loc.getZ());
+                    }
+
+                    @Override
+                    public void updateLabel(Player v, int textId, Component label) {
+                        transportLog.add("UPDATE");
+                    }
+
+                    @Override
+                    public void destroyMarker(Player v, int soulId, int textId) {
+                        transportLog.add("DESTROY");
+                    }
+                },
+                nextId::getAndIncrement);
+
+        // First attempt throws during spawn -> viewer must NOT be added to viewerIds
+        resilientService.spawnOrUpdateMarker(downedId, "Steve", initialLoc, 45, 0.0, List.of(viewer));
+        assertTrue(transportLog.isEmpty());
+
+        // Second attempt retries spawnMarker cleanly
+        resilientService.spawnOrUpdateMarker(downedId, "Steve", initialLoc, 44, 0.2, List.of(viewer));
+        assertEquals(List.of("SPAWN:0.0,0.0"), transportLog);
+
+        // Relocating marker destroys old marker and respawns at moved location
+        transportLog.clear();
+        resilientService.spawnOrUpdateMarker(downedId, "Steve", movedLoc, 43, 0.4, List.of(viewer));
+        assertEquals(List.of("DESTROY", "SPAWN:12.0,-4.0"), transportLog);
+    }
+
     private Player mockViewer(String name, Location loc) {
         Player p = mock(Player.class);
         UUID id = UUID.randomUUID();

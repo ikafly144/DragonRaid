@@ -33,6 +33,7 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockFromToEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
@@ -177,6 +178,16 @@ class ArenaProtectionListenerTest {
         listener.onBlockBreak(inactiveBreak);
         assertFalse(inactiveBreak.isCancelled());
         verify(player, never()).sendMessage(any(Component.class));
+    }
+
+    @Test
+    void cancelsPistonMovementAffectingOriginalArenaTerrain() {
+        Block piston = mockBlock(20, 64, 20, Material.PISTON);
+        Block originalTarget = mockBlock(21, 64, 20, Material.END_STONE);
+        BlockPistonExtendEvent extend = new BlockPistonExtendEvent(
+                piston, List.of(originalTarget), org.bukkit.block.BlockFace.EAST);
+        listener.onPistonExtend(extend);
+        assertTrue(extend.isCancelled());
     }
 
     private Block mockBlock(int x, int y, int z, Material material) {

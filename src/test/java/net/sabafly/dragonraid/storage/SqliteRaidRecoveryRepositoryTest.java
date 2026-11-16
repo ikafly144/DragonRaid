@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -78,5 +79,24 @@ class SqliteRaidRecoveryRepositoryTest {
 
         assertEquals(List.of(b2), reopened.loadPendingBlockRollbacksSync());
         assertEquals(Map.of(player2, c2), reopened.loadPendingPlayerCleanupsSync());
+    }
+
+    @Test
+    void perUuidPlayerCleanupOpsExecuteInSubmissionOrderEvenUnderThreadPool() {
+        executor = Executors.newFixedThreadPool(8);
+        database = new SqliteDatabase(tempDir.resolve("ordered.db"), 4, executor);
+        SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(database);
+
+        UUID player = UUID.randomUUID();
+        PendingPlayerCleanup finalRecord = new PendingPlayerCleanup(player, "ADVENTURE", true, false, true, true);
+
+        // Rapid interleaved upsert -> delete -> upsert on multi-threaded pool must preserve finalRecord
+        CompletableFuture<Void> f1 = repo.upsertPendingPlayerCleanupAsync(
+                new PendingPlayerCleanup(player, "SURVIVAL", false, true, false, false));
+        CompletableFuture<Void> f2 = repo.deletePendingPlayerCleanupAsync(player);
+        CompletableFuture<Void> f3 = repo.upsertPendingPlayerCleanupAsync(finalRecord);
+        CompletableFuture.allOf(f1, f2, f3).join();
+
+        assertEquals(Map.of(player, finalRecord), repo.loadPendingPlayerCleanupsSync());
     }
 }
