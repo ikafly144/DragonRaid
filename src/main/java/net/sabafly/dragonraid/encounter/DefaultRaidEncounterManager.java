@@ -27,12 +27,16 @@ import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.title.Title;
+import net.sabafly.dragonraid.boss.DragonBossController;
 import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.PluginConfig.EncounterSettings;
 import net.sabafly.dragonraid.config.PluginConfig.ProtectionSettings;
 import net.sabafly.dragonraid.config.PluginConfig.ReviveSettings;
 import net.sabafly.dragonraid.config.PluginConfig.ScalingSettings;
+import net.sabafly.dragonraid.gimmick.NormalGimmickExecutor;
+import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
+import net.sabafly.dragonraid.hud.RaidHudService;
 import net.sabafly.dragonraid.i18n.MessageService;
 import net.sabafly.dragonraid.protection.BlockPosKey;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
@@ -41,9 +45,13 @@ import net.sabafly.dragonraid.scaling.RaidScalingCalculator;
 import net.sabafly.dragonraid.scaling.ScaledEncounterParameters;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
+import net.sabafly.dragonraid.storage.Difficulty;
+import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository.PendingBlockRollback;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository.PendingPlayerCleanup;
+import net.sabafly.dragonraid.timeline.RaidTimelineEngine;
+import net.sabafly.dragonraid.timeline.TimelineListener;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
@@ -54,8 +62,12 @@ import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.boss.DragonBattle;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.EnderCrystal;
 import org.bukkit.entity.EnderDragon;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Cancellable;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
@@ -82,6 +94,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private final TemporaryBlockTracker blockTracker;
     private final SoulMarkerService soulMarkerService;
     private final @Nullable RaidRecoveryRepository recoveryRepository;
+    private final @Nullable PlayerDataRepository playerDataRepository;
+    private final @Nullable DragonBossController bossController;
+    private final @Nullable RaidHudService hudService;
+    private final @Nullable RaidCrystalManager crystalManager;
+    private final @Nullable NormalGimmickExecutor gimmickExecutor;
     private final Logger logger;
     private final Supplier<@Nullable World> endWorldSupplier;
     private final Supplier<Collection<? extends Player>> onlinePlayersSupplier;
@@ -91,7 +108,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     private volatile RaidState state = RaidState.IDLE;
     private volatile @Nullable BossConfig.Difficulty activeDifficulty;
+    private volatile @Nullable BossConfig activeBossConfig;
     private volatile @Nullable ScaledEncounterParameters activeScaling;
+    private volatile @Nullable RaidTimelineEngine activeTimeline;
+    private volatile @Nullable UUID announcedFirstClearDragonId;
     private final AtomicInteger remainingRevives = new AtomicInteger(0);
     private final AtomicLong encounterGeneration = new AtomicLong(0L);
     private final AtomicInteger arenaUpdatesInFlight = new AtomicInteger(0);
@@ -146,6 +166,47 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 blockTracker,
                 soulMarkerService,
                 recoveryRepository,
+                null,
+                null,
+                null,
+                null,
+                null,
+                logger,
+                () -> Bukkit.getWorld(configManager.pluginConfig().world().endWorldName()),
+                Bukkit::getOnlinePlayers,
+                Bukkit::getPlayer,
+                System::currentTimeMillis,
+                DefaultRaidEncounterManager::hasLivingDragonInWorld
+        );
+    }
+
+    public DefaultRaidEncounterManager(
+            ConfigManager configManager,
+            MessageService messageService,
+            RaidScheduler scheduler,
+            RaidRegionService regionService,
+            TemporaryBlockTracker blockTracker,
+            SoulMarkerService soulMarkerService,
+            @Nullable RaidRecoveryRepository recoveryRepository,
+            @Nullable PlayerDataRepository playerDataRepository,
+            @Nullable DragonBossController bossController,
+            @Nullable RaidHudService hudService,
+            @Nullable RaidCrystalManager crystalManager,
+            @Nullable NormalGimmickExecutor gimmickExecutor,
+            Logger logger) {
+        this(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                recoveryRepository,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
                 logger,
                 () -> Bukkit.getWorld(configManager.pluginConfig().world().endWorldName()),
                 Bukkit::getOnlinePlayers,
@@ -169,6 +230,47 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             Function<UUID, @Nullable Player> playerLookup,
             LongSupplier clockMillis,
             Predicate<World> livingDragonPredicate) {
+        this(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                recoveryRepository,
+                null,
+                null,
+                null,
+                null,
+                null,
+                logger,
+                endWorldSupplier,
+                onlinePlayersSupplier,
+                playerLookup,
+                clockMillis,
+                livingDragonPredicate
+        );
+    }
+
+    DefaultRaidEncounterManager(
+            ConfigManager configManager,
+            MessageService messageService,
+            RaidScheduler scheduler,
+            RaidRegionService regionService,
+            TemporaryBlockTracker blockTracker,
+            SoulMarkerService soulMarkerService,
+            @Nullable RaidRecoveryRepository recoveryRepository,
+            @Nullable PlayerDataRepository playerDataRepository,
+            @Nullable DragonBossController bossController,
+            @Nullable RaidHudService hudService,
+            @Nullable RaidCrystalManager crystalManager,
+            @Nullable NormalGimmickExecutor gimmickExecutor,
+            Logger logger,
+            Supplier<@Nullable World> endWorldSupplier,
+            Supplier<Collection<? extends Player>> onlinePlayersSupplier,
+            Function<UUID, @Nullable Player> playerLookup,
+            LongSupplier clockMillis,
+            Predicate<World> livingDragonPredicate) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
@@ -176,6 +278,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         this.blockTracker = Objects.requireNonNull(blockTracker, "blockTracker");
         this.soulMarkerService = Objects.requireNonNull(soulMarkerService, "soulMarkerService");
         this.recoveryRepository = recoveryRepository;
+        this.playerDataRepository = playerDataRepository;
+        this.bossController = bossController;
+        this.hudService = hudService;
+        this.crystalManager = crystalManager;
+        this.gimmickExecutor = gimmickExecutor;
         this.logger = Objects.requireNonNull(logger, "logger");
         this.endWorldSupplier = Objects.requireNonNull(endWorldSupplier, "endWorldSupplier");
         this.onlinePlayersSupplier = Objects.requireNonNull(onlinePlayersSupplier, "onlinePlayersSupplier");
@@ -325,13 +432,33 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     }
 
     @Override
+    public boolean startAltarPull(Player initiator, BossConfig.Difficulty difficulty) {
+        Objects.requireNonNull(initiator, "initiator");
+        Objects.requireNonNull(difficulty, "difficulty");
+        return startPull(initiator, difficulty, true, false);
+    }
+
+    @Override
+    public boolean isFirstClearEncounterAvailable() {
+        if (state != RaidState.IDLE || !configManager.pluginConfig().world().replaceFirstDragon()) {
+            return false;
+        }
+        World endWorld = endWorldSupplier.get();
+        if (endWorld == null || !livingDragonPredicate.test(endWorld)) {
+            return false;
+        }
+        DragonBattle battle = endWorld.getEnderDragonBattle();
+        return battle == null || !battle.hasBeenPreviouslyKilled();
+    }
+
+    @Override
     public void adminStart(CommandSender sender, BossConfig.Difficulty difficulty) {
         Objects.requireNonNull(sender, "sender");
         Objects.requireNonNull(difficulty, "difficulty");
         startPull(sender, difficulty, true, false);
     }
 
-    private void startPull(
+    private boolean startPull(
             CommandSender sender,
             BossConfig.Difficulty difficulty,
             boolean forced,
@@ -341,7 +468,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             if (sender != null) {
                 messageService.send(sender, "command.start-no-players");
             }
-            return;
+            return false;
         }
 
         List<Player> candidates = collectPullCandidates(endWorld);
@@ -349,7 +476,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             if (!triggeredByArenaEntry && sender != null) {
                 messageService.send(sender, "command.start-no-players");
             }
-            return;
+            return false;
         }
         ScalingSettings scaling = configManager.pluginConfig().scaling();
         if (candidates.size() < scaling.minPlayers()) {
@@ -361,7 +488,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                         Placeholder.unparsed("min", String.valueOf(scaling.minPlayers()))
                 );
             }
-            return;
+            return false;
         }
         if (scaling.enforceMaxPlayers() && candidates.size() > scaling.maxPlayers()) {
             if (!triggeredByArenaEntry && sender != null) {
@@ -372,7 +499,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                         Placeholder.unparsed("max", String.valueOf(scaling.maxPlayers()))
                 );
             }
-            return;
+            return false;
         }
 
         int countdownSeconds;
@@ -384,7 +511,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 if (!triggeredByArenaEntry && sender != null) {
                     messageService.send(sender, pendingRollbacks ? "command.rollback-pending" : "command.already-running");
                 }
-                return;
+                return false;
             }
             state = RaidState.COUNTDOWN;
             activeDifficulty = difficulty;
@@ -402,7 +529,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
         if (countdownSeconds <= 0) {
             lockInAndActivate(difficulty, endWorld, countdownGeneration);
-            return;
+            return true;
         }
 
         AtomicInteger remaining = new AtomicInteger(countdownSeconds);
@@ -446,6 +573,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 cancelHandle(scheduled);
             }
         }
+        return true;
     }
 
     private boolean hasPendingBlockRollbacks() {
@@ -556,6 +684,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             participants.clear();
             readyPlayers.clear();
             this.activeDifficulty = difficulty;
+            this.activeBossConfig = bossConfig;
             this.activeScaling = scaled;
             this.remainingRevives.set(scaled.maxRevives());
             this.combatStartedMillis = clockMillis.getAsLong();
@@ -622,6 +751,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             });
         }
 
+        startM3EncounterSystems(endWorld, bossConfig, scaled);
+
         AtomicReference<TaskHandle> monitorHandle = new AtomicReference<>();
         TaskHandle scheduledMonitor = scheduler.runGlobalTimer(() -> {
             if (state != RaidState.ACTIVE || encounterGeneration.get() != activationGen) {
@@ -680,6 +811,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
 
         // 2. Process DOWNED participants: timeout & 2.5s revive channeling + soul marker updates.
+        Set<UUID> channelingRevivers = new HashSet<>();
         for (RaidParticipant downed : participants.values()) {
             if (downed.state() != ParticipantState.DOWNED) {
                 continue;
@@ -704,6 +836,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     downed.setCurrentReviverId(null);
                     sendRateLimitedMessage(channellingAlly, "revive.no-revives-left", now);
                 } else {
+                    channelingRevivers.add(channellingAlly.getUniqueId());
                     if (!channellingAlly.getUniqueId().equals(downed.currentReviverId())) {
                         downed.setCurrentReviverId(channellingAlly.getUniqueId());
                         downed.setReviveProgressSeconds(0.0);
@@ -736,7 +869,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             );
         }
 
-        // 3. Evaluate wipe condition.
+        // 3. Tick M3 Boss AI, Crystal Regeneration, Timeline, Mechanics, and Integrated HUD.
+        tickM3Systems(endWorld, endPlayers, channelingRevivers);
+
+        // 4. Evaluate wipe condition.
         evaluateWipeCondition(endWorld, reviveSettings);
     }
 
@@ -1079,6 +1215,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World targetWorld = endWorld != null ? endWorld : endWorldSupplier.get();
         List<Player> viewers = targetWorld != null ? onlinePlayersInWorld(targetWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
+        cleanupM3Systems(viewers, true);
 
         Location safeSpawn = targetWorld != null ? regionService.safeZoneSpawnLocation(targetWorld) : null;
         restoreAndResetParticipants(safeSpawn);
@@ -1104,6 +1241,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
         List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
+        cleanupM3Systems(viewers, true);
         Location safeSpawn = endWorld != null ? regionService.safeZoneSpawnLocation(endWorld) : null;
         restoreAndResetParticipants(safeSpawn);
         readyPlayers.clear();
@@ -1137,6 +1275,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World endWorld = dragon.getWorld();
         List<Player> viewers = onlinePlayersInWorld(endWorld);
         soulMarkerService.removeAllMarkers(viewers);
+        prepareVictoryM3Cleanup(dragon, endWorld, viewers, difficulty, durationMs);
 
         // On victory, restore participant flags where they stand so they can collect drops/egg.
         restoreAndResetParticipants(null);
@@ -1170,7 +1309,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                         && encounterGeneration.get() == expectedGeneration
                         && !hasPendingBlockRollbacks()) {
                     activeDifficulty = null;
+                    activeBossConfig = null;
                     activeScaling = null;
+                    activeTimeline = null;
                     remainingRevives.set(0);
                     state = RaidState.IDLE;
                 }
@@ -1221,6 +1362,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 sendRateLimitedMessage(player, "raid.late-join-locked", clockMillis.getAsLong());
             }
             return;
+        }
+
+        // Initialize first-clear idle dragon once if players are already in the End on startup.
+        if (currentState == RaidState.IDLE
+                && announcedFirstClearDragonId == null
+                && to.getWorld() != null
+                && regionService.isRaidWorld(to.getWorld())) {
+            maybeInitializeFirstClear(player, to.getWorld());
         }
 
         // Auto-start pull when stepping into the combat arena from outside or from the safe zone.
@@ -1299,6 +1448,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 player.teleportAsync(regionService.safeZoneSpawnLocation(endWorld));
                 messageService.send(player, "raid.late-join-locked");
             });
+            return;
+        }
+
+        if (state == RaidState.IDLE && regionService.isRaidWorld(player.getWorld())) {
+            maybeInitializeFirstClear(player, player.getWorld());
         }
     }
 
@@ -1307,6 +1461,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         Objects.requireNonNull(player, "player");
         UUID id = player.getUniqueId();
         soulMarkerService.invalidateViewer(id);
+        if (hudService != null) {
+            hudService.removeViewer(player);
+        }
         readyPlayers.remove(id);
         snapshots.remove(id);
         lastRightClickMillis.remove(id);
@@ -1338,6 +1495,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         UUID id = player.getUniqueId();
         if (!regionService.isRaidWorld(player.getWorld())) {
             readyPlayers.remove(id);
+            if (hudService != null) {
+                hudService.removeViewer(player);
+            }
             return;
         }
         if ((state == RaidState.ACTIVE || state == RaidState.WIPING || state == RaidState.ENDING)
@@ -1349,6 +1509,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 player.teleportAsync(regionService.safeZoneSpawnLocation(endWorld));
                 messageService.send(player, "raid.late-join-locked");
             });
+            return;
+        }
+        if (state == RaidState.IDLE) {
+            maybeInitializeFirstClear(player, player.getWorld());
         }
     }
 
@@ -1437,6 +1601,40 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     }
 
     @Override
+    public void recordShieldPulse(Player player) {
+        Objects.requireNonNull(player, "player");
+        if (state == RaidState.ACTIVE && gimmickExecutor != null) {
+            gimmickExecutor.recordShieldPulse(player);
+        }
+    }
+
+    @Override
+    public void onCrystalDamage(EnderCrystal crystal, EntityDamageEvent event) {
+        Objects.requireNonNull(crystal, "crystal");
+        Objects.requireNonNull(event, "event");
+        if (crystalManager == null || !crystalManager.isTrackedCrystal(crystal)) {
+            return;
+        }
+        Entity damager = event instanceof EntityDamageByEntityEvent byEntity ? byEntity.getDamager() : null;
+        if (crystalManager.onCrystalDamage(crystal, event.getDamage(), damager)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @Override
+    public void onEntityExplode(Entity entity, Cancellable event) {
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(event, "event");
+        if (entity instanceof EnderCrystal && crystalManager != null && crystalManager.isTrackedCrystal(entity)) {
+            event.setCancelled(true);
+            return;
+        }
+        if (entity instanceof EnderDragon && isProtectionActive() && regionService.isRaidWorld(entity.getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @Override
     public void shutdown() {
         synchronized (stateLock) {
             cancelHandle(countdownTask);
@@ -1463,6 +1661,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World endWorld = endWorldSupplier.get();
         List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
+        cleanupM3Systems(viewers, true);
         if (recoveryRepository != null) {
             List<PendingPlayerCleanup> cleanups = new ArrayList<>(pendingCleanupPlayers.size());
             for (Map.Entry<UUID, SavedCleanupRecord> entry : pendingCleanupPlayers.entrySet()) {
@@ -1774,6 +1973,273 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
         EnderDragon dragon = battle.getEnderDragon();
         return dragon != null && !dragon.isDead();
+    }
+
+    private void startM3EncounterSystems(
+            World endWorld,
+            BossConfig bossConfig,
+            ScaledEncounterParameters scaled) {
+        if (bossController == null || gimmickExecutor == null || crystalManager == null) {
+            return;
+        }
+        crystalManager.clearAll();
+        gimmickExecutor.resetState();
+        bossController.bindOrSpawn(endWorld, scaled.scaledBossHp());
+
+        RaidTimelineEngine timeline = new RaidTimelineEngine(bossConfig, new TimelineListener() {
+            @Override
+            public void onPhaseChanged(BossConfig.PhaseConfig newPhase) {
+                gimmickExecutor.cancelActiveMechanic();
+                bossController.setPosture(NormalGimmickExecutor.defaultPostureForPhase(newPhase));
+                List<Player> viewers = onlinePlayersInWorld(endWorld);
+                if (hudService != null) {
+                    hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
+                    hudService.announcePhaseTransition(newPhase, viewers);
+                }
+            }
+
+            @Override
+            public void onCastStart(
+                    BossConfig.TimelineStep step,
+                    @Nullable BossConfig.AbilitySettings ability,
+                    double totalCastSeconds) {
+                List<Player> viewers = onlinePlayersInWorld(endWorld);
+                List<Player> alive = aliveOnlineParticipants();
+                gimmickExecutor.startCast(step, ability, endWorld, alive, viewers, scaled, bossController);
+                if (hudService != null) {
+                    hudService.updateCastBossBar(ability, totalCastSeconds, totalCastSeconds, viewers);
+                }
+            }
+
+            @Override
+            public void onCastTick(
+                    BossConfig.TimelineStep step,
+                    @Nullable BossConfig.AbilitySettings ability,
+                    double remainingSeconds,
+                    double totalCastSeconds) {
+                if (hudService != null) {
+                    hudService.updateCastBossBar(ability, remainingSeconds, totalCastSeconds, onlinePlayersInWorld(endWorld));
+                }
+            }
+
+            @Override
+            public void onCastComplete(
+                    BossConfig.TimelineStep step,
+                    @Nullable BossConfig.AbilitySettings ability) {
+                List<Player> viewers = onlinePlayersInWorld(endWorld);
+                if (hudService != null) {
+                    hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
+                }
+                RaidTimelineEngine engine = activeTimeline;
+                if (engine != null) {
+                    gimmickExecutor.completeCast(
+                            step,
+                            ability,
+                            aliveOnlineParticipants(),
+                            viewers,
+                            scaled,
+                            bossController,
+                            engine
+                    );
+                }
+            }
+
+            @Override
+            public void onCastInterrupted(
+                    BossConfig.TimelineStep step,
+                    @Nullable BossConfig.AbilitySettings ability) {
+                if (hudService != null) {
+                    hudService.updateCastBossBar(null, 0.0, 0.0, onlinePlayersInWorld(endWorld));
+                }
+                gimmickExecutor.cancelActiveMechanic();
+            }
+
+            @Override
+            public void onInstantAction(
+                    BossConfig.TimelineStep step,
+                    @Nullable BossConfig.AbilitySettings ability) {
+                gimmickExecutor.executeInstantAction(step, ability, endWorld, scaled, onlinePlayersInWorld(endWorld));
+            }
+        });
+        this.activeTimeline = timeline;
+        timeline.start();
+        if (hudService != null) {
+            BossConfig.PhaseConfig phase = timeline.currentPhase();
+            if (phase != null) {
+                hudService.updateMainBossBar(bossConfig, phase, bossController.hpRatio(), onlinePlayersInWorld(endWorld));
+            }
+        }
+    }
+
+    private void tickM3Systems(World endWorld, List<Player> endPlayers, Set<UUID> channelingRevivers) {
+        if (bossController == null) {
+            return;
+        }
+        bossController.tick(MONITOR_STEP_SECONDS);
+        if (crystalManager != null) {
+            double regen = crystalManager.tick(MONITOR_STEP_SECONDS, bossController.bossLocation(), endPlayers);
+            if (regen > 0.0) {
+                bossController.healBoss(regen);
+            }
+        }
+        List<Player> alive = aliveOnlineParticipants();
+        if (gimmickExecutor != null) {
+            gimmickExecutor.sampleShieldStates(alive);
+        }
+        RaidTimelineEngine timeline = this.activeTimeline;
+        if (timeline != null) {
+            timeline.tick(MONITOR_STEP_SECONDS, bossController.hpRatio());
+        }
+        BossConfig bossConfig = this.activeBossConfig;
+        BossConfig.PhaseConfig currentPhase = timeline != null ? timeline.currentPhase() : null;
+        if (gimmickExecutor != null) {
+            gimmickExecutor.tickActiveTelegraphs(alive, endPlayers, bossController);
+            if (bossConfig != null) {
+                gimmickExecutor.tickSoftEnrage(MONITOR_STEP_SECONDS, bossConfig, currentPhase, endWorld, alive, endPlayers);
+            }
+        }
+        if (hudService != null && bossConfig != null && currentPhase != null) {
+            hudService.updateMainBossBar(bossConfig, currentPhase, bossController.hpRatio(), endPlayers);
+            List<Player> participantPlayers = onlineParticipantPlayers();
+            hudService.updateActionBars(
+                    participantPlayers,
+                    id -> {
+                        RaidParticipant p = participants.get(id);
+                        return p != null ? p.state() : ParticipantState.ALIVE;
+                    },
+                    remainingRevives.get(),
+                    playerId -> {
+                        if (gimmickExecutor == null) {
+                            return null;
+                        }
+                        Player player = playerLookup.apply(playerId);
+                        return player != null ? gimmickExecutor.extraStatusFor(player) : null;
+                    },
+                    channelingRevivers::contains
+            );
+        }
+    }
+
+    private void prepareVictoryM3Cleanup(
+            EnderDragon dragon,
+            World endWorld,
+            List<Player> viewers,
+            BossConfig.Difficulty difficulty,
+            long durationMs) {
+        if (playerDataRepository != null) {
+            Difficulty storageDifficulty = difficulty == BossConfig.Difficulty.HARD ? Difficulty.HARD : Difficulty.NORMAL;
+            for (RaidParticipant participant : participants.values()) {
+                playerDataRepository.recordClear(
+                        participant.playerId(),
+                        participant.name(),
+                        storageDifficulty,
+                        durationMs
+                ).exceptionally(ex -> {
+                    logger.log(Level.WARNING, "Failed to record raid clear for " + participant.name(), ex);
+                    return null;
+                });
+            }
+        }
+        RaidTimelineEngine timeline = this.activeTimeline;
+        this.activeTimeline = null;
+        if (timeline != null) {
+            timeline.stop();
+        }
+        if (gimmickExecutor != null) {
+            gimmickExecutor.resetState();
+        }
+        if (crystalManager != null) {
+            crystalManager.clearAll();
+        }
+        if (hudService != null) {
+            hudService.clearAll(viewers);
+        }
+        if (bossController != null) {
+            bossController.prepareForVanillaDefeat();
+        }
+        if (configManager.pluginConfig().world().preserveVanillaProgression() && dragon.getDragonBattle() == null) {
+            DragonBattle battle = endWorld.getEnderDragonBattle();
+            if (battle != null) {
+                Location portalAnchor = battle.getEndPortalLocation() != null
+                        ? battle.getEndPortalLocation()
+                        : new Location(endWorld, 0.0, 64.0, 0.0);
+                scheduler.runAtRegion(portalAnchor, () -> {
+                    if (battle.getEndPortalLocation() == null) {
+                        battle.generateEndPortal(true);
+                    }
+                    battle.spawnNewGateway();
+                    if (!battle.hasBeenPreviouslyKilled()) {
+                        battle.setPreviouslyKilled(true);
+                    }
+                });
+            }
+        }
+    }
+
+    private void cleanupM3Systems(List<Player> viewers, boolean removeDragonIfSummoned) {
+        RaidTimelineEngine timeline = this.activeTimeline;
+        this.activeTimeline = null;
+        if (timeline != null) {
+            timeline.stop();
+        }
+        if (gimmickExecutor != null) {
+            gimmickExecutor.resetState();
+        }
+        if (crystalManager != null) {
+            crystalManager.clearAll();
+        }
+        if (hudService != null) {
+            hudService.clearAll(viewers);
+        }
+        if (bossController != null) {
+            bossController.cleanup(removeDragonIfSummoned);
+        }
+    }
+
+    private void maybeInitializeFirstClear(Player player, World endWorld) {
+        if (!configManager.pluginConfig().world().replaceFirstDragon() || bossController == null) {
+            return;
+        }
+        DragonBattle battle = endWorld.getEnderDragonBattle();
+        if (battle == null || battle.hasBeenPreviouslyKilled()) {
+            return;
+        }
+        EnderDragon dragon = battle.getEnderDragon();
+        if (dragon == null || dragon.isDead()) {
+            return;
+        }
+        bossController.holdFirstClearIdle(endWorld);
+        UUID dragonId = dragon.getUniqueId();
+        if (!dragonId.equals(announcedFirstClearDragonId)) {
+            announcedFirstClearDragonId = dragonId;
+            scheduler.runAtEntity(player, () -> messageService.send(player, "raid.first-clear-init"));
+        }
+    }
+
+    private List<Player> aliveOnlineParticipants() {
+        List<Player> list = new ArrayList<>();
+        for (RaidParticipant p : participants.values()) {
+            if (p.isOnline() && p.state() == ParticipantState.ALIVE) {
+                Player player = playerLookup.apply(p.playerId());
+                if (player != null && player.isOnline()) {
+                    list.add(player);
+                }
+            }
+        }
+        return list;
+    }
+
+    private List<Player> onlineParticipantPlayers() {
+        List<Player> list = new ArrayList<>();
+        for (RaidParticipant p : participants.values()) {
+            if (p.isOnline()) {
+                Player player = playerLookup.apply(p.playerId());
+                if (player != null && player.isOnline()) {
+                    list.add(player);
+                }
+            }
+        }
+        return list;
     }
 
     private static String formatDuration(long durationMs) {

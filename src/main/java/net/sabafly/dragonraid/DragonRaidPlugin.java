@@ -2,6 +2,10 @@ package net.sabafly.dragonraid;
 
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.PacketEventsAPI;
+import net.sabafly.dragonraid.altar.AltarGuiService;
+import net.sabafly.dragonraid.altar.AltarInteractionListener;
+import net.sabafly.dragonraid.boss.DragonBossController;
+import net.sabafly.dragonraid.boss.FoliaDragonBossController;
 import net.sabafly.dragonraid.command.DefaultRaidCommandHandler;
 import net.sabafly.dragonraid.command.DragonRaidCommandRegistrar;
 import net.sabafly.dragonraid.command.RaidCommandHandler;
@@ -10,6 +14,10 @@ import net.sabafly.dragonraid.config.PluginConfig;
 import net.sabafly.dragonraid.encounter.DefaultRaidEncounterManager;
 import net.sabafly.dragonraid.encounter.RaidEncounterManager;
 import net.sabafly.dragonraid.encounter.RaidPlayerLifecycleListener;
+import net.sabafly.dragonraid.gimmick.NormalGimmickExecutor;
+import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
+import net.sabafly.dragonraid.hud.AdventureRaidHudService;
+import net.sabafly.dragonraid.hud.RaidHudService;
 import net.sabafly.dragonraid.i18n.MessageService;
 import net.sabafly.dragonraid.permission.RaidPermissions;
 import net.sabafly.dragonraid.protection.ArenaProtectionListener;
@@ -24,7 +32,9 @@ import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
 import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
+import net.sabafly.dragonraid.visual.PacketEventsTelegraphService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
+import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import java.nio.file.Path;
 import java.util.logging.Level;
 import org.bukkit.entity.Player;
@@ -45,7 +55,13 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private RaidRegionService regionService;
     private TemporaryBlockTracker temporaryBlockTracker;
     private SoulMarkerService soulMarkerService;
+    private SpatialTelegraphService telegraphService;
+    private RaidHudService hudService;
+    private DragonBossController bossController;
+    private RaidCrystalManager crystalManager;
+    private NormalGimmickExecutor gimmickExecutor;
     private DefaultRaidEncounterManager encounterManager;
+    private AltarGuiService altarGuiService;
 
     @Override
     public void onEnable() {
@@ -95,6 +111,17 @@ public final class DragonRaidPlugin extends JavaPlugin {
             this.regionService = new DefaultRaidRegionService(configManager, raidScheduler);
             this.temporaryBlockTracker = new TemporaryBlockTracker();
             this.soulMarkerService = new PacketEventsSoulMarkerService(configManager, messageService, getLogger());
+            this.telegraphService = new PacketEventsTelegraphService(configManager, getLogger());
+            this.hudService = new AdventureRaidHudService(messageService, raidScheduler);
+            this.bossController = new FoliaDragonBossController(configManager, raidScheduler, getLogger());
+            this.crystalManager = new RaidCrystalManager(configManager, raidScheduler, telegraphService, getLogger());
+            this.gimmickExecutor = new NormalGimmickExecutor(
+                configManager,
+                messageService,
+                raidScheduler,
+                telegraphService,
+                crystalManager
+            );
             this.encounterManager = new DefaultRaidEncounterManager(
                 configManager,
                 messageService,
@@ -103,6 +130,11 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 temporaryBlockTracker,
                 soulMarkerService,
                 recoveryRepository,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
                 getLogger()
             );
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
@@ -129,6 +161,20 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 playerDataRepository,
                 getLogger(),
                 encounterManager
+            );
+            this.altarGuiService = new AltarGuiService(
+                configManager,
+                messageService,
+                raidScheduler,
+                regionService,
+                playerDataRepository,
+                encounterManager,
+                commandHandler,
+                getLogger()
+            );
+            getServer().getPluginManager().registerEvents(
+                new AltarInteractionListener(altarGuiService, encounterManager),
+                this
             );
             new DragonRaidCommandRegistrar(
                 commandHandler,

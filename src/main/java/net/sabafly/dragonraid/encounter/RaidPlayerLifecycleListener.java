@@ -2,6 +2,7 @@ package net.sabafly.dragonraid.encounter;
 
 import java.util.Objects;
 import net.sabafly.dragonraid.i18n.MessageService;
+import org.bukkit.entity.EnderCrystal;
 import org.bukkit.entity.EnderDragon;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -11,6 +12,7 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
@@ -65,7 +67,14 @@ public final class RaidPlayerLifecycleListener implements Listener {
     public void onEntityDamage(EntityDamageEvent event) {
         if (event.getEntity() instanceof Player player) {
             encounterManager.onPlayerDamage(player, event);
+        } else if (event.getEntity() instanceof EnderCrystal crystal) {
+            encounterManager.onCrystalDamage(crystal, event);
         }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onEntityExplode(EntityExplodeEvent event) {
+        encounterManager.onEntityExplode(event.getEntity(), event);
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -87,6 +96,7 @@ public final class RaidPlayerLifecycleListener implements Listener {
         Action action = event.getAction();
         if (action == Action.RIGHT_CLICK_AIR || action == Action.RIGHT_CLICK_BLOCK) {
             encounterManager.recordRightClickPulse(player);
+            encounterManager.recordShieldPulse(player);
         }
     }
 
