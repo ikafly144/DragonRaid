@@ -10,6 +10,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import java.nio.file.Path;
@@ -30,6 +31,7 @@ import net.sabafly.dragonraid.gimmick.NormalGimmickExecutor;
 import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
 import net.sabafly.dragonraid.hud.AdventureRaidHudService;
 import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.instance.RaidInstanceManager;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.DefaultRaidRegionService;
 import net.sabafly.dragonraid.region.RaidRegionService;
@@ -43,6 +45,8 @@ import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.boss.DragonBattle;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.EnderCrystal;
@@ -263,5 +267,206 @@ class RaidEncounterM3IntegrationTest {
         // Encounter must abort back to IDLE instead of remaining stuck in ACTIVE without a boss
         assertEquals(RaidState.IDLE, manager.state());
         verify(bossController).cleanup(true);
+    }
+
+    @Test
+    void suppressesLeaveArenaWipeWhileAwaitingInstanceEntry() {
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_test1");
+        lenient().when(instWorld.getMinHeight()).thenReturn(0);
+        lenient().when(instWorld.getMaxHeight()).thenReturn(256);
+
+        RaidInstanceManager instanceMgr = mock(RaidInstanceManager.class);
+        CompletableFuture<RaidInstanceManager.RaidInstance> pendingInst = new CompletableFuture<>();
+        RaidInstanceManager.RaidInstance inst = new RaidInstanceManager.RaidInstance(
+                instWorld,
+                new Location(instWorld, 0.0, 64.0, 0.0),
+                40.0,
+                List.of()
+        );
+        lenient().when(instanceMgr.getOrCreateInstance()).thenReturn(pendingInst);
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenAnswer(inv ->
+                pendingInst.isDone() ? instWorld : endWorld);
+        lenient().when(bossController.bindOrSpawn(any(), any(), anyDouble()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        DefaultRaidEncounterManager instEncounter = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                null,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
+                instanceMgr,
+                Logger.getLogger("InstanceEntryWipeTest"),
+                () -> endWorld,
+                onlinePlayers::values,
+                onlinePlayers::get,
+                nowMillis::get,
+                w -> true
+        );
+
+        // Alice starts at the End safe zone / altar outside the combat arena before instance teleport completes.
+        Location altarSafeSpawn = regionService.safeZoneSpawnLocation(endWorld);
+        Player alice = addPlayer("Alice", altarSafeSpawn.getX(), altarSafeSpawn.getY(), altarSafeSpawn.getZ());
+        CompletableFuture<Boolean> teleportFuture = new CompletableFuture<>();
+        lenient().when(alice.teleportAsync(any())).thenReturn(teleportFuture);
+        CommandSender admin = mock(CommandSender.class);
+
+        instEncounter.adminStart(admin, BossConfig.Difficulty.NORMAL);
+        Runnable countdownTimer = capturedGlobalTimers.getFirst();
+        for (int i = 0; i < 8; i++) {
+            countdownTimer.run();
+        }
+        assertEquals(RaidState.ACTIVE, instEncounter.state());
+
+        // Must NOT wipe while instance creation is still pending
+        instEncounter.tickActiveEncounter();
+        assertEquals(RaidState.ACTIVE, instEncounter.state());
+
+        // Must still NOT wipe while teleportAsync is still in flight
+        pendingInst.complete(inst);
+        instEncounter.tickActiveEncounter();
+        assertEquals(RaidState.ACTIVE, instEncounter.state());
+
+        // Once teleport finishes, normal arena-leave wipe tracking resumes
+        lenient().when(alice.getWorld()).thenReturn(instWorld);
+        teleportFuture.complete(true);
+        lenient().when(alice.getLocation()).thenReturn(new Location(instWorld, 500.0, 64.0, 500.0));
+        instEncounter.tickActiveEncounter();
+        assertEquals(RaidState.WIPING, instEncounter.state());
+    }
+
+    @Test
+    void defersInstanceDestroyUntilBlockRollbackCompletesOnVictory() {
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_test2");
+        lenient().when(instWorld.getMinHeight()).thenReturn(0);
+        lenient().when(instWorld.getMaxHeight()).thenReturn(256);
+        Block dummyBlock = mock(Block.class);
+        lenient().when(instWorld.getBlockAt(any(Location.class))).thenReturn(dummyBlock);
+        lenient().when(instWorld.getBlockAt(any(Integer.class), any(Integer.class), any(Integer.class)))
+                .thenReturn(dummyBlock);
+
+        EnderDragon instDragon = mock(EnderDragon.class);
+        lenient().when(instDragon.getUniqueId()).thenReturn(UUID.randomUUID());
+        lenient().when(instDragon.getWorld()).thenReturn(instWorld);
+
+        List<Runnable> deferredChunkRollbackTasks = new ArrayList<>();
+        List<Runnable> deferredGlobalLaterTasks = new ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredScheduler.runAtRegion(any(Location.class), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredScheduler.runAtRegion(any(World.class), any(Integer.class), any(Integer.class), any()))
+                .thenAnswer(inv -> {
+                    deferredChunkRollbackTasks.add(inv.getArgument(3));
+                    return mock(TaskHandle.class);
+                });
+        List<Runnable> globalTimers = new ArrayList<>();
+        lenient().when(deferredScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            globalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredScheduler.runGlobalLater(any(), eq(100L))).thenAnswer(inv -> {
+            deferredGlobalLaterTasks.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+
+        RaidInstanceManager instanceMgr = mock(RaidInstanceManager.class);
+        RaidInstanceManager.RaidInstance inst = new RaidInstanceManager.RaidInstance(
+                instWorld,
+                new Location(instWorld, 0.0, 64.0, 0.0),
+                40.0,
+                List.of()
+        );
+        lenient().when(instanceMgr.getOrCreateInstance()).thenReturn(CompletableFuture.completedFuture(inst));
+        lenient().when(instanceMgr.activeInstance()).thenReturn(inst);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenReturn(instWorld);
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.destroyInstance(eq(inst), any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossController.bindOrSpawn(any(), any(), anyDouble()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        DefaultRaidRegionService deferredRegionService = new DefaultRaidRegionService(configManager, deferredScheduler);
+        TemporaryBlockTracker localTracker = new TemporaryBlockTracker(
+                data -> "minecraft:stone",
+                dataStr -> mock(BlockData.class)
+        );
+        DefaultRaidEncounterManager instEncounter = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                deferredScheduler,
+                deferredRegionService,
+                localTracker,
+                soulMarkerService,
+                null,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
+                instanceMgr,
+                Logger.getLogger("VictoryDestroyOrderTest"),
+                () -> endWorld,
+                onlinePlayers::values,
+                onlinePlayers::get,
+                nowMillis::get,
+                w -> true
+        );
+
+        Player alice = addPlayer("Alice", 5.0, 64.0, 0.0);
+        instEncounter.adminStart(mock(CommandSender.class), BossConfig.Difficulty.NORMAL);
+        Runnable countdownTimer = globalTimers.getFirst();
+        for (int i = 0; i < 8; i++) {
+            countdownTimer.run();
+        }
+        assertEquals(RaidState.ACTIVE, instEncounter.state());
+
+        localTracker.tryRecordPlayerPlacement(
+                new Location(instWorld, 2.0, 64.0, 2.0),
+                alice.getUniqueId(),
+                mock(BlockData.class),
+                64,
+                512
+        );
+        deferredChunkRollbackTasks.clear();
+
+        instEncounter.onDragonDefeated(instDragon);
+
+        // Before block rollback finishes, neither delayed destroy nor destroyInstance may run
+        assertEquals(RaidState.ENDING, instEncounter.state());
+        assertTrue(deferredGlobalLaterTasks.isEmpty());
+        verify(instanceMgr, never()).destroyInstance(any(), any());
+        assertEquals(1, deferredChunkRollbackTasks.size());
+
+        // Complete block rollback -> now 100-tick delayed destroy is scheduled
+        deferredChunkRollbackTasks.getFirst().run();
+        assertEquals(1, deferredGlobalLaterTasks.size());
+        verify(instanceMgr, never()).destroyInstance(any(), any());
+
+        // Execute 100-tick delayed destroy -> instance destroyed and encounter returns to IDLE
+        deferredGlobalLaterTasks.getFirst().run();
+        verify(instanceMgr).destroyInstance(eq(inst), any());
+        assertEquals(RaidState.IDLE, instEncounter.state());
     }
 }

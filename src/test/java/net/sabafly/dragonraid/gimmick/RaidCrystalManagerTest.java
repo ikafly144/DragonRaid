@@ -189,4 +189,40 @@ class RaidCrystalManagerTest {
         assertTrue(crystalManager.isTrackedCrystal(existing));
         assertEquals(4, crystalManager.activeCount());
     }
+
+    @Test
+    void pendingExistingCrystalIdPreventsDoubleReservationAcrossWaves() {
+        List<Runnable> deferredEntityBinds = new ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            deferredEntityBinds.add(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredScheduler.runAtRegion(any(Location.class), any())).thenReturn(null);
+
+        RaidCrystalManager deferredMgr = new RaidCrystalManager(
+                configManager,
+                deferredScheduler,
+                telegraphService,
+                Logger.getLogger("PendingBindIdTest")
+        );
+
+        EnderCrystal existing = mock(EnderCrystal.class);
+        UUID existingId = UUID.randomUUID();
+        lenient().when(existing.getUniqueId()).thenReturn(existingId);
+        lenient().when(existing.getWorld()).thenReturn(endWorld);
+        lenient().when(existing.getLocation()).thenReturn(new Location(endWorld, 10.0, 72.0, 0.0));
+        lenient().when(existing.isDead()).thenReturn(false);
+        lenient().when(endWorld.getEntitiesByClass(EnderCrystal.class)).thenReturn(List.of(existing));
+
+        // First call reserves existing crystal (1) + schedules 1 spawn (which returns null and decrements pendingSpawns)
+        deferredMgr.spawnWave(endWorld, 2, 80.0, 4.0);
+        // Second call before existing crystal bind completes must NOT reserve the same UUID a second time
+        deferredMgr.spawnWave(endWorld, 2, 80.0, 4.0);
+
+        assertEquals(1, deferredEntityBinds.size());
+        deferredEntityBinds.getFirst().run();
+        assertTrue(deferredMgr.isTrackedCrystal(existing));
+        assertEquals(1, deferredMgr.activeCount());
+    }
 }

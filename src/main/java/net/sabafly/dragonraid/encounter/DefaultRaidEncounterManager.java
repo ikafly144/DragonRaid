@@ -121,6 +121,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private final AtomicLong encounterGeneration = new AtomicLong(0L);
     private final AtomicInteger arenaUpdatesInFlight = new AtomicInteger(0);
     private volatile long combatStartedMillis;
+    private volatile boolean awaitingInstanceEntry;
 
     private final Set<UUID> readyPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, RaidParticipant> participants = new ConcurrentHashMap<>();
@@ -774,6 +775,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             this.activeScaling = scaled;
             this.remainingRevives.set(scaled.maxRevives());
             this.combatStartedMillis = clockMillis.getAsLong();
+            this.awaitingInstanceEntry = instanceManager != null
+                    && bossController != null
+                    && gimmickExecutor != null
+                    && crystalManager != null;
             this.state = RaidState.ACTIVE;
             for (Player member : party) {
                 UUID memberId = member.getUniqueId();
@@ -1234,6 +1239,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
         boolean noAlivePlayers = onlineAlive == 0;
         boolean allLeftArena = reviveSettings.wipeIfAllLeaveArena()
+                && !awaitingInstanceEntry
                 && allInitialSnapshotsReady
                 && onlineAlive > 0
                 && onlineAliveInArena == 0;
@@ -1308,6 +1314,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             cancelHandle(wipeTask);
             wipeTask = null;
+            awaitingInstanceEntry = false;
             endingGeneration = encounterGeneration.incrementAndGet();
             state = RaidState.ENDING;
         }
@@ -1336,6 +1343,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             countdownTask = null;
             monitorTask = null;
             wipeTask = null;
+            awaitingInstanceEntry = false;
             resetGeneration = encounterGeneration.incrementAndGet();
             state = RaidState.ENDING;
         }
@@ -1374,6 +1382,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             cancelHandle(monitorTask);
             monitorTask = null;
+            awaitingInstanceEntry = false;
             defeatGeneration = encounterGeneration.incrementAndGet();
             state = RaidState.ENDING;
             difficulty = activeDifficulty != null ? activeDifficulty : BossConfig.Difficulty.NORMAL;
@@ -1415,17 +1424,20 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             World mainEnd = endWorldSupplier.get();
             Location returnLoc = mainEnd != null ? regionService.safeZoneSpawnLocation(mainEnd) : null;
             if (defeatedInstance != null && defeatedInstance.world().equals(endWorld)) {
-                CompletableFuture<Void> destroyFuture = new CompletableFuture<>();
-                TaskHandle handle = scheduler.runGlobalLater(
-                        () -> instanceManager.destroyInstance(defeatedInstance, returnLoc)
-                                .whenComplete((ignored, err) -> destroyFuture.complete(null)),
-                        100L
-                );
-                if (handle == null) {
-                    instanceManager.destroyInstance(defeatedInstance, returnLoc)
-                            .whenComplete((ignored, err) -> destroyFuture.complete(null));
-                }
-                endingFuture = CompletableFuture.allOf(rollbackFuture, destroyFuture);
+                endingFuture = rollbackFuture.handle((ignored, err) -> (Void) null)
+                        .thenCompose(ignored -> {
+                            CompletableFuture<Void> destroyFuture = new CompletableFuture<>();
+                            TaskHandle handle = scheduler.runGlobalLater(
+                                    () -> instanceManager.destroyInstance(defeatedInstance, returnLoc)
+                                            .whenComplete((v, destroyErr) -> destroyFuture.complete(null)),
+                                    100L
+                            );
+                            if (handle == null) {
+                                return instanceManager.destroyInstance(defeatedInstance, returnLoc)
+                                        .handle((v, destroyErr) -> null);
+                            }
+                            return destroyFuture;
+                        });
             }
         }
         completeEndingWhenRolledBack(defeatGeneration, endingFuture);
@@ -2147,21 +2159,42 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 }
                 World instWorld = instance.world();
                 Location entrySpawn = regionService.safeZoneSpawnLocation(instWorld);
+                List<CompletableFuture<Void>> teleportFutures = new ArrayList<>();
                 for (Player member : party) {
                     if (member != null && member.isOnline() && !instWorld.equals(member.getWorld())) {
-                        scheduler.runAtEntity(member, () -> {
+                        CompletableFuture<Void> memberTpDone = new CompletableFuture<>();
+                        teleportFutures.add(memberTpDone);
+                        TaskHandle tpHandle = scheduler.runAtEntity(member, () -> {
+                            CompletableFuture<Boolean> tpFuture = null;
                             synchronized (stateLock) {
-                                if (state != RaidState.ACTIVE
-                                        || encounterGeneration.get() != expectedGeneration
-                                        || !participants.containsKey(member.getUniqueId())) {
-                                    return;
+                                if (state == RaidState.ACTIVE
+                                        && encounterGeneration.get() == expectedGeneration
+                                        && participants.containsKey(member.getUniqueId())) {
+                                    tpFuture = member.teleportAsync(entrySpawn);
+                                    updateSnapshot(member, entrySpawn);
                                 }
-                                member.teleportAsync(entrySpawn);
-                                updateSnapshot(member, entrySpawn);
                             }
-                        });
+                            if (tpFuture != null) {
+                                tpFuture.whenComplete((ok, tpErr) -> memberTpDone.complete(null));
+                            } else {
+                                memberTpDone.complete(null);
+                            }
+                        }, () -> memberTpDone.complete(null));
+                        if (tpHandle == null) {
+                            memberTpDone.complete(null);
+                        }
                     }
                 }
+                CompletableFuture<Void> allEntered = teleportFutures.isEmpty()
+                        ? CompletableFuture.completedFuture(null)
+                        : CompletableFuture.allOf(teleportFutures.toArray(CompletableFuture[]::new));
+                allEntered.whenComplete((ignored, tpErr) -> {
+                    synchronized (stateLock) {
+                        if (encounterGeneration.get() == expectedGeneration) {
+                            this.awaitingInstanceEntry = false;
+                        }
+                    }
+                });
                 activateM3InCombatWorld(instWorld, instance.arenaCenter(), bossConfig, scaled, expectedGeneration);
             });
             return;
@@ -2293,6 +2326,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             cancelHandle(monitorTask);
             monitorTask = null;
+            awaitingInstanceEntry = false;
             endingGeneration = encounterGeneration.incrementAndGet();
             state = RaidState.ENDING;
         }

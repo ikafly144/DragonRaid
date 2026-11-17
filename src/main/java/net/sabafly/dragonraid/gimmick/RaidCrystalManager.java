@@ -2,9 +2,11 @@ package net.sabafly.dragonraid.gimmick;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,6 +72,7 @@ public final class RaidCrystalManager {
 
     private final Object spawnLock = new Object();
     private final Map<UUID, TrackedCrystal> trackedCrystals = new ConcurrentHashMap<>();
+    private final Set<UUID> pendingCrystalIds = new HashSet<>();
     private final List<PendingLightning> pendingLightnings = new ArrayList<>();
     private final List<PendingCrystalBeam> pendingBeams = new ArrayList<>();
     private final AtomicInteger waveCounter = new AtomicInteger(0);
@@ -219,12 +222,15 @@ public final class RaidCrystalManager {
                 continue;
             }
             UUID crystalId = crystal.getUniqueId();
-            if (crystalId == null || trackedCrystals.containsKey(crystalId)) {
+            if (crystalId == null
+                    || trackedCrystals.containsKey(crystalId)
+                    || pendingCrystalIds.contains(crystalId)) {
                 continue;
             }
             if (trackedCrystals.size() + pendingSpawns >= maxTotal) {
                 break;
             }
+            pendingCrystalIds.add(crystalId);
             pendingSpawns++;
             Runnable bindTask = () -> {
                 try {
@@ -244,24 +250,30 @@ public final class RaidCrystalManager {
                         trackedCrystals.putIfAbsent(crystalId, new TrackedCrystal(crystal, loc.clone()));
                     }
                 } finally {
-                    synchronized (spawnLock) {
-                        if (generation.get() == expectedGen && pendingSpawns > 0) {
-                            pendingSpawns--;
-                        }
-                    }
+                    releasePendingCrystal(crystalId, expectedGen);
                 }
             };
-            TaskHandle handle = scheduler.runAtEntity(crystal, bindTask, () -> {
-                synchronized (spawnLock) {
-                    if (generation.get() == expectedGen && pendingSpawns > 0) {
-                        pendingSpawns--;
-                    }
-                }
-            });
+            TaskHandle handle = scheduler.runAtEntity(
+                    crystal,
+                    bindTask,
+                    () -> releasePendingCrystal(crystalId, expectedGen)
+            );
             if (handle == null) {
-                if (generation.get() == expectedGen && pendingSpawns > 0) {
-                    pendingSpawns--;
-                }
+                releasePendingCrystalLocked(crystalId, expectedGen);
+            }
+        }
+    }
+
+    private void releasePendingCrystal(UUID crystalId, int expectedGen) {
+        synchronized (spawnLock) {
+            releasePendingCrystalLocked(crystalId, expectedGen);
+        }
+    }
+
+    private void releasePendingCrystalLocked(UUID crystalId, int expectedGen) {
+        if (generation.get() == expectedGen) {
+            if (pendingCrystalIds.remove(crystalId) && pendingSpawns > 0) {
+                pendingSpawns--;
             }
         }
     }
@@ -607,6 +619,7 @@ public final class RaidCrystalManager {
         synchronized (spawnLock) {
             generation.incrementAndGet();
             pendingSpawns = 0;
+            pendingCrystalIds.clear();
             snapshot = new ArrayList<>(trackedCrystals.values());
             trackedCrystals.clear();
             pendingLightnings.clear();
