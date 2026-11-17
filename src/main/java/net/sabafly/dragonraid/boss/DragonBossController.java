@@ -22,6 +22,17 @@ public interface DragonBossController {
     CompletableFuture<Void> bindOrSpawn(World endWorld, double scaledMaxHp);
 
     /**
+     * Binds or spawns the boss centered around {@code customArenaCenter} (used for dynamic raid
+     * instances whose arena center may differ from {@code config.yml}).
+     */
+    default CompletableFuture<Void> bindOrSpawn(
+            World endWorld,
+            @Nullable Location customArenaCenter,
+            double scaledMaxHp) {
+        return bindOrSpawn(endWorld, scaledMaxHp);
+    }
+
+    /**
      * Captures an unkilled first-clear EnderDragon into a controlled idle orbit before the raid pull begins.
      */
     void holdFirstClearIdle(World endWorld);

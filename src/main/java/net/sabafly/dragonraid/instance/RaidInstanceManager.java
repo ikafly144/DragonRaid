@@ -34,7 +34,7 @@ public interface RaidInstanceManager {
     @Nullable World activeCombatWorld(@Nullable World fallbackEndWorld);
 
     /**
-     * Returns {@code true} if {@code world} is the active temporary raid instance world.
+     * Returns {@code true} if {@code world} is a DragonRaid-managed temporary raid instance world.
      */
     boolean isInstanceWorld(@Nullable World world);
 
@@ -44,6 +44,16 @@ public interface RaidInstanceManager {
      * prepared (e.g. for fast retry after a wipe).
      */
     CompletableFuture<RaidInstance> getOrCreateInstance();
+
+    /**
+     * Evacuates players to {@code returnLocation} and deletes only {@code targetInstance}
+     * (without disturbing any newer active instance created afterwards).
+     */
+    default CompletableFuture<Void> destroyInstance(
+            @Nullable RaidInstance targetInstance,
+            @Nullable Location returnLocation) {
+        return destroyActiveInstance(returnLocation);
+    }
 
     /**
      * Destroys and deletes the active temporary raid instance world after evacuating any remaining

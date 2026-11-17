@@ -62,6 +62,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     private volatile @Nullable Location diveTargetLocation;
     private volatile @Nullable Float customHoverYaw;
     private volatile @Nullable Float customHoverPitch;
+    private volatile @Nullable RegionConfig.Point3D customArenaCenter;
     private volatile double maxHp = DEFAULT_FALLBACK_MAX_HP;
     private volatile double currentHp = DEFAULT_FALLBACK_MAX_HP;
     private volatile @Nullable Location cachedLocation;
@@ -101,14 +102,27 @@ public final class FoliaDragonBossController implements DragonBossController {
 
     @Override
     public CompletableFuture<Void> bindOrSpawn(World endWorld, double scaledMaxHp) {
+        return bindOrSpawn(endWorld, null, scaledMaxHp);
+    }
+
+    @Override
+    public CompletableFuture<Void> bindOrSpawn(
+            World endWorld,
+            @Nullable Location customCenter,
+            double scaledMaxHp) {
         Objects.requireNonNull(endWorld, "endWorld");
         double validMaxHp = Math.max(1.0, scaledMaxHp);
-        Location anchor = arenaAnchor(endWorld, LOW_ORBIT_Y_OFFSET);
+        RegionConfig.Point3D explicitCenter = customCenter != null
+                ? new RegionConfig.Point3D(customCenter.getX(), customCenter.getY(), customCenter.getZ())
+                : null;
 
         final long bindGeneration;
+        final Location anchor;
         synchronized (lock) {
             cancelMovementTask();
             bindGeneration = generation.incrementAndGet();
+            this.customArenaCenter = explicitCenter;
+            anchor = arenaAnchor(endWorld, LOW_ORBIT_Y_OFFSET);
             this.maxHp = validMaxHp;
             this.currentHp = validMaxHp;
             this.targetPosture = DragonPosture.LOW_ORBIT;
@@ -206,6 +220,9 @@ public final class FoliaDragonBossController implements DragonBossController {
             long expectedGeneration) {
         synchronized (lock) {
             if (generation.get() != expectedGeneration) {
+                if (wasSummoned) {
+                    removeSummonedOnEntityThread(dragon);
+                }
                 return CompletableFuture.completedFuture(null);
             }
             cancelMovementTask();
@@ -220,12 +237,18 @@ public final class FoliaDragonBossController implements DragonBossController {
                 if (dragon.isDead()) {
                     entityReady.completeExceptionally(new IllegalStateException("Bound dragon died during initialization"));
                 } else {
+                    if (wasSummoned) {
+                        dragon.remove();
+                    }
                     entityReady.complete(null);
                 }
                 return;
             }
             synchronized (lock) {
                 if (this.activeDragon != dragon || generation.get() != expectedGeneration) {
+                    if (wasSummoned) {
+                        dragon.remove();
+                    }
                     entityReady.complete(null);
                     return;
                 }
@@ -460,10 +483,26 @@ public final class FoliaDragonBossController implements DragonBossController {
     }
 
     private RegionConfig.Point3D arenaCenterFor(World world) {
-        if (world != null && world.getName().toLowerCase(java.util.Locale.ROOT).contains("instance")) {
-            return new RegionConfig.Point3D(0.0, 64.0, 0.0);
+        RegionConfig.Point3D explicit = this.customArenaCenter;
+        if (explicit != null) {
+            return explicit;
         }
         return configManager.pluginConfig().regions().arena().center();
+    }
+
+    private void removeSummonedOnEntityThread(EnderDragon dragon) {
+        if (dragon == null || dragon.isDead()) {
+            return;
+        }
+        if (Bukkit.getServer() != null && Bukkit.isOwnedByCurrentRegion(dragon)) {
+            dragon.remove();
+            return;
+        }
+        scheduler.runAtEntity(dragon, () -> {
+            if (!dragon.isDead()) {
+                dragon.remove();
+            }
+        });
     }
 
     static Location stepTowards(Location current, Location target, double maxStep) {
@@ -718,6 +757,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.diveTargetLocation = null;
             this.customHoverYaw = null;
             this.customHoverPitch = null;
+            this.customArenaCenter = null;
             this.preStaggerPosture = null;
             this.targetPosture = DragonPosture.LOW_ORBIT;
             this.cachedLocation = null;

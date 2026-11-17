@@ -174,4 +174,19 @@ class RaidCrystalManagerTest {
         assertEquals(0, deferredMgr.activeCount());
         assertEquals(0, spawned.size());
     }
+
+    @Test
+    void bindsPreExistingCrystalsOnEntityThreadAndRespectsTargetCount() {
+        EnderCrystal existing = mock(EnderCrystal.class);
+        UUID existingId = UUID.randomUUID();
+        lenient().when(existing.getUniqueId()).thenReturn(existingId);
+        lenient().when(existing.getWorld()).thenReturn(endWorld);
+        lenient().when(existing.getLocation()).thenReturn(new Location(endWorld, 10.0, 72.0, 0.0));
+        lenient().when(existing.isDead()).thenReturn(false);
+        lenient().when(endWorld.getEntitiesByClass(EnderCrystal.class)).thenReturn(List.of(existing));
+
+        crystalManager.spawnWave(endWorld, 4, 80.0, 4.0);
+        assertTrue(crystalManager.isTrackedCrystal(existing));
+        assertEquals(4, crystalManager.activeCount());
+    }
 }

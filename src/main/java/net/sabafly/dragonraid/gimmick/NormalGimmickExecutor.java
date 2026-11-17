@@ -26,6 +26,7 @@ import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
 import net.sabafly.dragonraid.i18n.MessageService;
 import net.sabafly.dragonraid.instance.CircularArenaBuilder;
+import net.sabafly.dragonraid.instance.TheNextLvlRaidInstanceManager;
 import net.sabafly.dragonraid.scaling.ScaledEncounterParameters;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.timeline.RaidTimelineEngine;
@@ -88,11 +89,13 @@ public final class NormalGimmickExecutor {
     private final Map<UUID, Long> shieldRaiseMillis = new ConcurrentHashMap<>();
     private final Map<UUID, Boolean> lastBlockingState = new ConcurrentHashMap<>();
     private final List<ActiveFollowUpEffect> followUpEffects = new ArrayList<>();
+    private final Set<Integer> liveVirtualEntityIds = ConcurrentHashMap.newKeySet();
     private final AtomicInteger towerRotationIndex = new AtomicInteger(0);
     private final AtomicInteger mechanicGeneration = new AtomicInteger(0);
     private final AtomicInteger sessionGeneration = new AtomicInteger(0);
 
     private volatile @Nullable ActiveMechanic activeMechanic;
+    private volatile List<Player> lastViewers = List.of();
     private volatile double safeArenaRadius;
     private volatile double softEnrageAccumulatorSeconds;
     private volatile boolean softEnrageStarted;
@@ -139,8 +142,16 @@ public final class NormalGimmickExecutor {
      * Resets mechanic state and soft enrage radius for a fresh encounter attempt.
      */
     public void resetState() {
+        resetState(this.lastViewers);
+    }
+
+    /**
+     * Resets mechanic state and destroys any active client-side virtual entities for {@code viewers}.
+     */
+    public void resetState(Collection<? extends Player> viewers) {
         this.sessionGeneration.incrementAndGet();
         this.mechanicGeneration.incrementAndGet();
+        destroyAllLiveVirtualEntities(viewers);
         this.activeMechanic = null;
         synchronized (followUpEffects) {
             this.followUpEffects.clear();
@@ -227,6 +238,7 @@ public final class NormalGimmickExecutor {
         Objects.requireNonNull(scaled, "scaled");
         Objects.requireNonNull(bossController, "bossController");
 
+        rememberViewers(viewers);
         cleanupActiveVirtualEntities(viewers);
         this.mechanicGeneration.incrementAndGet();
         String action = step.action().toUpperCase(Locale.ROOT);
@@ -306,27 +318,35 @@ public final class NormalGimmickExecutor {
             case "ENDERMAN_ERUPTION" -> {
                 String pattern = ability != null ? ability.getString("pattern", "CHASING") : "CHASING";
                 ActiveMechanic mech = ActiveMechanic.eruption(ability, pattern.toUpperCase(Locale.ROOT), aliveParticipants, center, telegraphService, viewers, castSec);
+                registerMechanicVirtualEntities(mech);
                 this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.enderman.scream", 0.85f);
             }
             case "EXAFLARE_WAVES" -> {
                 List<ExaflareLane> lanes = generateExaflareLanes(center, telegraphService, viewers);
-                this.activeMechanic = ActiveMechanic.exaflare(ability, lanes, castSec);
+                ActiveMechanic mech = ActiveMechanic.exaflare(ability, lanes, castSec);
+                registerMechanicVirtualEntities(mech);
+                this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.evoker.prepare_attack", 0.9f);
             }
             case "KNOCKBACK_COMBO", "KNOCKBACK_ROAR" -> {
                 bossController.setPosture(DragonPosture.CENTER_LANDED);
                 List<Integer> arrowIds = spawnKnockbackArrows(center, telegraphService, viewers);
-                this.activeMechanic = ActiveMechanic.knockback(ability, center, arrowIds, castSec);
+                ActiveMechanic mech = ActiveMechanic.knockback(ability, center, arrowIds, castSec);
+                registerMechanicVirtualEntities(mech);
+                this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.warden.roar", 1.1f);
             }
             case "ENDERMAN_ROTATING_BEAM" -> {
                 List<RotatingEndermanBeam> beams = spawnPlayerTetheredEndermen(aliveParticipants, center, telegraphService, viewers);
-                this.activeMechanic = ActiveMechanic.rotatingEndermen(ability, beams, castSec);
+                ActiveMechanic mech = ActiveMechanic.rotatingEndermen(ability, beams, castSec);
+                registerMechanicVirtualEntities(mech);
+                this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.enderman.stare", 1.1f);
             }
             case "DUAL_DIVE_DICE" -> {
                 ActiveMechanic mech = ActiveMechanic.dualDiveDice(ability, aliveParticipants, telegraphService, viewers, castSec);
+                registerMechanicVirtualEntities(mech);
                 if (!mech.targetIds.isEmpty()) {
                     Player firstOdd = findPlayerById(aliveParticipants, mech.targetIds.getFirst());
                     if (firstOdd != null && firstOdd.getLocation() != null) {
@@ -380,6 +400,7 @@ public final class NormalGimmickExecutor {
             List<Player> aliveParticipants,
             Collection<? extends Player> viewers,
             DragonBossController bossController) {
+        rememberViewers(viewers);
         Location bossLoc = bossController.bossLocation();
         if (bossLoc != null) {
             telegraphService.renderDragonAuraTrail(bossLoc, viewers);
@@ -435,18 +456,27 @@ public final class NormalGimmickExecutor {
                     float currentYaw = mech.laserStartYaw + (float) (mech.laserTotalSweepDegrees * progress);
                     bossController.setHoverAim(currentYaw, 35.0f);
                     Location beamEnd = computeLaserGroundImpact(bossLoc, currentYaw, 36.0);
+                    double beamWidth = mech.ability != null ? mech.ability.getDouble("beam-width", 2.6) : 2.6;
                     if (progress < 0.30) {
                         telegraphService.renderLineAoE(bossLoc, beamEnd, 1.8, TelegraphStyle.WARNING, viewers);
+                        telegraphService.renderCircleAoE(beamEnd, beamWidth, TelegraphStyle.WARNING, viewers);
                     } else {
                         telegraphService.renderLaserBeam(bossLoc, beamEnd, viewers);
-                        double beamWidth = mech.ability != null ? mech.ability.getDouble("beam-width", 2.6) : 2.6;
+                        telegraphService.renderCircleAoE(beamEnd, beamWidth * 1.2, TelegraphStyle.DANGER, viewers);
                         double tickDamage = (mech.ability != null ? mech.ability.damage(24.0) : 24.0) * 0.20;
+                        double impactRadiusSq = (beamWidth * 1.2) * (beamWidth * 1.2);
                         int expectedMechGen = mechanicGeneration.get();
                         for (Player p : aliveParticipants) {
                             if (p != null && p.isOnline() && p.getLocation() != null
-                                    && bossLoc.getWorld().equals(p.getLocation().getWorld())
-                                    && distanceToSegment2D(p.getLocation(), bossLoc, beamEnd) <= beamWidth) {
-                                applyMechanicDamageOnEntityThread(p, tickDamage, expectedMechGen, currentSessionGen);
+                                    && bossLoc.getWorld().equals(p.getLocation().getWorld())) {
+                                Location pLoc = p.getLocation();
+                                Location pBody = pLoc.clone().add(0.0, 1.0, 0.0);
+                                boolean hit3dBeam = distanceToSegment3D(pBody, bossLoc, beamEnd) <= beamWidth;
+                                boolean hitGroundScorch = Math.abs(pLoc.getY() - beamEnd.getY()) <= 3.0
+                                        && horizontalDistSq(pLoc, beamEnd) <= impactRadiusSq;
+                                if (hit3dBeam || hitGroundScorch) {
+                                    applyMechanicDamageOnEntityThread(p, tickDamage, expectedMechGen, currentSessionGen);
+                                }
                             }
                         }
                     }
@@ -747,8 +777,19 @@ public final class NormalGimmickExecutor {
      * Cancels any in-progress mechanic (e.g. on phase change, stagger, or wipe).
      */
     public void cancelActiveMechanic() {
+        cancelActiveMechanic(this.lastViewers);
+    }
+
+    /**
+     * Cancels any in-progress mechanic and destroys its client-side virtual entities for {@code viewers}.
+     */
+    public void cancelActiveMechanic(Collection<? extends Player> viewers) {
         this.mechanicGeneration.incrementAndGet();
+        ActiveMechanic current = this.activeMechanic;
         this.activeMechanic = null;
+        if (current != null) {
+            destroyMechanicVirtualEntities(current, viewers);
+        }
     }
 
     /**
@@ -1098,7 +1139,7 @@ public final class NormalGimmickExecutor {
             }
         }
         if (!arrowIds.isEmpty()) {
-            telegraphService.destroyVirtualEntities(viewers, arrowIds.stream().mapToInt(Integer::intValue).toArray());
+            destroyVirtualEntitiesAndUnregister(viewers, arrowIds.stream().mapToInt(Integer::intValue).toArray());
         }
         synchronized (followUpEffects) {
             followUpEffects.add(ActiveFollowUpEffect.exaflareWaves(lanes, damage));
@@ -1268,14 +1309,23 @@ public final class NormalGimmickExecutor {
                                 applySessionDamageOnEntityThread(p, effect.damage, currentSessionGen);
                             }
                         }
-                        telegraphService.destroyVirtualEntities(viewers, effect.virtualEntityId);
+                        destroyVirtualEntitiesAndUnregister(viewers, effect.virtualEntityId);
                         finished.add(effect);
                     }
                 }
                 case RING_CASCADE -> {
-                    double ringR = effect.elapsedSeconds < 0.9 ? effect.innerRadius : effect.maxRadius;
-                    telegraphService.renderDonutAoE(effect.origin, Math.max(0.0, ringR - 4.0), ringR + 2.0, TelegraphStyle.DANGER, viewers);
-                    if (effect.elapsedSeconds >= 1.6) {
+                    if (effect.elapsedSeconds < 0.9) {
+                        telegraphService.renderDonutAoE(effect.origin, 7.0, 15.0, TelegraphStyle.WARNING, viewers);
+                    } else if (!effect.ring1Detonated) {
+                        effect.ring1Detonated = true;
+                        detonateRingBand(effect.origin, 7.0, 15.0, effect.damage, aliveParticipants, viewers, currentSessionGen);
+                    } else if (effect.elapsedSeconds < 1.8) {
+                        telegraphService.renderDonutAoE(effect.origin, 15.0, 24.0, TelegraphStyle.WARNING, viewers);
+                    } else if (!effect.ring2Detonated) {
+                        effect.ring2Detonated = true;
+                        detonateRingBand(effect.origin, 15.0, 24.0, effect.damage, aliveParticipants, viewers, currentSessionGen);
+                        finished.add(effect);
+                    } else {
                         finished.add(effect);
                     }
                 }
@@ -1294,7 +1344,8 @@ public final class NormalGimmickExecutor {
                             );
                             telegraphService.renderCircleAoE(burst, 3.6, TelegraphStyle.DANGER, viewers);
                             int eid = telegraphService.spawnVirtualScaledEnderman(burst, 2.2, lane.yawDegrees, true, viewers);
-                            scheduler.runGlobalLater(() -> telegraphService.destroyVirtualEntities(viewers, eid), 10L);
+                            registerVirtualIds(eid);
+                            scheduler.runGlobalLater(() -> destroyVirtualEntitiesAndUnregister(viewers, eid), 10L);
                             double rSq = 3.6 * 3.6;
                             for (Player p : aliveParticipants) {
                                 if (p != null && p.isOnline() && p.getLocation() != null
@@ -1328,7 +1379,7 @@ public final class NormalGimmickExecutor {
                     }
                     if (effect.elapsedSeconds >= effect.durationSeconds) {
                         int[] ids = effect.rotatingBeams.stream().mapToInt(b -> b.virtualEntityId).toArray();
-                        telegraphService.destroyVirtualEntities(viewers, ids);
+                        destroyVirtualEntitiesAndUnregister(viewers, ids);
                         finished.add(effect);
                     }
                 }
@@ -1401,6 +1452,46 @@ public final class NormalGimmickExecutor {
         }
     }
 
+    private void detonateRingBand(
+            Location origin,
+            double innerRadius,
+            double outerRadius,
+            double damage,
+            List<Player> aliveParticipants,
+            Collection<? extends Player> viewers,
+            int expectedSessionGen) {
+        telegraphService.renderDonutAoE(origin, innerRadius, outerRadius, TelegraphStyle.DANGER, viewers);
+        double midRadius = (innerRadius + outerRadius) * 0.5;
+        List<Integer> ringIds = new ArrayList<>(6);
+        for (int i = 0; i < 6; i++) {
+            double angle = (2.0 * Math.PI * i) / 6.0;
+            Location spot = new Location(
+                    origin.getWorld(),
+                    origin.getX() + Math.cos(angle) * midRadius,
+                    origin.getY(),
+                    origin.getZ() + Math.sin(angle) * midRadius
+            );
+            int eid = telegraphService.spawnVirtualScaledEnderman(spot, 2.6, 0.0f, true, viewers);
+            registerVirtualIds(eid);
+            ringIds.add(eid);
+        }
+        int[] idArr = ringIds.stream().mapToInt(Integer::intValue).toArray();
+        scheduler.runGlobalLater(() -> destroyVirtualEntitiesAndUnregister(viewers, idArr), 12L);
+
+        double innerSq = innerRadius * innerRadius;
+        double outerSq = outerRadius * outerRadius;
+        for (Player p : aliveParticipants) {
+            if (p != null && p.isOnline() && p.getLocation() != null
+                    && origin.getWorld() != null
+                    && origin.getWorld().equals(p.getLocation().getWorld())) {
+                double dSq = horizontalDistSq(p.getLocation(), origin);
+                if (dSq >= innerSq && dSq <= outerSq) {
+                    applySessionDamageOnEntityThread(p, damage, expectedSessionGen);
+                }
+            }
+        }
+    }
+
     private void scheduleBambooEruption(
             Location targetLoc,
             @Nullable BossConfig.AbilitySettings ability,
@@ -1410,6 +1501,7 @@ public final class NormalGimmickExecutor {
         double damage = ability != null ? ability.damage(18.0) : 18.0;
         Location under = targetLoc.clone().subtract(0.0, 2.4, 0.0);
         int entityId = telegraphService.spawnVirtualScaledEnderman(under, 2.6, 0.0f, true, viewers);
+        registerVirtualIds(entityId);
         synchronized (followUpEffects) {
             followUpEffects.add(ActiveFollowUpEffect.bambooEruption(targetLoc.clone(), entityId, delaySeconds, damage));
         }
@@ -1606,7 +1698,7 @@ public final class NormalGimmickExecutor {
     // =========================================================================
 
     private Location arenaCenter(World world) {
-        if (world.getName() != null && world.getName().toLowerCase(Locale.ROOT).contains("instance")) {
+        if (TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(world.getName())) {
             return new Location(world, 0.0, CircularArenaBuilder.DEFAULT_FLOOR_Y, 0.0);
         }
         RegionConfig.Point3D c = configManager.pluginConfig().regions().arena().center();
@@ -1775,6 +1867,27 @@ public final class NormalGimmickExecutor {
         return Math.hypot(px - projX, pz - projZ);
     }
 
+    private static double distanceToSegment3D(Location point, Location a, Location b) {
+        double px = point.getX();
+        double py = point.getY();
+        double pz = point.getZ();
+        double ax = a.getX();
+        double ay = a.getY();
+        double az = a.getZ();
+        double dx = b.getX() - ax;
+        double dy = b.getY() - ay;
+        double dz = b.getZ() - az;
+        double lenSq = dx * dx + dy * dy + dz * dz;
+        if (lenSq < 1e-6) {
+            return Math.sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay) + (pz - az) * (pz - az));
+        }
+        double t = Math.max(0.0, Math.min(1.0, ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / lenSq));
+        double projX = ax + t * dx;
+        double projY = ay + t * dy;
+        double projZ = az + t * dz;
+        return Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY) + (pz - projZ) * (pz - projZ));
+    }
+
     private List<Location> generateTowerLocations(World world, int towerCount) {
         Location center = arenaCenter(world);
         double ringRadius = Math.min(TOWER_RING_RADIUS, Math.max(8.0, configManager.pluginConfig().regions().arena().radius() * 0.3));
@@ -1805,14 +1918,41 @@ public final class NormalGimmickExecutor {
         return towers;
     }
 
-    private void cleanupActiveVirtualEntities(Collection<? extends Player> viewers) {
-        ActiveMechanic current = this.activeMechanic;
-        if (current != null) {
-            destroyMechanicVirtualEntities(current, viewers);
+    private void rememberViewers(Collection<? extends Player> viewers) {
+        if (viewers == null || viewers.isEmpty()) {
+            return;
+        }
+        List<Player> copy = new ArrayList<>(viewers.size());
+        for (Player p : viewers) {
+            if (p != null) {
+                copy.add(p);
+            }
+        }
+        if (!copy.isEmpty()) {
+            this.lastViewers = List.copyOf(copy);
         }
     }
 
-    private void destroyMechanicVirtualEntities(ActiveMechanic mech, Collection<? extends Player> viewers) {
+    private void registerVirtualIds(int... ids) {
+        if (ids == null) {
+            return;
+        }
+        for (int id : ids) {
+            if (id >= 0) {
+                liveVirtualEntityIds.add(id);
+            }
+        }
+    }
+
+    private void registerMechanicVirtualEntities(ActiveMechanic mech) {
+        for (int id : collectMechanicVirtualIds(mech)) {
+            if (id >= 0) {
+                liveVirtualEntityIds.add(id);
+            }
+        }
+    }
+
+    private static List<Integer> collectMechanicVirtualIds(ActiveMechanic mech) {
         List<Integer> ids = new ArrayList<>();
         ids.addAll(mech.virtualEntityIds);
         for (EruptionSite s : mech.eruptionSites) {
@@ -1825,8 +1965,60 @@ public final class NormalGimmickExecutor {
                 ids.add(d.displayEntityId);
             }
         }
+        for (ExaflareLane lane : mech.exaflareLanes) {
+            if (lane.arrowEntityId >= 0) {
+                ids.add(lane.arrowEntityId);
+            }
+        }
+        for (RotatingEndermanBeam beam : mech.rotatingBeams) {
+            if (beam.virtualEntityId >= 0) {
+                ids.add(beam.virtualEntityId);
+            }
+        }
+        return ids;
+    }
+
+    private void destroyVirtualEntitiesAndUnregister(Collection<? extends Player> viewers, int... entityIds) {
+        if (entityIds == null || entityIds.length == 0) {
+            return;
+        }
+        for (int id : entityIds) {
+            liveVirtualEntityIds.remove(id);
+        }
+        if (viewers != null && !viewers.isEmpty()) {
+            telegraphService.destroyVirtualEntities(viewers, entityIds);
+        }
+    }
+
+    private void destroyAllLiveVirtualEntities(Collection<? extends Player> viewers) {
+        Collection<? extends Player> effectiveViewers = (viewers != null && !viewers.isEmpty())
+                ? viewers
+                : this.lastViewers;
+        if (liveVirtualEntityIds.isEmpty()) {
+            ActiveMechanic current = this.activeMechanic;
+            if (current != null) {
+                destroyMechanicVirtualEntities(current, effectiveViewers);
+            }
+            return;
+        }
+        int[] ids = liveVirtualEntityIds.stream().mapToInt(Integer::intValue).toArray();
+        liveVirtualEntityIds.clear();
+        if (effectiveViewers != null && !effectiveViewers.isEmpty() && ids.length > 0) {
+            telegraphService.destroyVirtualEntities(effectiveViewers, ids);
+        }
+    }
+
+    private void cleanupActiveVirtualEntities(Collection<? extends Player> viewers) {
+        ActiveMechanic current = this.activeMechanic;
+        if (current != null) {
+            destroyMechanicVirtualEntities(current, viewers);
+        }
+    }
+
+    private void destroyMechanicVirtualEntities(ActiveMechanic mech, Collection<? extends Player> viewers) {
+        List<Integer> ids = collectMechanicVirtualIds(mech);
         if (!ids.isEmpty()) {
-            telegraphService.destroyVirtualEntities(viewers, ids.stream().mapToInt(Integer::intValue).toArray());
+            destroyVirtualEntitiesAndUnregister(viewers, ids.stream().mapToInt(Integer::intValue).toArray());
         }
     }
 
@@ -2240,6 +2432,8 @@ public final class NormalGimmickExecutor {
         double currentRadius;
         double lastStepSeconds;
         int stepIndex;
+        boolean ring1Detonated;
+        boolean ring2Detonated;
 
         private ActiveFollowUpEffect(
                 FollowUpKind kind,

@@ -309,4 +309,33 @@ class FoliaDragonBossControllerTest {
         verify(firstSummoned).remove();
         verify(secondSummoned, never()).remove();
     }
+
+    @Test
+    void customArenaCenterIsUsedExplicitlyWithoutGuessingFromWorldName() {
+        // World named "raid_instance_end" should still use config center when no explicit center is passed
+        World oddlyNamedWorld = mock(World.class);
+        lenient().when(oddlyNamedWorld.getName()).thenReturn("raid_instance_end");
+        EnderDragon dragon = mockDragon(new Location(oddlyNamedWorld, 0.0, 74.0, 0.0), 1200.0);
+
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                scheduler,
+                Logger.getLogger("BossControllerTest"),
+                w -> dragon,
+                (w, loc) -> dragon
+        );
+
+        // Explicit custom center (e.g. from RaidInstance) drives movement to that center
+        Location customCenter = new Location(oddlyNamedWorld, 10.0, 90.0, -15.0);
+        controller.bindOrSpawn(oddlyNamedWorld, customCenter, 1200.0).join();
+        controller.setPosture(DragonPosture.CENTER_LANDED);
+        for (int i = 0; i < 20; i++) {
+            entityTimers.getFirst().run();
+        }
+        Location loc = controller.bossLocation();
+        assertNotNull(loc);
+        assertEquals(10.0, loc.getX(), 1e-3);
+        assertEquals(92.0, loc.getY(), 1e-3);
+        assertEquals(-15.0, loc.getZ(), 1e-3);
+    }
 }

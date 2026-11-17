@@ -1262,7 +1262,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             timeline.stop();
         }
         if (gimmickExecutor != null) {
-            gimmickExecutor.cancelActiveMechanic();
+            List<Player> wipeViewers = endWorld != null ? onlinePlayersInWorld(endWorld) : List.of();
+            gimmickExecutor.cancelActiveMechanic(wipeViewers);
         }
         if (hudService != null && endWorld != null) {
             hudService.updateCastBossBar(null, 0.0, 0.0, onlinePlayersInWorld(endWorld));
@@ -1408,12 +1409,26 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
 
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
+        CompletableFuture<Void> endingFuture = rollbackFuture;
         if (instanceManager != null && instanceManager.isInstanceWorld(endWorld)) {
+            RaidInstanceManager.RaidInstance defeatedInstance = instanceManager.activeInstance();
             World mainEnd = endWorldSupplier.get();
             Location returnLoc = mainEnd != null ? regionService.safeZoneSpawnLocation(mainEnd) : null;
-            scheduler.runGlobalLater(() -> instanceManager.destroyActiveInstance(returnLoc), 100L);
+            if (defeatedInstance != null && defeatedInstance.world().equals(endWorld)) {
+                CompletableFuture<Void> destroyFuture = new CompletableFuture<>();
+                TaskHandle handle = scheduler.runGlobalLater(
+                        () -> instanceManager.destroyInstance(defeatedInstance, returnLoc)
+                                .whenComplete((ignored, err) -> destroyFuture.complete(null)),
+                        100L
+                );
+                if (handle == null) {
+                    instanceManager.destroyInstance(defeatedInstance, returnLoc)
+                            .whenComplete((ignored, err) -> destroyFuture.complete(null));
+                }
+                endingFuture = CompletableFuture.allOf(rollbackFuture, destroyFuture);
+            }
         }
-        completeEndingWhenRolledBack(defeatGeneration, rollbackFuture);
+        completeEndingWhenRolledBack(defeatGeneration, endingFuture);
     }
 
     private void completeEndingWhenRolledBack(long expectedGeneration, CompletableFuture<Void> rollbackFuture) {
@@ -2120,29 +2135,43 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         if (instanceManager != null) {
             instanceManager.getOrCreateInstance().whenComplete((instance, err) -> {
                 if (err != null || instance == null) {
-                    logger.log(Level.WARNING, "Failed to prepare temporary raid instance; falling back to End world", err);
-                    activateM3InCombatWorld(fallbackEndWorld, bossConfig, scaled, expectedGeneration);
+                    logger.log(Level.SEVERE, "Failed to prepare temporary raid instance; aborting raid encounter", err);
+                    abortOnBossSpawnFailure(fallbackEndWorld, expectedGeneration);
                     return;
+                }
+                synchronized (stateLock) {
+                    if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
+                        instanceManager.destroyInstance(instance, null);
+                        return;
+                    }
                 }
                 World instWorld = instance.world();
                 Location entrySpawn = regionService.safeZoneSpawnLocation(instWorld);
                 for (Player member : party) {
                     if (member != null && member.isOnline() && !instWorld.equals(member.getWorld())) {
                         scheduler.runAtEntity(member, () -> {
-                            member.teleportAsync(entrySpawn);
-                            updateSnapshot(member, entrySpawn);
+                            synchronized (stateLock) {
+                                if (state != RaidState.ACTIVE
+                                        || encounterGeneration.get() != expectedGeneration
+                                        || !participants.containsKey(member.getUniqueId())) {
+                                    return;
+                                }
+                                member.teleportAsync(entrySpawn);
+                                updateSnapshot(member, entrySpawn);
+                            }
                         });
                     }
                 }
-                activateM3InCombatWorld(instWorld, bossConfig, scaled, expectedGeneration);
+                activateM3InCombatWorld(instWorld, instance.arenaCenter(), bossConfig, scaled, expectedGeneration);
             });
             return;
         }
-        activateM3InCombatWorld(fallbackEndWorld, bossConfig, scaled, expectedGeneration);
+        activateM3InCombatWorld(fallbackEndWorld, null, bossConfig, scaled, expectedGeneration);
     }
 
     private void activateM3InCombatWorld(
             World endWorld,
+            @Nullable Location customArenaCenter,
             BossConfig bossConfig,
             ScaledEncounterParameters scaled,
             long expectedGeneration) {
@@ -2156,14 +2185,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 return;
             }
             crystalManager.clearAll();
-            gimmickExecutor.resetState();
+            List<Player> initialViewers = onlinePlayersInWorld(endWorld);
+            gimmickExecutor.resetState(initialViewers);
 
             timeline = new RaidTimelineEngine(bossConfig, new TimelineListener() {
                 @Override
                 public void onPhaseChanged(BossConfig.PhaseConfig newPhase) {
-                    gimmickExecutor.cancelActiveMechanic();
-                    bossController.setPosture(NormalGimmickExecutor.defaultPostureForPhase(newPhase));
                     List<Player> viewers = onlinePlayersInWorld(endWorld);
+                    gimmickExecutor.cancelActiveMechanic(viewers);
+                    bossController.setPosture(NormalGimmickExecutor.defaultPostureForPhase(newPhase));
                     if (hudService != null) {
                         hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
                         hudService.announcePhaseTransition(newPhase, viewers);
@@ -2220,10 +2250,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 public void onCastInterrupted(
                         BossConfig.TimelineStep step,
                         @Nullable BossConfig.AbilitySettings ability) {
+                    List<Player> viewers = onlinePlayersInWorld(endWorld);
                     if (hudService != null) {
-                        hudService.updateCastBossBar(null, 0.0, 0.0, onlinePlayersInWorld(endWorld));
+                        hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
                     }
-                    gimmickExecutor.cancelActiveMechanic();
+                    gimmickExecutor.cancelActiveMechanic(viewers);
                 }
 
                 @Override
@@ -2235,7 +2266,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             });
             this.activeTimeline = timeline;
             timeline.start();
-            bossReadyFuture = bossController.bindOrSpawn(endWorld, scaled.scaledBossHp());
+            bossReadyFuture = customArenaCenter != null
+                    ? bossController.bindOrSpawn(endWorld, customArenaCenter, scaled.scaledBossHp())
+                    : bossController.bindOrSpawn(endWorld, scaled.scaledBossHp());
         }
         if (bossReadyFuture != null) {
             bossReadyFuture.exceptionally(ex -> {
@@ -2346,7 +2379,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             timeline.stop();
         }
         if (gimmickExecutor != null) {
-            gimmickExecutor.resetState();
+            gimmickExecutor.resetState(viewers);
         }
         if (crystalManager != null) {
             crystalManager.clearAll();
@@ -2385,7 +2418,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             timeline.stop();
         }
         if (gimmickExecutor != null) {
-            gimmickExecutor.resetState();
+            gimmickExecutor.resetState(viewers);
         }
         CompletableFuture<Void> crystalFuture = crystalManager != null
                 ? crystalManager.clearAll()

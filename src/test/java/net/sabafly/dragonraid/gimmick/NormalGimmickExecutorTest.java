@@ -4,7 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyFloat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -412,5 +415,35 @@ class NormalGimmickExecutorTest {
         }
         executor.completeCast(relayStep, relayAbility, List.of(closeTank), List.of(closeTank), scaled, bossController, timelineEngine);
         assertTrue(damageTaken.getOrDefault(closeTank.getUniqueId(), 0.0) >= 80.0);
+    }
+
+    @Test
+    void sweepingLaser3dDistanceSparesPlayersUnderHighBossAndResetCleansVirtualEntities() {
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        BossConfig.AbilitySettings laserAbility = normalBoss.ability("sweeping_laser").orElseThrow();
+        BossConfig.TimelineStep laserStep = new BossConfig.TimelineStep(5.0, "SWEEPING_LASER", "sweeping_laser");
+
+        // Boss hovers high at (0, 82, 0). Player stands directly under boss at (0, 64, 0) while beam
+        // sweeps ~36m out on the perimeter. 3D beam segment is ~18m above player's head, so 0 damage.
+        Player underBoss = mockPlayer("UnderBoss", 0.0, 64.0, 0.0, false, false);
+        executor.startCast(laserStep, laserAbility, endWorld, List.of(underBoss), List.of(underBoss), scaled, bossController);
+        for (int i = 0; i < 25; i++) {
+            executor.tickActiveTelegraphs(List.of(underBoss), List.of(underBoss), bossController);
+        }
+        assertFalse(damageTaken.containsKey(underBoss.getUniqueId()));
+        executor.cancelActiveMechanic(List.of(underBoss));
+
+        // Reset destroys spawned virtual Enderman / Display arrow IDs cleanly
+        lenient().when(telegraphService.spawnVirtualScaledEnderman(any(), anyDouble(), anyFloat(), anyBoolean(), any()))
+                .thenReturn(4242);
+        BossConfig.AbilitySettings eruptAbility = normalBoss.ability("enderman_eruption").orElseThrow();
+        BossConfig.TimelineStep eruptStep = new BossConfig.TimelineStep(5.0, "ENDERMAN_ERUPTION", "enderman_eruption");
+        executor.startCast(eruptStep, eruptAbility, endWorld, List.of(underBoss), List.of(underBoss), scaled, bossController);
+        for (int i = 0; i < 8; i++) {
+            executor.tickActiveTelegraphs(List.of(underBoss), List.of(underBoss), bossController);
+        }
+        executor.resetState(List.of(underBoss));
+        verify(telegraphService, atLeastOnce()).destroyVirtualEntities(any(), eq(new int[]{4242}));
     }
 }

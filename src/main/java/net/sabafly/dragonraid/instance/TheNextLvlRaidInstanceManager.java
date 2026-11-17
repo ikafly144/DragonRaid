@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -31,6 +32,15 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
 
     public static final String INSTANCE_KEY_NAMESPACE = "dragonraid";
     public static final String INSTANCE_KEY_PREFIX = "instance_";
+    public static final String INSTANCE_WORLD_NAME_PREFIX = INSTANCE_KEY_NAMESPACE + "_" + INSTANCE_KEY_PREFIX;
+
+    /**
+     * Returns {@code true} if {@code worldName} matches the plugin-owned instance prefix
+     * ({@code dragonraid_instance_*}).
+     */
+    public static boolean isManagedInstanceWorldName(@Nullable String worldName) {
+        return worldName != null && worldName.toLowerCase(Locale.ROOT).startsWith(INSTANCE_WORLD_NAME_PREFIX);
+    }
 
     /**
      * Abstraction over TheNextLvl Worlds world creation/deletion for unit testing.
@@ -50,6 +60,7 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
     private final Logger logger;
     private final AtomicInteger instanceCounter = new AtomicInteger(0);
 
+    private long generation = 0L;
     private volatile @Nullable RaidInstance activeInstance;
     private volatile @Nullable CompletableFuture<RaidInstance> pendingCreation;
 
@@ -93,10 +104,7 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
         if (current != null && world.equals(current.world())) {
             return true;
         }
-        String name = world.getName().toLowerCase(Locale.ROOT);
-        return name.startsWith(INSTANCE_KEY_NAMESPACE + "_" + INSTANCE_KEY_PREFIX)
-                || name.startsWith(INSTANCE_KEY_PREFIX)
-                || name.contains("dragonraid_instance");
+        return isManagedInstanceWorldName(world.getName());
     }
 
     @Override
@@ -108,24 +116,40 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
             if (pendingCreation != null) {
                 return pendingCreation;
             }
+            final long creationGen = this.generation;
             int id = instanceCounter.incrementAndGet();
             Key worldKey = Key.key(INSTANCE_KEY_NAMESPACE, INSTANCE_KEY_PREFIX + id);
             CompletableFuture<RaidInstance> creation = worldsBridge.createVoidEndWorld(worldKey)
                     .thenCompose(world -> {
                         configureInstanceWorldRules(world);
-                        return arenaBuilder.buildArena(world).thenApply(pillars -> new RaidInstance(
-                                world,
-                                new Location(world, 0.0, CircularArenaBuilder.DEFAULT_FLOOR_Y, 0.0),
-                                CircularArenaBuilder.DEFAULT_ARENA_RADIUS,
-                                pillars
-                        ));
+                        return arenaBuilder.buildArena(world)
+                                .handle((pillars, buildErr) -> {
+                                    if (buildErr != null) {
+                                        worldsBridge.deleteWorld(world);
+                                        throw new CompletionException(buildErr);
+                                    }
+                                    return pillars;
+                                })
+                                .thenApply(pillars -> new RaidInstance(
+                                        world,
+                                        new Location(world, 0.0, CircularArenaBuilder.DEFAULT_FLOOR_Y, 0.0),
+                                        CircularArenaBuilder.DEFAULT_ARENA_RADIUS,
+                                        pillars
+                                ));
                     })
                     .whenComplete((instance, ex) -> {
+                        boolean stale;
                         synchronized (lock) {
-                            this.pendingCreation = null;
-                            if (ex == null && instance != null) {
-                                this.activeInstance = instance;
+                            stale = this.generation != creationGen;
+                            if (!stale) {
+                                this.pendingCreation = null;
+                                if (ex == null && instance != null) {
+                                    this.activeInstance = instance;
+                                }
                             }
+                        }
+                        if (stale && ex == null && instance != null) {
+                            worldsBridge.deleteWorld(instance.world());
                         }
                     });
             this.pendingCreation = creation;
@@ -134,9 +158,27 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
     }
 
     @Override
+    public CompletableFuture<Void> destroyInstance(
+            @Nullable RaidInstance targetInstance,
+            @Nullable Location returnLocation) {
+        if (targetInstance == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        synchronized (lock) {
+            if (this.activeInstance == targetInstance) {
+                this.generation++;
+                this.activeInstance = null;
+                this.pendingCreation = null;
+            }
+        }
+        return evacuateAndDelete(targetInstance.world(), returnLocation);
+    }
+
+    @Override
     public CompletableFuture<Void> destroyActiveInstance(@Nullable Location returnLocation) {
         final RaidInstance instanceToDestroy;
         synchronized (lock) {
+            this.generation++;
             instanceToDestroy = this.activeInstance;
             this.activeInstance = null;
             this.pendingCreation = null;
@@ -144,8 +186,10 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
         if (instanceToDestroy == null) {
             return CompletableFuture.completedFuture(null);
         }
+        return evacuateAndDelete(instanceToDestroy.world(), returnLocation);
+    }
 
-        World world = instanceToDestroy.world();
+    private CompletableFuture<Void> evacuateAndDelete(World world, @Nullable Location returnLocation) {
         Collection<Player> players = world.getPlayers();
         List<CompletableFuture<Boolean>> evacuations = players.stream()
                 .filter(p -> p != null && p.isOnline() && returnLocation != null && returnLocation.getWorld() != null)
@@ -231,7 +275,7 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
                 return List.of();
             }
             return Bukkit.getWorlds().stream()
-                    .filter(w -> w != null && w.getName().toLowerCase(Locale.ROOT).contains(INSTANCE_KEY_PREFIX))
+                    .filter(w -> w != null && isManagedInstanceWorldName(w.getName()))
                     .toList();
         }
     }

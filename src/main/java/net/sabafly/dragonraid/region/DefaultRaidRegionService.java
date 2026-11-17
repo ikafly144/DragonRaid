@@ -12,6 +12,7 @@ import net.sabafly.dragonraid.config.RegionConfig.ArenaRegion;
 import net.sabafly.dragonraid.config.RegionConfig.Point3D;
 import net.sabafly.dragonraid.config.RegionConfig.Shape;
 import net.sabafly.dragonraid.config.RegionConfig.SpawnPoint;
+import net.sabafly.dragonraid.instance.TheNextLvlRaidInstanceManager;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -48,11 +49,7 @@ public final class DefaultRaidRegionService implements RaidRegionService {
         }
         String name = world.getName();
         String configuredName = configManager.pluginConfig().world().endWorldName();
-        if (name.equals(configuredName)) {
-            return true;
-        }
-        String lower = name.toLowerCase(java.util.Locale.ROOT);
-        return lower.startsWith("dragonraid_instance_") || lower.startsWith("instance_");
+        return name.equals(configuredName) || TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(name);
     }
 
     @Override
@@ -94,8 +91,7 @@ public final class DefaultRaidRegionService implements RaidRegionService {
     @Override
     public Location safeZoneSpawnLocation(World endWorld) {
         Objects.requireNonNull(endWorld, "endWorld");
-        String lower = endWorld.getName().toLowerCase(java.util.Locale.ROOT);
-        if (lower.startsWith("dragonraid_instance_") || lower.startsWith("instance_")) {
+        if (TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(endWorld.getName())) {
             return new Location(endWorld, 0.5, 65.0, 24.5, 180.0f, 0.0f);
         }
         SpawnPoint sp = configManager.pluginConfig().regions().safeZone().spawnPoint();

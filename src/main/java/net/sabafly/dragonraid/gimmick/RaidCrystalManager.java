@@ -20,6 +20,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
 import net.sabafly.dragonraid.instance.CircularArenaBuilder;
+import net.sabafly.dragonraid.instance.TheNextLvlRaidInstanceManager;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
 import net.sabafly.dragonraid.visual.SpatialTelegraphService;
@@ -142,20 +143,19 @@ public final class RaidCrystalManager {
         Objects.requireNonNull(world, "world");
         pruneDead();
 
-        // 1. Bind any existing untracked vanilla EnderCrystals in the arena first.
-        bindExistingCrystalsInWorld(world, targetCount);
-
         final int toSpawn;
         final int expectedGen;
         synchronized (spawnLock) {
             this.bossRegenPerSecond = Math.max(0.0, regenPerSecond);
+            expectedGen = generation.get();
+            // 1. Schedule binding of any existing untracked vanilla EnderCrystals on their owning entity threads.
+            bindExistingCrystalsInWorldLocked(world, targetCount, expectedGen);
             int existing = trackedCrystals.size() + pendingSpawns;
             toSpawn = Math.max(0, targetCount - existing);
             if (toSpawn == 0) {
                 return;
             }
             pendingSpawns += toSpawn;
-            expectedGen = generation.get();
         }
 
         List<Location> pillarCandidates = computeObsidianPillarTops(world, Math.max(8, targetCount));
@@ -204,7 +204,7 @@ public final class RaidCrystalManager {
         }
     }
 
-    private void bindExistingCrystalsInWorld(World world, int maxToBind) {
+    private void bindExistingCrystalsInWorldLocked(World world, int maxTotal, int expectedGen) {
         Collection<EnderCrystal> existingInWorld;
         try {
             existingInWorld = world.getEntitiesByClass(EnderCrystal.class);
@@ -214,28 +214,60 @@ public final class RaidCrystalManager {
         if (existingInWorld == null || existingInWorld.isEmpty()) {
             return;
         }
-        synchronized (spawnLock) {
-            for (EnderCrystal crystal : existingInWorld) {
-                if (crystal == null || crystal.isDead() || trackedCrystals.containsKey(crystal.getUniqueId())) {
-                    continue;
+        for (EnderCrystal crystal : existingInWorld) {
+            if (crystal == null) {
+                continue;
+            }
+            UUID crystalId = crystal.getUniqueId();
+            if (crystalId == null || trackedCrystals.containsKey(crystalId)) {
+                continue;
+            }
+            if (trackedCrystals.size() + pendingSpawns >= maxTotal) {
+                break;
+            }
+            pendingSpawns++;
+            Runnable bindTask = () -> {
+                try {
+                    if (generation.get() != expectedGen || crystal.isDead()) {
+                        return;
+                    }
+                    Location loc = crystal.getLocation();
+                    if (loc == null) {
+                        return;
+                    }
+                    crystal.setCustomNameVisible(true);
+                    updateCrystalLabel(crystal);
+                    synchronized (spawnLock) {
+                        if (generation.get() != expectedGen) {
+                            return;
+                        }
+                        trackedCrystals.putIfAbsent(crystalId, new TrackedCrystal(crystal, loc.clone()));
+                    }
+                } finally {
+                    synchronized (spawnLock) {
+                        if (generation.get() == expectedGen && pendingSpawns > 0) {
+                            pendingSpawns--;
+                        }
+                    }
                 }
-                if (trackedCrystals.size() >= maxToBind) {
-                    break;
+            };
+            TaskHandle handle = scheduler.runAtEntity(crystal, bindTask, () -> {
+                synchronized (spawnLock) {
+                    if (generation.get() == expectedGen && pendingSpawns > 0) {
+                        pendingSpawns--;
+                    }
                 }
-                Location loc = crystal.getLocation();
-                if (loc == null) {
-                    continue;
+            });
+            if (handle == null) {
+                if (generation.get() == expectedGen && pendingSpawns > 0) {
+                    pendingSpawns--;
                 }
-                crystal.setCustomNameVisible(true);
-                updateCrystalLabel(crystal);
-                trackedCrystals.put(crystal.getUniqueId(), new TrackedCrystal(crystal, loc.clone()));
             }
         }
     }
 
     private List<Location> computeObsidianPillarTops(World world, int count) {
-        String worldName = world.getName();
-        if (worldName != null && worldName.toLowerCase(java.util.Locale.ROOT).contains("instance")) {
+        if (TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(world.getName())) {
             List<Location> instancePillars = new ArrayList<>(CircularArenaBuilder.DEFAULT_PILLAR_COUNT);
             for (int i = 0; i < CircularArenaBuilder.DEFAULT_PILLAR_COUNT; i++) {
                 double angle = (2.0 * Math.PI * i) / CircularArenaBuilder.DEFAULT_PILLAR_COUNT;
@@ -457,6 +489,7 @@ public final class RaidCrystalManager {
                 }
             }
         }
+        final int expectedGen = generation.get();
         for (PendingLightning strike : readyLightnings) {
             telegraphService.renderLightningStrike(strike.location, viewers);
             double rSq = PILLAR_LIGHTNING_RADIUS * PILLAR_LIGHTNING_RADIUS;
@@ -465,7 +498,11 @@ public final class RaidCrystalManager {
                 if (pLoc != null && strike.location.getWorld() != null
                         && strike.location.getWorld().equals(pLoc.getWorld())
                         && horizontalDistSq(pLoc, strike.location) <= rSq) {
-                    scheduler.runAtEntity(p, () -> damageApplier.accept(p, PILLAR_LIGHTNING_DAMAGE));
+                    scheduler.runAtEntity(p, () -> {
+                        if (generation.get() == expectedGen && p.isOnline()) {
+                            damageApplier.accept(p, PILLAR_LIGHTNING_DAMAGE);
+                        }
+                    });
                 }
             }
         }
@@ -507,7 +544,11 @@ public final class RaidCrystalManager {
                 if (pLoc != null && beam.crystalOrigin.getWorld() != null
                         && beam.crystalOrigin.getWorld().equals(pLoc.getWorld())
                         && distanceToSegment2D(pLoc, beam.crystalOrigin, beam.lockedEndpoint) <= TRACKING_BEAM_WIDTH * 0.65) {
-                    scheduler.runAtEntity(p, () -> damageApplier.accept(p, TRACKING_BEAM_DAMAGE));
+                    scheduler.runAtEntity(p, () -> {
+                        if (generation.get() == expectedGen && p.isOnline()) {
+                            damageApplier.accept(p, TRACKING_BEAM_DAMAGE);
+                        }
+                    });
                 }
             }
         }

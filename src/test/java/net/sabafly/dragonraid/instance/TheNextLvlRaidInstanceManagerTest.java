@@ -115,4 +115,54 @@ class TheNextLvlRaidInstanceManagerTest {
         assertNull(manager.activeInstance());
         assertFalse(manager.isInstanceWorld(null));
     }
+
+    @Test
+    void rejectsNonPluginInstanceNamesAndDeletesStaleOrFailedCreations() {
+        assertTrue(TheNextLvlRaidInstanceManager.isManagedInstanceWorldName("dragonraid_instance_1"));
+        assertFalse(TheNextLvlRaidInstanceManager.isManagedInstanceWorldName("instance_other_plugin"));
+        assertFalse(TheNextLvlRaidInstanceManager.isManagedInstanceWorldName("myinstance_2"));
+
+        // Creation interrupted by destroyActiveInstance deletes stale world when future resolves
+        CompletableFuture<World> delayedWorldFuture = new CompletableFuture<>();
+        AtomicInteger customDeletes = new AtomicInteger(0);
+        World staleWorld = mock(World.class);
+        lenient().when(staleWorld.getName()).thenReturn("dragonraid_instance_99");
+        Block block = mock(Block.class);
+        lenient().when(staleWorld.getBlockAt(anyInt(), anyInt(), anyInt())).thenReturn(block);
+        lenient().when(staleWorld.getPlayers()).thenReturn(List.of());
+
+        CircularArenaBuilder smallBuilder = new CircularArenaBuilder(scheduler, 16.0, 12.0, 4, 4, 64);
+        TheNextLvlRaidInstanceManager raceManager = new TheNextLvlRaidInstanceManager(
+                scheduler,
+                smallBuilder,
+                new TheNextLvlRaidInstanceManager.WorldsBridge() {
+                    @Override
+                    public CompletableFuture<World> createVoidEndWorld(Key worldKey) {
+                        return delayedWorldFuture;
+                    }
+
+                    @Override
+                    public CompletableFuture<Boolean> deleteWorld(World world) {
+                        customDeletes.incrementAndGet();
+                        return CompletableFuture.completedFuture(true);
+                    }
+
+                    @Override
+                    public List<World> loadedInstanceWorlds() {
+                        return List.of();
+                    }
+                },
+                Logger.getLogger("RaceInstanceTest")
+        );
+
+        CompletableFuture<RaidInstanceManager.RaidInstance> inflight = raceManager.getOrCreateInstance();
+        raceManager.destroyActiveInstance(null).join();
+        assertEquals(0, customDeletes.get());
+
+        // Now complete creation -> must detect stale generation and delete staleWorld without activating it
+        delayedWorldFuture.complete(staleWorld);
+        inflight.join();
+        assertNull(raceManager.activeInstance());
+        assertEquals(1, customDeletes.get());
+    }
 }
