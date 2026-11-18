@@ -231,6 +231,17 @@ public interface SpatialTelegraphService {
     }
 
     /**
+     * Renders or updates a visible 3D fireball projectile Display group keyed by {@code projectileKey}.
+     */
+    default void renderFireballProjectile(
+            String projectileKey,
+            Location location,
+            double scale,
+            float spinDegrees,
+            Collection<? extends Player> viewers) {
+    }
+
+    /**
      * Destroys all retained display entities associated with {@code telegraphKey}.
      */
     default void clearTelegraph(

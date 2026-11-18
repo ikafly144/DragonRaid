@@ -498,7 +498,10 @@ public final class NormalGimmickExecutor {
             }
             case "FIREBALL_BARRAGE" -> {
                 bossController.setPosture(DragonPosture.HIGH_HOVER);
-                this.activeMechanic = ActiveMechanic.simple(MechanicType.FIREBALL_BARRAGE, ability, castSec);
+                double waveInterval = ability != null ? ability.getDouble("wave-interval-seconds", 1.1) : 1.1;
+                ActiveMechanic mech = ActiveMechanic.simple(MechanicType.FIREBALL_BARRAGE, ability, castSec);
+                mech.lastWaveSpawnSeconds = -waveInterval;
+                this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.ender_dragon.shoot", 0.9f);
             }
             case "ENDERMAN_ERUPTION" -> {
@@ -637,7 +640,7 @@ public final class NormalGimmickExecutor {
                     double radius = mech.ability != null ? mech.ability.radius(4.5) : 4.5;
                     telegraphService.renderStackMarker("cast:DRAGON_DIVE_STACK:stack", target.getLocation(), radius, progress, mech.soloMode, viewers);
                     if (bossLoc != null) {
-                        telegraphService.renderLineAoE("cast:DRAGON_DIVE_STACK:line", bossLoc, target.getLocation(), 1.2, progress, TelegraphStyle.STACK, viewers);
+                        telegraphService.renderTetherLine("cast:DRAGON_DIVE_STACK:tether", bossLoc, target.getLocation(), TelegraphStyle.STACK, viewers);
                     }
                 }
             }
@@ -708,10 +711,11 @@ public final class NormalGimmickExecutor {
                 }
             }
             case FIREBALL_BARRAGE -> {
-                if (bossLoc != null && mech.elapsedSeconds - mech.lastWaveSpawnSeconds >= 0.45) {
+                double waveInterval = mech.ability != null ? mech.ability.getDouble("wave-interval-seconds", 1.1) : 1.1;
+                if (bossLoc != null && mech.elapsedSeconds - mech.lastWaveSpawnSeconds >= waveInterval) {
                     mech.lastWaveSpawnSeconds = mech.elapsedSeconds;
                     spawnAcceleratingFireballWave(
-                            bossLoc, aliveParticipants, mech.ability, currentSessionGen, mech.resolutionTracker);
+                            bossLoc, aliveParticipants, viewers, mech.ability, currentSessionGen, mech.resolutionTracker);
                 }
             }
             case ENDERMAN_ERUPTION -> {
@@ -948,9 +952,10 @@ public final class NormalGimmickExecutor {
             );
             case FIREBALL_BARRAGE -> {
                 Location bossLoc = bossController.bossLocation();
-                if (bossLoc != null) {
+                double waveInterval = effAbility != null ? effAbility.getDouble("wave-interval-seconds", 1.1) : 1.1;
+                if (bossLoc != null && (mech.lastWaveSpawnSeconds < 0.0 || mech.elapsedSeconds - mech.lastWaveSpawnSeconds >= waveInterval * 0.5)) {
                     spawnAcceleratingFireballWave(
-                            bossLoc, aliveParticipants, effAbility, expectedSessionGen, tracker);
+                            bossLoc, aliveParticipants, viewers, effAbility, expectedSessionGen, tracker);
                 }
             }
             case ENDERMAN_ERUPTION -> resolveEndermanEruption(
@@ -1765,35 +1770,33 @@ public final class NormalGimmickExecutor {
                     }
                 }
                 case FIREBALL_ORB -> {
-                    // True Ending accelerating projectile: 0.25 -> 0.5 -> 0.9 -> 1.3 blocks/tick
-                    double speedPerSec = effect.elapsedSeconds < 0.5 ? 5.0 : (effect.elapsedSeconds < 1.0 ? 12.0 : 22.0);
-                    effect.origin.add(
-                            effect.direction.getX() * speedPerSec * MONITOR_TICK_SECONDS,
-                            effect.direction.getY() * speedPerSec * MONITOR_TICK_SECONDS,
-                            effect.direction.getZ() * speedPerSec * MONITOR_TICK_SECONDS
-                    );
-                    telegraphService.renderDragonAuraTrail(effect.origin, viewers);
-                    boolean hit = effect.origin.getY() <= CircularArenaBuilder.DEFAULT_FLOOR_Y + 0.6;
-                    for (Player p : aliveParticipants) {
-                        if (p != null && p.isOnline() && p.getLocation() != null
-                                && effect.origin.getWorld() != null
-                                && effect.origin.getWorld().equals(p.getLocation().getWorld())
-                                && p.getLocation().distanceSquared(effect.origin) <= 2.6 * 2.6) {
-                            hit = true;
-                            break;
-                        }
-                    }
-                    if (hit || effect.elapsedSeconds >= 4.0) {
-                        telegraphService.renderImpactBurst(effect.origin, 3.5, ImpactStyle.EXPLOSION, viewers);
+                    double progress = Math.min(1.0, effect.elapsedSeconds / Math.max(0.1, effect.durationSeconds));
+                    double curX = effect.launchOrigin.getX() + (effect.origin.getX() - effect.launchOrigin.getX()) * progress;
+                    double curZ = effect.launchOrigin.getZ() + (effect.origin.getZ() - effect.launchOrigin.getZ()) * progress;
+                    double linearY = effect.launchOrigin.getY() + (effect.origin.getY() - effect.launchOrigin.getY()) * progress;
+                    double arcHeight = 8.0 * Math.sin(Math.PI * progress);
+                    Location orbLoc = new Location(effect.origin.getWorld(), curX, linearY + arcHeight + 0.65, curZ);
+
+                    String aoeKey = "followup:fireball:aoe:" + effect.effectId;
+                    String orbKey = "followup:fireball:orb:" + effect.effectId;
+                    if (effect.elapsedSeconds >= effect.durationSeconds) {
+                        telegraphService.clearTelegraph(aoeKey, viewers);
+                        telegraphService.clearTelegraph(orbKey, viewers);
+                        telegraphService.renderImpactBurst(effect.origin, effect.maxRadius, ImpactStyle.EXPLOSION, viewers);
+                        playWarningSound(viewers, "minecraft:entity.generic.explode", 1.1f);
+                        double rSq = effect.maxRadius * effect.maxRadius;
                         for (Player p : aliveParticipants) {
                             if (p != null && p.isOnline() && p.getLocation() != null
                                     && effect.origin.getWorld() != null
                                     && effect.origin.getWorld().equals(p.getLocation().getWorld())
-                                    && horizontalDistSq(p.getLocation(), effect.origin) <= 3.5 * 3.5) {
+                                    && horizontalDistSq(p.getLocation(), effect.origin) <= rSq) {
                                 applySessionDamageOnEntityThread(p, effect.damage, currentSessionGen, followUpMechId, effect.resolutionTracker);
                             }
                         }
                         finished.add(effect);
+                    } else {
+                        telegraphService.renderCircleAoE(aoeKey, effect.origin, effect.maxRadius, progress, TelegraphStyle.DANGER, viewers);
+                        telegraphService.renderFireballProjectile(orbKey, orbLoc, 1.35, (float) (effect.elapsedSeconds * 240.0), viewers);
                     }
                 }
             }
@@ -1818,6 +1821,7 @@ public final class NormalGimmickExecutor {
     private void spawnAcceleratingFireballWave(
             Location bossLoc,
             List<Player> aliveParticipants,
+            Collection<? extends Player> viewers,
             @Nullable BossConfig.AbilitySettings ability,
             int currentSessionGen,
             @Nullable MechanicResolutionTracker tracker) {
@@ -1825,21 +1829,51 @@ public final class NormalGimmickExecutor {
             return;
         }
         double damage = ability != null ? ability.damage(16.0) : 16.0;
+        double radius = ability != null ? ability.radius(3.2) : 3.2;
+        double impactDelay = ability != null ? ability.getDouble("impact-delay-seconds", 2.2) : 2.2;
+        int orbsPerWave = Math.max(1, ability != null ? ability.getInt("orbs-per-wave", 3) : 3);
+
         Player target = aliveParticipants.get(ThreadLocalRandom.current().nextInt(aliveParticipants.size()));
         Location tLoc = target.getLocation();
         if (tLoc == null || !bossLoc.getWorld().equals(tLoc.getWorld())) {
             return;
         }
-        Vector baseDir = tLoc.toVector().subtract(bossLoc.toVector());
-        if (baseDir.lengthSquared() < 1e-4) {
-            baseDir = new Vector(0.0, -1.0, 0.0);
-        } else {
-            baseDir.normalize();
+        double floorY = tLoc.getY();
+        double dx = tLoc.getX() - bossLoc.getX();
+        double dz = tLoc.getZ() - bossLoc.getZ();
+        double horizLen = Math.hypot(dx, dz);
+        double dirX = horizLen > 1e-4 ? dx / horizLen : 0.0;
+        double dirZ = horizLen > 1e-4 ? dz / horizLen : 1.0;
+        double rightX = -dirZ;
+        double rightZ = dirX;
+        double lateralSpacing = Math.max(6.8, radius * 2.1);
+
+        playWarningSound(viewers, "minecraft:entity.blaze.shoot", 0.9f);
+        Location launchOrigin = bossLoc.clone();
+        for (int k = 0; k < orbsPerWave; k++) {
+            double fanIndex = k - (orbsPerWave - 1) * 0.5;
+            double lx = tLoc.getX() + rightX * (fanIndex * lateralSpacing) - dirX * (Math.abs(fanIndex) * 1.8);
+            double lz = tLoc.getZ() + rightZ * (fanIndex * lateralSpacing) - dirZ * (Math.abs(fanIndex) * 1.8);
+            Location landingLoc = new Location(bossLoc.getWorld(), lx, floorY, lz);
+            ActiveFollowUpEffect orb = ActiveFollowUpEffect.fireballOrb(
+                    launchOrigin.clone(), landingLoc, radius, impactDelay, damage);
+            addFollowUpEffect(orb, tracker);
+            telegraphService.renderCircleAoE(
+                    "followup:fireball:aoe:" + orb.effectId,
+                    landingLoc,
+                    radius,
+                    0.0,
+                    TelegraphStyle.DANGER,
+                    viewers
+            );
+            telegraphService.renderFireballProjectile(
+                    "followup:fireball:orb:" + orb.effectId,
+                    launchOrigin,
+                    1.35,
+                    0.0f,
+                    viewers
+            );
         }
-        addFollowUpEffect(ActiveFollowUpEffect.fireballOrb(bossLoc.clone(), baseDir.clone(), damage), tracker);
-        // Offset fan projectiles (True Ending summon_ultra_fireball_offset)
-        addFollowUpEffect(ActiveFollowUpEffect.fireballOrb(bossLoc.clone(), baseDir.clone().rotateAroundY(Math.toRadians(14.0)), damage), tracker);
-        addFollowUpEffect(ActiveFollowUpEffect.fireballOrb(bossLoc.clone(), baseDir.clone().rotateAroundY(Math.toRadians(-14.0)), damage), tracker);
     }
 
     private void detonateRingBand(
@@ -3087,6 +3121,7 @@ public final class NormalGimmickExecutor {
         final long effectId = EFFECT_ID_SEQ.incrementAndGet();
         final FollowUpKind kind;
         final Location origin;
+        final Location launchOrigin;
         final Vector direction;
         final int virtualEntityId;
         final double durationSeconds;
@@ -3110,6 +3145,7 @@ public final class NormalGimmickExecutor {
         private ActiveFollowUpEffect(
                 FollowUpKind kind,
                 Location origin,
+                Location launchOrigin,
                 Vector direction,
                 int virtualEntityId,
                 double durationSeconds,
@@ -3122,6 +3158,7 @@ public final class NormalGimmickExecutor {
                 List<RotatingEndermanBeam> rotatingBeams) {
             this.kind = kind;
             this.origin = origin;
+            this.launchOrigin = launchOrigin;
             this.direction = direction;
             this.virtualEntityId = virtualEntityId;
             this.durationSeconds = durationSeconds;
@@ -3132,6 +3169,23 @@ public final class NormalGimmickExecutor {
             this.sweepDegrees = sweepDegrees;
             this.lanes = lanes;
             this.rotatingBeams = rotatingBeams;
+        }
+
+        private ActiveFollowUpEffect(
+                FollowUpKind kind,
+                Location origin,
+                Vector direction,
+                int virtualEntityId,
+                double durationSeconds,
+                double innerRadius,
+                double maxRadius,
+                double expandSpeedPerSecond,
+                double damage,
+                float sweepDegrees,
+                List<ExaflareLane> lanes,
+                List<RotatingEndermanBeam> rotatingBeams) {
+            this(kind, origin, origin, direction, virtualEntityId, durationSeconds, innerRadius,
+                    maxRadius, expandSpeedPerSecond, damage, sweepDegrees, lanes, rotatingBeams);
         }
 
         static ActiveFollowUpEffect shockwave(Location origin, double maxRadius, double speedPerSecond) {
@@ -3174,10 +3228,15 @@ public final class NormalGimmickExecutor {
             );
         }
 
-        static ActiveFollowUpEffect fireballOrb(Location origin, Vector direction, double damage) {
+        static ActiveFollowUpEffect fireballOrb(
+                Location launchOrigin,
+                Location landingOrigin,
+                double radius,
+                double impactDelaySeconds,
+                double damage) {
             return new ActiveFollowUpEffect(
-                    FollowUpKind.FIREBALL_ORB, origin, direction, -1, 4.0,
-                    0.0, 0.0, 0.0, damage, 0.0f, List.of(), List.of()
+                    FollowUpKind.FIREBALL_ORB, landingOrigin, launchOrigin, new Vector(), -1, impactDelaySeconds,
+                    0.0, radius, 0.0, damage, 0.0f, List.of(), List.of()
             );
         }
     }

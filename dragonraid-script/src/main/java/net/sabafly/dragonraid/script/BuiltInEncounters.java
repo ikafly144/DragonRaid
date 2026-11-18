@@ -104,7 +104,11 @@ public final class BuiltInEncounters {
                 .mechanic("fireball_barrage", Map.of(
                         "name-key", "ability.fireball_barrage.name",
                         "cast-seconds", 3.6,
-                        "damage", 16.0
+                        "damage", 16.0,
+                        "radius", 3.2,
+                        "impact-delay-seconds", 2.2,
+                        "wave-interval-seconds", 1.1,
+                        "orbs-per-wave", 3
                 ))
                 .mechanic("enderman_eruption", Map.of(
                         "name-key", "ability.enderman_eruption.name",
@@ -272,7 +276,11 @@ public final class BuiltInEncounters {
                 .mechanic("fireball_barrage", Map.of(
                         "name-key", "ability.fireball_barrage.name",
                         "cast-seconds", 3.2,
-                        "damage", 22.0
+                        "damage", 22.0,
+                        "radius", 3.2,
+                        "impact-delay-seconds", 2.2,
+                        "wave-interval-seconds", 1.05,
+                        "orbs-per-wave", 5
                 ))
                 .mechanic("enderman_eruption", Map.of(
                         "name-key", "ability.enderman_eruption.name",

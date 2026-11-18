@@ -155,8 +155,6 @@ class PacketEventsTelegraphServiceTest {
         blockSpawns.clear();
         service.renderDonutAoE("donut:test", center, 8.0, 18.0, 0.4, TelegraphStyle.DANGER, List.of(near));
         service.renderLineAoE("line:test", center, new Location(endWorld, 20.0, 64.0, 0.0), 3.0, 0.6, TelegraphStyle.WARNING, List.of(near));
-        service.renderStackMarker("stack:solo", center, 4.5, 0.5, true, List.of(near));
-        service.renderStackMarker("stack:party", center, 4.5, 0.5, false, List.of(near));
         service.renderSpreadMarker("spread:test", center, 4.5, 0.5, List.of(near));
         service.renderTetherLine("tether:test", center, new Location(endWorld, 10.0, 74.0, 0.0), TelegraphStyle.TETHER, List.of(near));
         service.renderShieldSafeCone("cone:test", center, 90.0, 20.0, 32.0, List.of(near));
@@ -165,7 +163,56 @@ class PacketEventsTelegraphServiceTest {
         assertTrue(dustPackets.isEmpty(), "No telegraph type may emit dust particles");
         assertTrue(accentPackets.isEmpty(), "No telegraph type may emit accent particles");
         assertFalse(blockSpawns.isEmpty());
-        assertFalse(textSpawns.isEmpty(), "Stack markers should spawn TextDisplay indicators");
+    }
+
+    @Test
+    void stackMarkerUsesDedicatedHollowRingInwardArrowsAndOverheadBeaconWithoutFilledFloor() {
+        Player viewer = mockViewer("Alice", endWorld, 0.0, 64.0, 0.0);
+        Location center = new Location(endWorld, 0.0, 64.0, 0.0);
+
+        service.renderStackMarker("stack:party", center, 4.5, 0.5, false, List.of(viewer));
+        assertTrue(dustPackets.isEmpty(), "Stack marker must not emit dust particles");
+        assertTrue(accentPackets.isEmpty(), "Stack marker must not emit accent particles");
+        assertTrue(blockSpawns.stream().noneMatch(b ->
+                b.visualKind() == BlockVisualKind.STACK_GLASS || b.visualKind() == BlockVisualKind.STACK_CHARGE_GLASS),
+                "Multi-player stack marker must not paint filled AoE disk on floor");
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.STACK_BORDER));
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.STACK_ARROW_ACCENT));
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.STACK_BEAM));
+        assertFalse(textSpawns.isEmpty(), "Party stack marker should render overhead gather label");
+
+        blockSpawns.clear();
+        textSpawns.clear();
+        service.renderStackMarker("stack:solo", center, 4.5, 0.5, true, List.of(viewer));
+        assertTrue(blockSpawns.stream().noneMatch(b ->
+                b.visualKind() == BlockVisualKind.STACK_GLASS || b.visualKind() == BlockVisualKind.STACK_CHARGE_GLASS || b.visualKind() == BlockVisualKind.STACK_ARROW_ACCENT),
+                "Solo stack marker must show hollow guard indicator without gather arrows");
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.WARNING_BORDER));
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.SAFE_BORDER));
+        assertFalse(textSpawns.isEmpty(), "Solo stack marker should render guard icon");
+    }
+
+    @Test
+    void fireballProjectileRendersRotating3dOrbAndUpdatesInPlaceWithoutParticles() {
+        Player viewer = mockViewer("Alice", endWorld, 0.0, 64.0, 0.0);
+        Location pos1 = new Location(endWorld, 0.0, 74.0, 0.0);
+        Location pos2 = new Location(endWorld, 2.0, 70.0, 1.0);
+
+        service.renderFireballProjectile("orb:1", pos1, 1.35, 30.0f, List.of(viewer));
+        assertTrue(dustPackets.isEmpty());
+        assertTrue(accentPackets.isEmpty());
+        assertEquals(2, blockSpawns.size());
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.FIREBALL_CORE));
+        assertTrue(blockSpawns.stream().anyMatch(b -> b.visualKind() == BlockVisualKind.FIREBALL_SHELL));
+        List<Integer> orbIds = blockSpawns.stream().map(BlockEvent::entityId).toList();
+
+        blockSpawns.clear();
+        service.renderFireballProjectile("orb:1", pos2, 1.35, 120.0f, List.of(viewer));
+        assertTrue(blockSpawns.isEmpty());
+        assertEquals(2, blockUpdates.size());
+
+        service.clearTelegraph("orb:1", List.of(viewer));
+        assertTrue(destroyedEntityIds.containsAll(orbIds));
     }
 
     @Test

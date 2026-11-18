@@ -80,6 +80,10 @@ public final class PacketEventsTelegraphService implements SpatialTelegraphServi
         STACK_GLASS,
         STACK_CHARGE_GLASS,
         STACK_BORDER,
+        STACK_ARROW_ACCENT,
+        STACK_BEAM,
+        FIREBALL_CORE,
+        FIREBALL_SHELL,
         SPREAD_GLASS,
         SPREAD_CHARGE_GLASS,
         SPREAD_BORDER,
@@ -441,10 +445,51 @@ public final class PacketEventsTelegraphService implements SpatialTelegraphServi
             return;
         }
         double progress = clamp01(castProgress);
-        TelegraphStyle ringStyle = soloMode ? TelegraphStyle.WARNING : TelegraphStyle.STACK;
-        List<BlockPiece> blocks = buildCirclePieces(center, radius, progress, ringStyle);
-        List<TextPiece> texts = soloMode ? List.of() : buildStackChevronPieces(center, radius, progress);
+        List<BlockPiece> blocks = soloMode
+                ? buildSoloGuardStackPieces(center, radius, progress)
+                : buildGatherStackPieces(center, radius, progress);
+        List<TextPiece> texts = buildStackOverheadTextPieces(center, progress, soloMode);
         syncDisplayGroup(telegraphKey, center, radius, blocks, texts, viewers);
+    }
+
+    @Override
+    public void renderFireballProjectile(
+            String projectileKey,
+            Location location,
+            double scale,
+            float spinDegrees,
+            Collection<? extends Player> viewers) {
+        Objects.requireNonNull(projectileKey, "projectileKey");
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(viewers, "viewers");
+        if (location.getWorld() == null || scale <= 0.0) {
+            return;
+        }
+        double rad = Math.toRadians(spinDegrees);
+        float c1 = (float) Math.cos(rad * 0.5);
+        float s1 = (float) Math.sin(rad * 0.5);
+        float coreSize = (float) (0.78 * scale);
+
+        double shellRad = Math.toRadians(spinDegrees + 45.0);
+        double tilt = Math.toRadians(35.0);
+        // Combine yaw spin + fixed 35-degree Z tilt for dynamic crystal orb silhouette
+        float cy = (float) Math.cos(shellRad * 0.5);
+        float sy = (float) Math.sin(shellRad * 0.5);
+        float cz = (float) Math.cos(tilt * 0.5);
+        float sz = (float) Math.sin(tilt * 0.5);
+        float qx = -sy * sz;
+        float qy = sy * cz;
+        float qz = cy * sz;
+        float qw = cy * cz;
+        float shellSize = (float) (1.12 * scale);
+
+        List<BlockPiece> blocks = List.of(
+                centeredBox(location.getX(), location.getY(), location.getZ(),
+                        coreSize, coreSize, coreSize, 0.0f, -s1, 0.0f, c1, BlockVisualKind.FIREBALL_CORE),
+                centeredBox(location.getX(), location.getY(), location.getZ(),
+                        shellSize, shellSize, shellSize, qx, qy, qz, qw, BlockVisualKind.FIREBALL_SHELL)
+        );
+        syncDisplayGroup(projectileKey, location, 8.0, blocks, List.of(), viewers);
     }
 
     @Override
@@ -1264,23 +1309,98 @@ public final class PacketEventsTelegraphService implements SpatialTelegraphServi
         return out;
     }
 
-    private List<TextPiece> buildStackChevronPieces(
+    private List<BlockPiece> buildGatherStackPieces(
             Location center,
             double radius,
             double castProgress) {
-        double y = center.getY() + 0.45;
-        double dist = Math.max(0.9, radius * (0.95 - 0.55 * castProgress));
-        List<TextPiece> texts = new ArrayList<>(4);
-        Component arrow = Component.text("⋙", NamedTextColor.GOLD, TextDecoration.BOLD);
+        double cx = center.getX();
+        double floorY = center.getY();
+        double cz = center.getZ();
+        List<BlockPiece> out = new ArrayList<>(CIRCLE_RIM_SEGMENTS + 17);
+
+        // Hollow thin perimeter ring only (no filled AoE floor disk so players know to gather inside)
+        addRingBorderPieces(cx, floorY + FLOOR_BORDER_Y, cz, radius, CIRCLE_RIM_SEGMENTS, 0.14, 0.06, BlockVisualKind.STACK_BORDER, out);
+
+        // 4 pulsing 3D inward-pointing chevron arrows placed along cardinal axes
+        double pulsePhase = (castProgress * 3.0) % 1.0;
+        double arrowDist = Math.max(1.35, radius * (0.98 - 0.36 * pulsePhase));
+        double arrowY = floorY + 0.50;
         for (int i = 0; i < 4; i++) {
-            float yaw = i * 90.0f;
-            double rad = Math.toRadians(yaw);
-            // Position outward at (yaw + 180°) facing inward toward center
-            double px = center.getX() + Math.sin(rad) * dist;
-            double pz = center.getZ() - Math.cos(rad) * dist;
-            texts.add(new TextPiece(px, y, pz, yaw, 0.0f, arrow, 2.0f, false));
+            double theta = i * (Math.PI * 0.5);
+            double cos = Math.cos(theta);
+            double sin = Math.sin(theta);
+
+            // Inner diamond nose pointing toward center
+            double noseDist = arrowDist - 0.38;
+            double noseRot = theta + Math.PI * 0.25;
+            out.add(centeredBox(
+                    cx + cos * noseDist, arrowY, cz + sin * noseDist,
+                    0.50f, 0.24f, 0.50f,
+                    0.0f, (float) -Math.sin(noseRot * 0.5), 0.0f, (float) Math.cos(noseRot * 0.5),
+                    BlockVisualKind.STACK_ARROW_ACCENT
+            ));
+
+            // Two angled V-chevron wings sweeping outward
+            double wingLx = arrowDist + 0.16;
+            double leftRot = theta - Math.PI * 0.25;
+            double rightRot = theta + Math.PI * 0.25;
+            out.add(centeredBox(
+                    cx + cos * wingLx - sin * (-0.42), arrowY, cz + sin * wingLx + cos * (-0.42),
+                    0.95f, 0.22f, 0.24f,
+                    0.0f, (float) -Math.sin(leftRot * 0.5), 0.0f, (float) Math.cos(leftRot * 0.5),
+                    BlockVisualKind.STACK_BORDER
+            ));
+            out.add(centeredBox(
+                    cx + cos * wingLx - sin * 0.42, arrowY, cz + sin * wingLx + cos * 0.42,
+                    0.95f, 0.22f, 0.24f,
+                    0.0f, (float) -Math.sin(rightRot * 0.5), 0.0f, (float) Math.cos(rightRot * 0.5),
+                    BlockVisualKind.STACK_BORDER
+            ));
         }
-        return texts;
+
+        // Large overhead floating 3D downward arrow beacon visible from across the arena
+        double bob = 0.28 * Math.sin(castProgress * Math.PI * 6.0);
+        double headY = floorY + 3.05 + bob;
+        float diagZ = (float) Math.sin(Math.PI / 8.0);
+        float diagW = (float) Math.cos(Math.PI / 8.0);
+        out.add(centeredBox(cx, headY + 0.85, cz, 0.34f, 1.05f, 0.34f, 0.0f, 0.0f, 0.0f, 1.0f, BlockVisualKind.STACK_ARROW_ACCENT));
+        out.add(centeredBox(cx, headY, cz, 0.68f, 0.68f, 0.38f, 0.0f, 0.0f, diagZ, diagW, BlockVisualKind.STACK_BEAM));
+        out.add(centeredBox(cx - 0.38, headY + 0.34, cz, 0.85f, 0.24f, 0.32f, 0.0f, 0.0f, -diagZ, diagW, BlockVisualKind.STACK_BORDER));
+        out.add(centeredBox(cx + 0.38, headY + 0.34, cz, 0.85f, 0.24f, 0.32f, 0.0f, 0.0f, diagZ, diagW, BlockVisualKind.STACK_BORDER));
+        return out;
+    }
+
+    private List<BlockPiece> buildSoloGuardStackPieces(
+            Location center,
+            double radius,
+            double castProgress) {
+        double cx = center.getX();
+        double floorY = center.getY();
+        double cz = center.getZ();
+        List<BlockPiece> out = new ArrayList<>(CIRCLE_RIM_SEGMENTS + 1);
+        addRingBorderPieces(cx, floorY + FLOOR_BORDER_Y, cz, radius, CIRCLE_RIM_SEGMENTS, 0.14, 0.055, BlockVisualKind.WARNING_BORDER, out);
+        double bob = 0.20 * Math.sin(castProgress * Math.PI * 4.0);
+        double spin = castProgress * Math.PI * 2.0;
+        out.add(centeredBox(
+                cx, floorY + 3.0 + bob, cz,
+                0.55f, 0.55f, 0.55f,
+                0.0f, (float) -Math.sin(spin * 0.5), 0.0f, (float) Math.cos(spin * 0.5),
+                BlockVisualKind.SAFE_BORDER
+        ));
+        return out;
+    }
+
+    private List<TextPiece> buildStackOverheadTextPieces(
+            Location center,
+            double castProgress,
+            boolean soloMode) {
+        double bob = 0.28 * Math.sin(castProgress * Math.PI * (soloMode ? 4.0 : 6.0));
+        Component label = soloMode
+                ? Component.text("⛨ GUARD ⛨", NamedTextColor.AQUA, TextDecoration.BOLD)
+                : Component.text("⬇ ⬇ ⬇", NamedTextColor.GOLD, TextDecoration.BOLD);
+        float scale = soloMode ? 1.8f : 2.4f;
+        double height = soloMode ? 3.75 : 4.75;
+        return List.of(new TextPiece(center.getX(), center.getY() + height + bob, center.getZ(), 0.0f, 0.0f, label, scale, true));
     }
 
     private List<BlockPiece> buildTether3dPieces(Location from, Location to, TelegraphStyle style) {
@@ -1403,6 +1523,28 @@ public final class PacketEventsTelegraphService implements SpatialTelegraphServi
                 (float) width, (float) height, (float) length,
                 tx, 0.0f, tz,
                 0.0f, qy, 0.0f, qw,
+                kind
+        );
+    }
+
+    private static BlockPiece centeredBox(
+            double cx,
+            double cy,
+            double cz,
+            float sx,
+            float sy,
+            float sz,
+            float qx,
+            float qy,
+            float qz,
+            float qw,
+            BlockVisualKind kind) {
+        float[] halfRotated = rotateVecByQuat(sx * 0.5f, sy * 0.5f, sz * 0.5f, qx, qy, qz, qw);
+        return new BlockPiece(
+                cx, cy, cz,
+                sx, sy, sz,
+                -halfRotated[0], -halfRotated[1], -halfRotated[2],
+                qx, qy, qz, qw,
                 kind
         );
     }
@@ -1892,6 +2034,10 @@ public final class PacketEventsTelegraphService implements SpatialTelegraphServi
                 case STACK_GLASS -> StateTypes.YELLOW_STAINED_GLASS;
                 case STACK_CHARGE_GLASS -> StateTypes.ORANGE_STAINED_GLASS;
                 case STACK_BORDER -> StateTypes.YELLOW_CONCRETE;
+                case STACK_ARROW_ACCENT -> StateTypes.GOLD_BLOCK;
+                case STACK_BEAM -> StateTypes.GLOWSTONE;
+                case FIREBALL_CORE -> StateTypes.SHROOMLIGHT;
+                case FIREBALL_SHELL -> StateTypes.ORANGE_STAINED_GLASS;
                 case SPREAD_GLASS -> StateTypes.MAGENTA_STAINED_GLASS;
                 case SPREAD_CHARGE_GLASS -> StateTypes.RED_STAINED_GLASS;
                 case SPREAD_BORDER -> StateTypes.MAGENTA_CONCRETE;

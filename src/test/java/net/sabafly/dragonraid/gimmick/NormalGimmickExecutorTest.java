@@ -678,4 +678,86 @@ class NormalGimmickExecutorTest {
         executor.resetState();
         verify(telegraphService, atLeastOnce()).clearAllTelegraphs(any());
     }
+
+    @Test
+    void fireballBarrageShowsFloorTelegraphAndVisibleOrbAndDetonatesOnlyAfterImpactDelay() {
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        BossConfig.AbilitySettings fbAbility = normalBoss.ability("fireball_barrage").orElseThrow();
+        BossConfig.TimelineStep fbStep = new BossConfig.TimelineStep(7.0, "FIREBALL_BARRAGE", "fireball_barrage");
+        Player target = mockPlayer("DodgeTarget", 8.0, 64.0, 0.0, false, false);
+
+        executor.startCast(fbStep, fbAbility, endWorld, List.of(target), List.of(target), scaled, bossController);
+
+        // First monitor tick (0.1s) immediately spawns wave 1 (3 orbs) with floor AoE + 3D fireball display
+        executor.tickActiveTelegraphs(List.of(target), List.of(target), bossController);
+        verify(telegraphService, org.mockito.Mockito.times(3)).renderCircleAoE(
+                org.mockito.ArgumentMatchers.startsWith("followup:fireball:aoe:"),
+                any(),
+                eq(3.2),
+                eq(0.0),
+                eq(net.sabafly.dragonraid.visual.TelegraphStyle.DANGER),
+                any()
+        );
+        verify(telegraphService, org.mockito.Mockito.times(3)).renderFireballProjectile(
+                org.mockito.ArgumentMatchers.startsWith("followup:fireball:orb:"),
+                any(),
+                eq(1.35),
+                anyFloat(),
+                any()
+        );
+        verify(telegraphService, org.mockito.Mockito.never()).renderImpactBurst(any(), anyDouble(), any(), any());
+        assertTrue(damageTaken.isEmpty(), "Fireballs must not explode prematurely on launch");
+
+        // Advance to 1.0s total (10 ticks): still < 2.2s impact delay -> zero explosions/damage, wave 2 hasn't fired yet
+        for (int i = 0; i < 9; i++) {
+            executor.tickActiveTelegraphs(List.of(target), List.of(target), bossController);
+        }
+        verify(telegraphService, org.mockito.Mockito.never()).renderImpactBurst(any(), anyDouble(), any(), any());
+        assertTrue(damageTaken.isEmpty(), "Fireballs must wait for full 2.2s floor telegraph");
+
+        // Advance past 2.2s (total 24 ticks = 2.4s): Wave 1 orbs detonate cleanly, clear telegraphs, emit EXPLOSION, deal 16 dmg
+        for (int i = 0; i < 14; i++) {
+            executor.tickActiveTelegraphs(List.of(target), List.of(target), bossController);
+        }
+        verify(telegraphService, atLeastOnce()).clearTelegraph(org.mockito.ArgumentMatchers.startsWith("followup:fireball:aoe:"), any());
+        verify(telegraphService, atLeastOnce()).clearTelegraph(org.mockito.ArgumentMatchers.startsWith("followup:fireball:orb:"), any());
+        verify(telegraphService, atLeastOnce()).renderImpactBurst(
+                any(),
+                eq(3.2),
+                eq(net.sabafly.dragonraid.visual.ImpactStyle.EXPLOSION),
+                any()
+        );
+        assertEquals(16.0, damageTaken.get(target.getUniqueId()), 1e-6);
+    }
+
+    @Test
+    void stackMechanicUsesDedicatedStackMarkerAndTetherWithoutFloorLineAoE() {
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 2);
+        BossConfig.AbilitySettings stackAbility = normalBoss.ability("stack").orElseThrow();
+        BossConfig.TimelineStep stackStep = new BossConfig.TimelineStep(10.0, "DRAGON_DIVE_STACK", "stack");
+        Player p1 = mockPlayer("StackA", 6.0, 64.0, 0.0, false, false);
+        Player p2 = mockPlayer("StackB", 10.0, 64.0, 0.0, false, false);
+
+        executor.startCast(stackStep, stackAbility, endWorld, List.of(p1, p2), List.of(p1, p2), scaled, bossController);
+        executor.tickActiveTelegraphs(List.of(p1, p2), List.of(p1, p2), bossController);
+
+        verify(telegraphService, atLeastOnce()).renderStackMarker(
+                eq("cast:DRAGON_DIVE_STACK:stack"),
+                any(),
+                eq(4.5),
+                anyDouble(),
+                eq(false),
+                any()
+        );
+        verify(telegraphService, atLeastOnce()).renderTetherLine(
+                eq("cast:DRAGON_DIVE_STACK:tether"),
+                any(),
+                any(),
+                eq(net.sabafly.dragonraid.visual.TelegraphStyle.STACK),
+                any()
+        );
+        verify(telegraphService, org.mockito.Mockito.never()).renderLineAoE(any(), any(), any(), anyDouble(), anyDouble(), any(), any());
+    }
 }
