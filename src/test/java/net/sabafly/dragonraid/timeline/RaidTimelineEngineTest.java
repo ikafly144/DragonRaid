@@ -185,4 +185,62 @@ class RaidTimelineEngineTest {
             engine.tick(0.1, hpRatio);
         }
     }
+
+    @Test
+    void phaseOnEnterActionsFireOnPhaseEntry() {
+        BossConfig customBoss = new BossConfig(
+                normalBoss.difficulty(),
+                normalBoss.displayNameKey(),
+                normalBoss.baseHp(),
+                normalBoss.baseAttackDamage(),
+                normalBoss.revive(),
+                normalBoss.enrage(),
+                normalBoss.abilities(),
+                List.of(new BossConfig.PhaseConfig(
+                        "phase-enter",
+                        "boss.phase1",
+                        1.0,
+                        0.0,
+                        1.0,
+                        false,
+                        List.of(),
+                        List.of("SPAWN_CRYSTALS", "CUSTOM_ENTER_BUFF")
+                ))
+        );
+
+        List<String> enterEvents = new ArrayList<>();
+        RaidTimelineEngine enterEngine = new RaidTimelineEngine(customBoss, new TimelineListener() {
+            @Override
+            public void onPhaseChanged(BossConfig.PhaseConfig newPhase) {
+                enterEvents.add("PHASE:" + newPhase.id());
+            }
+
+            @Override
+            public void onCastStart(BossConfig.TimelineStep step, @Nullable BossConfig.AbilitySettings ability, double totalCastSeconds) {
+            }
+
+            @Override
+            public void onCastTick(BossConfig.TimelineStep step, @Nullable BossConfig.AbilitySettings ability, double remainingSeconds, double totalCastSeconds) {
+            }
+
+            @Override
+            public void onCastComplete(BossConfig.TimelineStep step, @Nullable BossConfig.AbilitySettings ability) {
+            }
+
+            @Override
+            public void onCastInterrupted(BossConfig.TimelineStep step, @Nullable BossConfig.AbilitySettings ability) {
+            }
+
+            @Override
+            public void onInstantAction(BossConfig.TimelineStep step, @Nullable BossConfig.AbilitySettings ability) {
+                enterEvents.add("INSTANT:" + step.action());
+            }
+        });
+
+        enterEngine.start();
+        assertEquals(
+                List.of("PHASE:phase-enter", "INSTANT:SPAWN_CRYSTALS", "INSTANT:CUSTOM_ENTER_BUFF"),
+                enterEvents
+        );
+    }
 }

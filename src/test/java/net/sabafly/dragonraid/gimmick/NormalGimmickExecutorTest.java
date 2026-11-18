@@ -446,4 +446,132 @@ class NormalGimmickExecutorTest {
         executor.resetState(List.of(underBoss));
         verify(telegraphService, atLeastOnce()).destroyVirtualEntities(any(), eq(new int[]{4242}));
     }
+
+    @Test
+    void losBreathWaitsForAsyncOcclusionBeforeEmittingResolvedEvent() {
+        java.util.concurrent.CompletableFuture<Boolean> asyncLos = new java.util.concurrent.CompletableFuture<>();
+        NormalGimmickExecutor asyncExecutor = new NormalGimmickExecutor(
+                configManager,
+                new MessageService(configManager),
+                scheduler,
+                telegraphService,
+                crystalManager,
+                nowMillis::get,
+                (player, amount) -> damageTaken.merge(player.getUniqueId(), amount, Double::sum),
+                (b, e) -> asyncLos
+        );
+        java.util.concurrent.atomic.AtomicReference<net.sabafly.dragonraid.api.event.RaidMechanicResolvedEvent> resolvedRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        asyncExecutor.setResolvedEventSink(resolvedRef::set);
+
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        BossConfig.AbilitySettings ability = normalBoss.ability("los_breath").orElseThrow();
+        BossConfig.TimelineStep step = new BossConfig.TimelineStep(5.0, "LOS_BREATH", "los_breath");
+        Player exposed = mockPlayer("ExposedLos", 8.0, 64.0, 0.0, false, false);
+
+        asyncExecutor.startCast(step, ability, endWorld, List.of(exposed), List.of(exposed), scaled, bossController);
+        asyncExecutor.completeCast(step, ability, List.of(exposed), List.of(exposed), scaled, bossController, timelineEngine);
+
+        // Async raycast has not completed yet -> resolved event must NOT have fired yet
+        org.junit.jupiter.api.Assertions.assertNull(resolvedRef.get());
+
+        asyncLos.complete(false);
+        net.sabafly.dragonraid.api.event.RaidMechanicResolvedEvent event = resolvedRef.get();
+        org.junit.jupiter.api.Assertions.assertNotNull(event);
+        assertEquals("LOS_BREATH", event.mechanicId());
+        assertTrue(event.hitPlayerIds().contains(exposed.getUniqueId()));
+        assertFalse(event.perfectResolve());
+    }
+
+    @Test
+    void entityThreadGenerationMismatchDoesNotRecordConfirmedMechanicHit() {
+        List<Runnable> queuedEntityTasks = new java.util.ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        lenient().when(deferredScheduler.runAtRegion(any(Location.class), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(deferredScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        });
+
+        NormalGimmickExecutor deferredExecutor = new NormalGimmickExecutor(
+                configManager,
+                new MessageService(configManager),
+                deferredScheduler,
+                telegraphService,
+                crystalManager,
+                nowMillis::get,
+                (player, amount) -> damageTaken.merge(player.getUniqueId(), amount, Double::sum),
+                (b, e) -> java.util.concurrent.CompletableFuture.completedFuture(false)
+        );
+        java.util.concurrent.atomic.AtomicInteger recorderCalls = new java.util.concurrent.atomic.AtomicInteger();
+        deferredExecutor.setMechanicHitRecorder((playerId, mechId) -> recorderCalls.incrementAndGet());
+
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        BossConfig.AbilitySettings ability = normalBoss.ability("tank_buster").orElseThrow();
+        BossConfig.TimelineStep step = new BossConfig.TimelineStep(8.0, "TANK_BUSTER", "tank_buster");
+        Player target = mockPlayer("StaleHitTarget", 2.0, 64.0, 0.0, false, false);
+
+        deferredExecutor.startCast(step, ability, endWorld, List.of(target), List.of(target), scaled, bossController);
+        queuedEntityTasks.clear();
+        deferredExecutor.completeCast(step, ability, List.of(target), List.of(target), scaled, bossController, timelineEngine);
+        assertFalse(queuedEntityTasks.isEmpty());
+        assertEquals(0, recorderCalls.get());
+
+        // Reset bumps generation before queued entity task executes -> neither damage nor telemetry hit recorded
+        deferredExecutor.resetState();
+        queuedEntityTasks.forEach(Runnable::run);
+        assertEquals(0, recorderCalls.get());
+        assertFalse(damageTaken.containsKey(target.getUniqueId()));
+    }
+
+    @Test
+    void staleScriptContextIsRejectedAfterResetState() {
+        net.sabafly.dragonraid.script.DefaultGimmickActionRegistry registry =
+                new net.sabafly.dragonraid.script.DefaultGimmickActionRegistry();
+        java.util.concurrent.atomic.AtomicReference<net.sabafly.dragonraid.api.script.RaidScriptContext> capturedCtx =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        registry.register(new net.sabafly.dragonraid.api.script.GimmickAction() {
+            @Override
+            public String id() {
+                return "CAPTURE_SCRIPT_CTX";
+            }
+
+            @Override
+            public void execute(net.sabafly.dragonraid.api.script.RaidScriptContext context, java.util.Map<String, Object> params) {
+                capturedCtx.set(context);
+            }
+        });
+
+        NormalGimmickExecutor scriptExecutor = new NormalGimmickExecutor(
+                configManager,
+                new MessageService(configManager),
+                scheduler,
+                telegraphService,
+                crystalManager,
+                registry,
+                nowMillis::get,
+                (player, amount) -> damageTaken.merge(player.getUniqueId(), amount, Double::sum),
+                (b, e) -> java.util.concurrent.CompletableFuture.completedFuture(false)
+        );
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        Player participant = mockPlayer("ScriptPlayer", 4.0, 64.0, 0.0, false, false);
+        BossConfig.TimelineStep customStep = new BossConfig.TimelineStep(1.0, "CAPTURE_SCRIPT_CTX", null);
+
+        scriptExecutor.startCast(customStep, null, endWorld, List.of(participant), List.of(participant), scaled, bossController);
+        net.sabafly.dragonraid.api.script.RaidScriptContext staleCtx = capturedCtx.get();
+        org.junit.jupiter.api.Assertions.assertNotNull(staleCtx);
+
+        scriptExecutor.resetState();
+        staleCtx.damagePlayer(participant, 15.0, "CAPTURE_SCRIPT_CTX");
+        staleCtx.knockbackPlayer(participant, new org.bukkit.util.Vector(1.0, 0.5, 0.0));
+
+        assertFalse(damageTaken.containsKey(participant.getUniqueId()));
+        org.mockito.Mockito.verify(participant, org.mockito.Mockito.never()).setVelocity(any());
+    }
 }

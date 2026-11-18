@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import java.nio.file.Path;
@@ -224,5 +225,45 @@ class RaidCrystalManagerTest {
         deferredEntityBinds.getFirst().run();
         assertTrue(deferredMgr.isTrackedCrystal(existing));
         assertEquals(1, deferredMgr.activeCount());
+    }
+
+    @Test
+    void zeroOrNegativeCrystalDamageReturnsCancelledNoBreakWithoutRemoving() {
+        EnderCrystal[] captured = new EnderCrystal[1];
+        RaidCrystalManager singleMgr = new RaidCrystalManager(
+                configManager,
+                scheduler,
+                telegraphService,
+                Logger.getLogger("CancelledDamageCrystalTest"),
+                (world, loc) -> {
+                    EnderCrystal crystal = mock(EnderCrystal.class);
+                    lenient().when(crystal.getUniqueId()).thenReturn(UUID.randomUUID());
+                    lenient().when(crystal.getWorld()).thenReturn(world);
+                    lenient().when(crystal.isDead()).thenReturn(false);
+                    captured[0] = crystal;
+                    return crystal;
+                }
+        );
+        Player damager = mock(Player.class);
+        singleMgr.spawnWave(endWorld, 1, 80.0, 4.0);
+        EnderCrystal crystal = captured[0];
+
+        assertEquals(
+                RaidCrystalManager.CrystalDamageResult.CANCELLED_NO_BREAK,
+                singleMgr.handleCrystalDamage(crystal, 0.0, damager)
+        );
+        assertEquals(
+                RaidCrystalManager.CrystalDamageResult.CANCELLED_NO_BREAK,
+                singleMgr.handleCrystalDamage(crystal, -2.0, damager)
+        );
+        verify(crystal, never()).remove();
+        assertEquals(1, singleMgr.activeCount());
+
+        assertEquals(
+                RaidCrystalManager.CrystalDamageResult.SHATTERED,
+                singleMgr.handleCrystalDamage(crystal, 1.0, damager)
+        );
+        verify(crystal).remove();
+        assertEquals(0, singleMgr.activeCount());
     }
 }

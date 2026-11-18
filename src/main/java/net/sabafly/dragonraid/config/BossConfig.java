@@ -156,8 +156,25 @@ public record BossConfig(
             @Setting("hp-threshold-min") double hpThresholdMin,
             @Setting("timeline-speed") double timelineSpeed,
             @Setting("soft-enrage") boolean softEnrage,
-            @Setting("timeline") List<TimelineStep> timeline
+            @Setting("timeline") List<TimelineStep> timeline,
+            List<String> onEnterActions
     ) {
+        public PhaseConfig {
+            timeline = timeline == null ? List.of() : List.copyOf(timeline);
+            onEnterActions = onEnterActions == null ? List.of() : List.copyOf(onEnterActions);
+        }
+
+        public PhaseConfig(
+                String id,
+                String nameKey,
+                double hpThresholdMax,
+                double hpThresholdMin,
+                double timelineSpeed,
+                boolean softEnrage,
+                List<TimelineStep> timeline) {
+            this(id, nameKey, hpThresholdMax, hpThresholdMin, timelineSpeed, softEnrage, timeline, List.of());
+        }
+
         public boolean matchesHpRatio(double hpRatio) {
             return hpRatio <= hpThresholdMax && hpRatio >= hpThresholdMin;
         }
@@ -229,7 +246,8 @@ public record BossConfig(
                     spec.hpThresholdMin(),
                     spec.timelineSpeed(),
                     spec.softEnrage(),
-                    List.copyOf(steps)));
+                    List.copyOf(steps),
+                    spec.onEnterActions()));
         }
 
         return new BossConfig(

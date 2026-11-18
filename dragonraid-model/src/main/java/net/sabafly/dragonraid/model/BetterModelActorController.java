@@ -18,7 +18,6 @@ import net.sabafly.dragonraid.api.enemy.ModelRendererType;
 import net.sabafly.dragonraid.api.model.ActorModelController;
 import net.sabafly.dragonraid.boss.DragonPosture;
 import org.bukkit.Location;
-import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Vector3f;
@@ -173,14 +172,17 @@ public final class BetterModelActorController implements ActorModelController {
     @Override
     public @Nullable Location boneLocation(String boneName) {
         Objects.requireNonNull(boneName, "boneName");
-        World world = entity != null ? entity.getWorld() : (propAnchor != null ? propAnchor.getWorld() : null);
-        if (tracker != null && world != null) {
-            Vector3f pos = tracker.boneWorldPosition(boneName);
-            if (pos != null) {
-                return new Location(world, pos.x(), pos.y(), pos.z());
+        Location origin = entity != null ? entity.getLocation() : propAnchor;
+        if (origin == null) {
+            return null;
+        }
+        if (tracker != null) {
+            // RenderedBone.worldPosition() returns an origin-relative offset in world orientation.
+            Vector3f relativePos = tracker.boneWorldPosition(boneName);
+            if (relativePos != null) {
+                return origin.clone().add(relativePos.x(), relativePos.y(), relativePos.z());
             }
         }
-        Location origin = entity != null ? entity.getLocation() : propAnchor;
         BoneOffset offset = spec.boneOffsets().getOrDefault(boneName, BoneOffset.ZERO);
         return BoneMath.resolveWorldOffset(origin, offset, currentScale);
     }

@@ -488,6 +488,8 @@ class RaidEncounterM3IntegrationTest {
         EnderCrystal crystal = mock(EnderCrystal.class);
         lenient().when(mockCrystalMgr.isTrackedCrystal(crystal)).thenReturn(true);
         lenient().when(mockCrystalMgr.onCrystalDamage(eq(crystal), anyDouble(), any())).thenReturn(true);
+        lenient().when(mockCrystalMgr.handleCrystalDamage(eq(crystal), anyDouble(), any()))
+                .thenReturn(RaidCrystalManager.CrystalDamageResult.SHATTERED);
 
         DefaultRaidEncounterManager telemetryEncounter = new DefaultRaidEncounterManager(
                 configManager,
@@ -547,6 +549,8 @@ class RaidEncounterM3IntegrationTest {
 
         EncounterResultSnapshot result = telemetryEncounter.lastCompletedResult();
         assertEquals(EncounterOutcome.VICTORY, result.outcome());
+        assertEquals(1, result.partySize());
+        assertTrue(result.firstClear());
         ParticipantCombatMetrics aliceMetrics = result.participantMetrics().get(alice.getUniqueId());
         assertEquals(620.0, aliceMetrics.damageByRole().get(EnemyRole.PRIMARY_BOSS), 1e-6);
         assertEquals(3, aliceMetrics.totalCrystalsDestroyed());

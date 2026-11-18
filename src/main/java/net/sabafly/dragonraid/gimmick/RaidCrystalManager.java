@@ -312,6 +312,12 @@ public final class RaidCrystalManager {
         return entity != null && trackedCrystals.containsKey(entity.getUniqueId());
     }
 
+    public enum CrystalDamageResult {
+        IGNORED,
+        CANCELLED_NO_BREAK,
+        SHATTERED
+    }
+
     /**
      * One-hit shatters a tracked crystal when struck by a player or player projectile, suppressing
      * terrain/self explosion grief and firing the all-crystals-destroyed stagger effect when the last
@@ -323,17 +329,30 @@ public final class RaidCrystalManager {
             EnderCrystal crystal,
             double damage,
             @Nullable Entity damager) {
+        return handleCrystalDamage(crystal, damage, damager) != CrystalDamageResult.IGNORED;
+    }
+
+    /**
+     * Evaluates incoming damage against a tracked crystal, distinguishing unhandled crystals
+     * ({@link CrystalDamageResult#IGNORED}), cancelled zero/already-removed hits
+     * ({@link CrystalDamageResult#CANCELLED_NO_BREAK}), and actual one-hit destruction
+     * ({@link CrystalDamageResult#SHATTERED}).
+     */
+    public CrystalDamageResult handleCrystalDamage(
+            EnderCrystal crystal,
+            double damage,
+            @Nullable Entity damager) {
         Objects.requireNonNull(crystal, "crystal");
         TrackedCrystal tracked = trackedCrystals.get(crystal.getUniqueId());
         if (tracked == null) {
-            return false;
+            return CrystalDamageResult.IGNORED;
         }
         if (damage <= 0.0) {
-            return true;
+            return CrystalDamageResult.CANCELLED_NO_BREAK;
         }
         synchronized (tracked) {
             if (tracked.removed) {
-                return true;
+                return CrystalDamageResult.CANCELLED_NO_BREAK;
             }
             tracked.removed = true;
         }
@@ -388,7 +407,7 @@ public final class RaidCrystalManager {
                 callback.run();
             }
         }
-        return true;
+        return CrystalDamageResult.SHATTERED;
     }
 
     /**

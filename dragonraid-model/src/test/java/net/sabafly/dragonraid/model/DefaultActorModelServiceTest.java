@@ -45,9 +45,10 @@ class DefaultActorModelServiceTest {
         assertEquals(68.0, mouth.getY(), 1e-6);
         assertEquals(26.0, mouth.getZ(), 1e-6);
 
-        assertTrue(controller.playAnimation("sweeping_laser", 1.2, false));
-        assertTrue(controller.stopAnimation("sweeping_laser"));
-        assertFalse(controller.stopAnimation("sweeping_laser"));
+        assertTrue(controller.playAnimation("dive_attack", 1.2, false));
+        assertTrue(controller.stopAnimation("dive_attack"));
+        assertFalse(controller.stopAnimation("dive_attack"));
+        assertFalse(controller.playAnimation("unsupported_clip", 1.0, false));
         controller.close();
     }
 
@@ -56,10 +57,10 @@ class DefaultActorModelServiceTest {
         World world = mock(World.class);
         Entity entity = mock(Entity.class);
         when(entity.getWorld()).thenReturn(world);
-        when(entity.getLocation()).thenReturn(new Location(world, 0.0, 70.0, 0.0));
+        when(entity.getLocation()).thenReturn(new Location(world, 10.0, 70.0, 20.0));
 
         BetterModelActorController.TrackerHandle handle = mock(BetterModelActorController.TrackerHandle.class);
-        when(handle.boneWorldPosition("mouth")).thenReturn(new Vector3f(4.5f, 75.0f, -2.5f));
+        when(handle.boneWorldPosition("mouth")).thenReturn(new Vector3f(4.5f, 5.0f, -2.5f));
         when(handle.animate("clip_breath", 1.5f, false)).thenReturn(true);
         when(handle.animate("dive_attack", 1.0f, true)).thenReturn(true);
         when(handle.stopAnimation("clip_breath")).thenReturn(true);
@@ -85,9 +86,9 @@ class DefaultActorModelServiceTest {
 
         Location mouth = controller.boneLocation("mouth");
         assertNotNull(mouth);
-        assertEquals(4.5, mouth.getX(), 1e-4);
+        assertEquals(14.5, mouth.getX(), 1e-4);
         assertEquals(75.0, mouth.getY(), 1e-4);
-        assertEquals(-2.5, mouth.getZ(), 1e-4);
+        assertEquals(17.5, mouth.getZ(), 1e-4);
 
         assertTrue(controller.playAnimation("breath", 1.5, false));
         verify(handle).animate("clip_breath", 1.5f, false);

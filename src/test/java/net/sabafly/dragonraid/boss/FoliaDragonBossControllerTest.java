@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -22,6 +23,8 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.logging.Logger;
+import net.sabafly.dragonraid.api.model.ActorModelController;
+import net.sabafly.dragonraid.api.model.ActorModelService;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
@@ -337,5 +340,47 @@ class FoliaDragonBossControllerTest {
         assertEquals(10.0, loc.getX(), 1e-3);
         assertEquals(92.0, loc.getY(), 1e-3);
         assertEquals(-15.0, loc.getZ(), 1e-3);
+    }
+
+    @Test
+    void postureTransitionsAndCleanupSyncAndCloseBoundModelController() {
+        EnderDragon dragon = mockDragon(new Location(endWorld, 0.0, 74.0, 0.0), 1200.0);
+        ActorModelService modelService = mock(ActorModelService.class);
+        ActorModelController modelController = mock(ActorModelController.class);
+        lenient().when(modelService.bindEntity(eq(dragon), any())).thenReturn(modelController);
+
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                scheduler,
+                Logger.getLogger("ModelSyncBossTest"),
+                w -> dragon,
+                (w, loc) -> dragon,
+                modelService
+        );
+
+        controller.bindOrSpawn(endWorld, 1200.0).join();
+        verify(modelService).bindEntity(eq(dragon), any());
+        assertEquals(modelController, controller.activeModelController());
+
+        controller.setPosture(DragonPosture.HIGH_HOVER);
+        verify(modelController, atLeastOnce()).setPosture(DragonPosture.HIGH_HOVER);
+
+        controller.beginDive(new Location(endWorld, 12.0, 64.0, 0.0), 0.15);
+        verify(modelController).setPosture(DragonPosture.ASCENDING_CHARGE);
+
+        controller.tick(0.20);
+        verify(modelController).setPosture(DragonPosture.DIVING);
+
+        controller.setPosture(DragonPosture.LOW_ORBIT);
+        controller.stagger(0.5);
+        verify(modelController).setPosture(DragonPosture.STAGGERED);
+
+        // Stagger expiry syncs model back out of STAGGERED during tick
+        controller.tick(0.60);
+        verify(modelController, org.mockito.Mockito.times(2)).setPosture(DragonPosture.LOW_ORBIT);
+
+        controller.cleanup(false).join();
+        assertNull(controller.activeModelController());
+        verify(modelController).close();
     }
 }

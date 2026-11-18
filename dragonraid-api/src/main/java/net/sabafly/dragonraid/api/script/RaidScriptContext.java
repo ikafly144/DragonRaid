@@ -15,13 +15,19 @@ import org.jetbrains.annotations.Nullable;
 /**
  * Folia-safe execution façade exposed to scripted and modular {@link GimmickAction}s.
  *
- * <p>All reads return thread-safe snapshots, and player mutations automatically dispatch onto
- * the owning Folia entity thread.
+ * <p>Metadata reads return thread-safe snapshots, while any access to a {@link Player}'s live
+ * entity state (e.g. location) or mutation must dispatch via {@link #damagePlayer},
+ * {@link #knockbackPlayer}, or {@link #scheduler()}'s {@code runAtEntity}.
  */
 public interface RaidScriptContext {
 
     World world();
 
+    /**
+     * Returns an immutable list copy of online alive participant handles at context creation.
+     * Mutating or reading live entity state on these handles must be dispatched onto each player's
+     * owning Folia entity thread via {@link #scheduler()}.
+     */
     List<Player> aliveParticipants();
 
     @Nullable Location bossLocation();

@@ -1,5 +1,6 @@
 package net.sabafly.dragonraid.model;
 
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,6 +22,15 @@ import org.jetbrains.annotations.Nullable;
  * and PacketEvents virtual props with local bone offsets and scale control.
  */
 public final class VanillaActorController implements ActorModelController {
+
+    private static final Map<String, DragonPosture> BUILTIN_POSTURE_CLIPS = Map.of(
+            "orbit", DragonPosture.LOW_ORBIT,
+            "landed_idle", DragonPosture.CENTER_LANDED,
+            "hover", DragonPosture.HIGH_HOVER,
+            "ascend_charge", DragonPosture.ASCENDING_CHARGE,
+            "dive_attack", DragonPosture.DIVING,
+            "stagger_collapse", DragonPosture.STAGGERED
+    );
 
     private final @Nullable Entity entity;
     private final @Nullable Location propAnchor;
@@ -53,8 +63,17 @@ public final class VanillaActorController implements ActorModelController {
     public boolean playAnimation(String animationKey, double speed, boolean loop) {
         Objects.requireNonNull(animationKey, "animationKey");
         String clip = spec.resolveAnimationClip(animationKey);
-        activeAnimations.add(clip);
-        return true;
+        DragonPosture mappedPosture = BUILTIN_POSTURE_CLIPS.get(clip);
+        if (mappedPosture != null) {
+            this.posture = mappedPosture;
+            activeAnimations.add(clip);
+            return true;
+        }
+        if (spec.animationAliases().containsKey(animationKey)) {
+            activeAnimations.add(clip);
+            return true;
+        }
+        return false;
     }
 
     @Override

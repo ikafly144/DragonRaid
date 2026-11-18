@@ -568,11 +568,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     @Override
     public boolean isFirstClearEncounterAvailable() {
-        if (state != RaidState.IDLE || !configManager.pluginConfig().world().replaceFirstDragon()) {
+        return state == RaidState.IDLE && isFirstClearEligibleDragonPresent(endWorldSupplier.get());
+    }
+
+    private boolean isFirstClearEligibleDragonPresent(@Nullable World endWorld) {
+        if (!configManager.pluginConfig().world().replaceFirstDragon() || endWorld == null) {
             return false;
         }
-        World endWorld = endWorldSupplier.get();
-        if (endWorld == null || !livingDragonPredicate.test(endWorld)) {
+        if (!livingDragonPredicate.test(endWorld)) {
             return false;
         }
         DragonBattle battle = endWorld.getEnderDragonBattle();
@@ -803,7 +806,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 bossConfig,
                 party.size()
         );
-        boolean firstClearRun = isFirstClearEncounterAvailable();
+        boolean firstClearRun = isFirstClearEligibleDragonPresent(endWorldSupplier.get());
 
         final long activationGen;
         synchronized (stateLock) {
@@ -1378,9 +1381,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         cleanupM3Systems(viewers, true);
 
         Location safeSpawn = targetWorld != null ? regionService.safeZoneSpawnLocation(targetWorld) : null;
+        int partySizeSnapshot = participants.size();
+        Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
+                combatMetricsTracker.snapshot();
         restoreAndResetParticipants(safeSpawn);
         long wipeDuration = Math.max(0L, clockMillis.getAsLong() - combatStartedMillis);
-        emitEncounterCompleted(EncounterOutcome.WIPE, wipeDuration);
+        emitEncounterCompleted(EncounterOutcome.WIPE, wipeDuration, partySizeSnapshot, metricsSnapshot);
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(targetWorld);
         completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
     }
@@ -1409,9 +1415,17 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         soulMarkerService.removeAllMarkers(viewers);
         cleanupM3Systems(viewers, true);
         Location safeSpawn = mainEndWorld != null ? regionService.safeZoneSpawnLocation(mainEndWorld) : null;
+        int partySizeSnapshot = participants.size();
+        Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
+                combatMetricsTracker.snapshot();
         restoreAndResetParticipants(safeSpawn);
         if (wasActiveOrWiping) {
-            emitEncounterCompleted(EncounterOutcome.ABORTED, Math.max(0L, clockMillis.getAsLong() - combatStartedMillis));
+            emitEncounterCompleted(
+                    EncounterOutcome.ABORTED,
+                    Math.max(0L, clockMillis.getAsLong() - combatStartedMillis),
+                    partySizeSnapshot,
+                    metricsSnapshot
+            );
         }
         readyPlayers.clear();
         if (instanceManager != null) {
@@ -1457,8 +1471,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         prepareVictoryM3Cleanup(dragon, endWorld, viewers, difficulty, durationMs);
 
         // On victory, restore participant flags where they stand so they can collect drops/egg.
+        int partySizeSnapshot = participants.size();
+        Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
+                combatMetricsTracker.snapshot();
         restoreAndResetParticipants(null);
-        emitEncounterCompleted(EncounterOutcome.VICTORY, durationMs);
+        emitEncounterCompleted(EncounterOutcome.VICTORY, durationMs, partySizeSnapshot, metricsSnapshot);
 
         for (Player viewer : viewers) {
             scheduler.runAtEntity(viewer, () -> {
@@ -1821,8 +1838,13 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             return;
         }
         Entity damager = event instanceof EntityDamageByEntityEvent byEntity ? byEntity.getDamager() : null;
-        if (crystalManager.onCrystalDamage(crystal, event.getDamage(), damager)) {
-            event.setCancelled(true);
+        RaidCrystalManager.CrystalDamageResult result =
+                crystalManager.handleCrystalDamage(crystal, event.getDamage(), damager);
+        if (result == RaidCrystalManager.CrystalDamageResult.IGNORED) {
+            return;
+        }
+        event.setCancelled(true);
+        if (result == RaidCrystalManager.CrystalDamageResult.SHATTERED) {
             Player attacker = resolvePlayerAttacker(damager);
             if (attacker != null && participants.containsKey(attacker.getUniqueId())) {
                 String crystalEnemyId = enemyRegistry.firstByRole(EnemyRole.OBJECTIVE_CRYSTAL)
@@ -1868,7 +1890,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         return null;
     }
 
-    private void emitEncounterCompleted(EncounterOutcome outcome, long durationMs) {
+    private void emitEncounterCompleted(
+            EncounterOutcome outcome,
+            long durationMs,
+            int partySizeSnapshot,
+            Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot) {
         EncounterBlueprint blueprint = this.activeBlueprint;
         BossConfig.Difficulty diff = this.activeDifficulty;
         if (blueprint == null && diff == null) {
@@ -1884,8 +1910,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 outcome,
                 durationMs,
                 this.activeFirstClear,
-                participants.size(),
-                combatMetricsTracker.snapshot()
+                partySizeSnapshot,
+                metricsSnapshot
         );
         this.lastCompletedResult = result;
         Consumer<EncounterResultSnapshot> sink = this.encounterCompletedSink;
@@ -2468,8 +2494,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         List<Player> viewers = onlinePlayersInWorld(endWorld);
         soulMarkerService.removeAllMarkers(viewers);
         cleanupM3Systems(viewers, true);
+        int partySizeSnapshot = participants.size();
+        Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
+                combatMetricsTracker.snapshot();
         restoreAndResetParticipants(regionService.safeZoneSpawnLocation(endWorld));
-        emitEncounterCompleted(EncounterOutcome.ABORTED, 0L);
+        emitEncounterCompleted(EncounterOutcome.ABORTED, 0L, partySizeSnapshot, metricsSnapshot);
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
         completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
     }

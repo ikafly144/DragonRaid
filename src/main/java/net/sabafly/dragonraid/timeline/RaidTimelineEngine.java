@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.timeline;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import net.sabafly.dragonraid.config.BossConfig;
 import org.jetbrains.annotations.Nullable;
@@ -171,6 +172,19 @@ public final class RaidTimelineEngine {
                 ? 0.0
                 : scaledDelay(steps.getFirst().delaySeconds(), phase.timelineSpeed());
         listener.onPhaseChanged(phase);
+        for (String actionId : phase.onEnterActions()) {
+            if (!running) {
+                break;
+            }
+            if (actionId == null || actionId.isBlank()) {
+                continue;
+            }
+            BossConfig.AbilitySettings ability = bossConfig.ability(actionId.toLowerCase(Locale.ROOT)).orElse(null);
+            listener.onInstantAction(
+                    new BossConfig.TimelineStep(0.0, actionId, ability != null ? ability.id() : null),
+                    ability
+            );
+        }
     }
 
     private void executeDueSteps() {

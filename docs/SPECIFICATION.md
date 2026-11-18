@@ -5,7 +5,7 @@
 - **開発言語**: Java / Gradle マルチモジュール構成（Kotlin Scripting DSL 拡張設計）
 - **必須プラグイン依存**: `packetevents` / `Worlds`（TheNextLvl Worlds） / `BetterModel`
 - **モデル表現**: `BetterModel` カスタムモデル（`.bbmodel`＋ボーンアニメーション）とバニラ＋PacketEvents モデルの両方を対等なレンダラーとしてサポート
-- **クライアント要件**: バニラクライアント完全対応（リソースパック不要、BetterModel 側のパケット生成を利用可能）
+- **クライアント要件**: クライアント MOD 不要（`VANILLA` レンダラーはリソースパック不要、`BETTER_MODEL` レンダラーでカスタムモデルを使う場合は BetterModel が生成するリソースパックの配布・適用が必要）
 
 ---
 

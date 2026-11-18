@@ -56,6 +56,8 @@ public final class BuiltInEncounters {
                         .entityType(EntityType.ENDERMAN)
                         .vanillaModel(2.8, Map.of("head", new BoneOffset(0.0, 2.4, 0.0)), Map.of())
                         .stats(100.0, 0.0, false, true, false))
+                // Additional reusable mechanic parameter presets available to custom scripts/rotations;
+                // built-in Normal phases invoke the §4.1 True Ending mechanics below.
                 .mechanic("tank_buster", Map.ofEntries(
                         Map.entry("name-key", "ability.tank_buster.name"),
                         Map.entry("cast-seconds", 3.0),
@@ -222,6 +224,8 @@ public final class BuiltInEncounters {
                         .entityType(EntityType.ENDERMAN)
                         .vanillaModel(3.2, Map.of("head", new BoneOffset(0.0, 2.4, 0.0)), Map.of())
                         .stats(140.0, 0.0, false, true, false))
+                // Additional reusable mechanic parameter presets available to custom scripts/rotations;
+                // built-in Normal phases invoke the §4.1 True Ending mechanics below.
                 .mechanic("tank_buster", Map.ofEntries(
                         Map.entry("name-key", "ability.tank_buster.name"),
                         Map.entry("cast-seconds", 2.5),
