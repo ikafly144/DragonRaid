@@ -12,6 +12,12 @@ import org.jetbrains.annotations.Nullable;
  */
 public interface RaidInstanceManager {
 
+    String INSTANCE_WORLD_PREFIX = "dragonraid_instance_";
+
+    static boolean isManagedInstanceWorldName(@Nullable String worldName) {
+        return worldName != null && worldName.startsWith(INSTANCE_WORLD_PREFIX);
+    }
+
     /**
      * Metadata for an active temporary raid instance world.
      */

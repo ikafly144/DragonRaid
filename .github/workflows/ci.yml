@@ -42,7 +42,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-report
-          path: build/reports/tests/test/
+          path: "**/build/reports/tests/test/"
           retention-days: 7
 
       - name: Upload plugin JAR artifact
@@ -50,6 +50,6 @@ jobs:
         with:
           name: dragonraid-plugin-jar
           path: |
-            build/libs/*.jar
-            !build/libs/*-thin.jar
+            dragonraid-paper/build/libs/*.jar
+            !dragonraid-paper/build/libs/*-thin.jar
           retention-days: 14

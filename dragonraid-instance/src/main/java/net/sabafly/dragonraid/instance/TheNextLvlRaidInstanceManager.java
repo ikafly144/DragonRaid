@@ -32,14 +32,14 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
 
     public static final String INSTANCE_KEY_NAMESPACE = "dragonraid";
     public static final String INSTANCE_KEY_PREFIX = "instance_";
-    public static final String INSTANCE_WORLD_NAME_PREFIX = INSTANCE_KEY_NAMESPACE + "_" + INSTANCE_KEY_PREFIX;
+    public static final String INSTANCE_WORLD_NAME_PREFIX = RaidInstanceManager.INSTANCE_WORLD_PREFIX;
 
     /**
      * Returns {@code true} if {@code worldName} matches the plugin-owned instance prefix
      * ({@code dragonraid_instance_*}).
      */
     public static boolean isManagedInstanceWorldName(@Nullable String worldName) {
-        return worldName != null && worldName.toLowerCase(Locale.ROOT).startsWith(INSTANCE_WORLD_NAME_PREFIX);
+        return RaidInstanceManager.isManagedInstanceWorldName(worldName);
     }
 
     /**
