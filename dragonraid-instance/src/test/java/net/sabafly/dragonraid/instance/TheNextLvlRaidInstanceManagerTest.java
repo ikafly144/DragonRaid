@@ -93,6 +93,7 @@ class TheNextLvlRaidInstanceManagerTest {
         assertNotNull(instance);
         assertSame(mockInstanceWorld, instance.world());
         assertEquals(8, instance.pillarCrystalLocations().size());
+        assertEquals(CircularArenaBuilder.DEFAULT_SURFACE_Y, instance.arenaCenter().getY(), 1e-6);
         assertEquals(1, createCalls.get());
         assertTrue(manager.isInstanceWorld(mockInstanceWorld));
 

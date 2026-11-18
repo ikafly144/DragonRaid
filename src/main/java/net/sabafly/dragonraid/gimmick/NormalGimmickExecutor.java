@@ -460,6 +460,7 @@ public final class NormalGimmickExecutor {
                         ? anchorPlayer.getLocation().clone()
                         : center.clone();
                 slamTarget.setY(center.getY());
+                snapToGroundSurface(slamTarget);
                 bossController.beginDive(slamTarget, Math.max(1.0, castSec * 0.55));
                 this.activeMechanic = ActiveMechanic.locations(
                         MechanicType.GROUND_SLAM_DIVE,
@@ -507,12 +508,18 @@ public final class NormalGimmickExecutor {
             case "ENDERMAN_ERUPTION" -> {
                 String pattern = ability != null ? ability.getString("pattern", "CHASING") : "CHASING";
                 ActiveMechanic mech = ActiveMechanic.eruption(ability, pattern.toUpperCase(Locale.ROOT), aliveParticipants, center, telegraphService, viewers, castSec);
+                for (EruptionSite site : mech.eruptionSites) {
+                    snapToGroundSurface(site.location);
+                }
                 registerMechanicVirtualEntities(mech);
                 this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.enderman.scream", 0.85f);
             }
             case "EXAFLARE_WAVES" -> {
                 List<ExaflareLane> lanes = generateExaflareLanes(center, telegraphService, viewers);
+                for (ExaflareLane lane : lanes) {
+                    snapToGroundSurface(lane.origin);
+                }
                 ActiveMechanic mech = ActiveMechanic.exaflare(ability, lanes, castSec);
                 registerMechanicVirtualEntities(mech);
                 this.activeMechanic = mech;
@@ -520,14 +527,18 @@ public final class NormalGimmickExecutor {
             }
             case "KNOCKBACK_COMBO", "KNOCKBACK_ROAR" -> {
                 bossController.setPosture(DragonPosture.CENTER_LANDED);
-                List<Integer> arrowIds = spawnKnockbackArrows(center, telegraphService, viewers);
-                ActiveMechanic mech = ActiveMechanic.knockback(ability, center, arrowIds, castSec);
+                Location kbCenter = snapToGroundSurface(center.clone());
+                List<Integer> arrowIds = spawnKnockbackArrows(kbCenter, telegraphService, viewers);
+                ActiveMechanic mech = ActiveMechanic.knockback(ability, kbCenter, arrowIds, castSec);
                 registerMechanicVirtualEntities(mech);
                 this.activeMechanic = mech;
                 playWarningSound(viewers, "minecraft:entity.warden.roar", 1.1f);
             }
             case "ENDERMAN_ROTATING_BEAM" -> {
                 List<RotatingEndermanBeam> beams = spawnPlayerTetheredEndermen(aliveParticipants, center, telegraphService, viewers);
+                for (RotatingEndermanBeam beam : beams) {
+                    snapToGroundSurface(beam.origin);
+                }
                 ActiveMechanic mech = ActiveMechanic.rotatingEndermen(ability, beams, castSec);
                 registerMechanicVirtualEntities(mech);
                 this.activeMechanic = mech;
@@ -706,7 +717,12 @@ public final class NormalGimmickExecutor {
                 }
                 if (bossLoc != null) {
                     Location groundCenter = bossLoc.clone();
-                    groundCenter.setY(CircularArenaBuilder.DEFAULT_FLOOR_Y);
+                    if (bossLoc.getWorld() != null) {
+                        groundCenter.setY(arenaCenter(bossLoc.getWorld()).getY());
+                        snapToGroundSurface(groundCenter);
+                    } else {
+                        groundCenter.setY(CircularArenaBuilder.DEFAULT_SURFACE_Y);
+                    }
                     telegraphService.renderCircleAoE("cast:SHIELD_WALL_BREATH:aoe", groundCenter, 34.0, progress, TelegraphStyle.DANGER, viewers);
                 }
             }
@@ -1838,7 +1854,9 @@ public final class NormalGimmickExecutor {
         if (tLoc == null || !bossLoc.getWorld().equals(tLoc.getWorld())) {
             return;
         }
-        double floorY = tLoc.getY();
+        double floorY = TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(bossLoc.getWorld().getName())
+                ? CircularArenaBuilder.DEFAULT_SURFACE_Y
+                : arenaCenter(bossLoc.getWorld()).getY();
         double dx = tLoc.getX() - bossLoc.getX();
         double dz = tLoc.getZ() - bossLoc.getZ();
         double horizLen = Math.hypot(dx, dz);
@@ -1854,7 +1872,7 @@ public final class NormalGimmickExecutor {
             double fanIndex = k - (orbsPerWave - 1) * 0.5;
             double lx = tLoc.getX() + rightX * (fanIndex * lateralSpacing) - dirX * (Math.abs(fanIndex) * 1.8);
             double lz = tLoc.getZ() + rightZ * (fanIndex * lateralSpacing) - dirZ * (Math.abs(fanIndex) * 1.8);
-            Location landingLoc = new Location(bossLoc.getWorld(), lx, floorY, lz);
+            Location landingLoc = snapToGroundSurface(new Location(bossLoc.getWorld(), lx, floorY, lz));
             ActiveFollowUpEffect orb = ActiveFollowUpEffect.fireballOrb(
                     launchOrigin.clone(), landingLoc, radius, impactDelay, damage);
             addFollowUpEffect(orb, tracker);
@@ -1929,10 +1947,19 @@ public final class NormalGimmickExecutor {
             double delaySeconds,
             @Nullable MechanicResolutionTracker tracker) {
         double damage = ability != null ? ability.damage(18.0) : 18.0;
-        Location under = targetLoc.clone().subtract(0.0, 2.4, 0.0);
+        Location snappedLoc = targetLoc.clone();
+        if (snappedLoc.getWorld() != null && TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(snappedLoc.getWorld().getName())) {
+            snappedLoc.setY(CircularArenaBuilder.DEFAULT_SURFACE_Y);
+        } else {
+            if (snappedLoc.getWorld() != null) {
+                snappedLoc.setY(arenaCenter(snappedLoc.getWorld()).getY());
+            }
+            snapToGroundSurface(snappedLoc);
+        }
+        Location under = snappedLoc.clone().subtract(0.0, 2.4, 0.0);
         int entityId = telegraphService.spawnVirtualScaledEnderman(under, 2.6, 0.0f, true, viewers);
         registerVirtualIds(entityId);
-        addFollowUpEffect(ActiveFollowUpEffect.bambooEruption(targetLoc.clone(), entityId, delaySeconds, damage), tracker);
+        addFollowUpEffect(ActiveFollowUpEffect.bambooEruption(snappedLoc, entityId, delaySeconds, damage), tracker);
     }
 
     private void resolveSpread(
@@ -2153,10 +2180,35 @@ public final class NormalGimmickExecutor {
 
     private Location arenaCenter(World world) {
         if (TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(world.getName())) {
-            return new Location(world, 0.0, CircularArenaBuilder.DEFAULT_FLOOR_Y, 0.0);
+            return new Location(world, 0.0, CircularArenaBuilder.DEFAULT_SURFACE_Y, 0.0);
         }
         RegionConfig.Point3D c = configManager.pluginConfig().regions().arena().center();
         return new Location(world, c.x(), c.y(), c.z());
+    }
+
+    private Location snapToGroundSurface(Location loc) {
+        if (loc == null || loc.getWorld() == null) {
+            return loc;
+        }
+        World world = loc.getWorld();
+        if (TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(world.getName())) {
+            loc.setY(CircularArenaBuilder.DEFAULT_SURFACE_Y);
+            return loc;
+        }
+        scheduler.runAtRegion(loc, () -> {
+            int bx = (int) Math.floor(loc.getX());
+            int bz = (int) Math.floor(loc.getZ());
+            int maxScanY = Math.min(world.getMaxHeight() - 2, (int) Math.ceil(loc.getY()) + 16);
+            int minScanY = Math.max(world.getMinHeight(), (int) Math.floor(loc.getY()) - 16);
+            for (int y = maxScanY; y >= minScanY; y--) {
+                Block block = world.getBlockAt(bx, y, bz);
+                if (block != null && block.isSolid()) {
+                    loc.setY(y + 1.0);
+                    break;
+                }
+            }
+        });
+        return loc;
     }
 
     private List<Location> generateLightningLocations(
@@ -2168,18 +2220,21 @@ public final class NormalGimmickExecutor {
         List<Location> strikes = new ArrayList<>(aliveParticipants.size() + randomCount);
         for (Player p : aliveParticipants) {
             if (p != null && p.isOnline() && p.getLocation() != null) {
-                strikes.add(p.getLocation().clone());
+                Location strike = p.getLocation().clone();
+                strike.setY(center.getY());
+                strikes.add(snapToGroundSurface(strike));
             }
         }
         for (int i = 0; i < randomCount; i++) {
             double angle = ThreadLocalRandom.current().nextDouble(0.0, Math.PI * 2.0);
             double r = ThreadLocalRandom.current().nextDouble(3.0, 30.0);
-            strikes.add(new Location(
+            Location strike = new Location(
                     world,
                     center.getX() + Math.cos(angle) * r,
                     center.getY(),
                     center.getZ() + Math.sin(angle) * r
-            ));
+            );
+            strikes.add(snapToGroundSurface(strike));
         }
         return strikes;
     }
@@ -2288,11 +2343,18 @@ public final class NormalGimmickExecutor {
         return cosAngle >= minCos;
     }
 
-    private static Location computeLaserGroundImpact(Location bossLoc, float yawDegrees, double horizontalReach) {
+    private Location computeLaserGroundImpact(Location bossLoc, float yawDegrees, double horizontalReach) {
         double rad = Math.toRadians(yawDegrees);
         double ex = bossLoc.getX() - Math.sin(rad) * horizontalReach;
         double ez = bossLoc.getZ() + Math.cos(rad) * horizontalReach;
-        return new Location(bossLoc.getWorld(), ex, CircularArenaBuilder.DEFAULT_FLOOR_Y + 0.5, ez);
+        double floorY = (bossLoc.getWorld() != null && TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(bossLoc.getWorld().getName()))
+                ? CircularArenaBuilder.DEFAULT_SURFACE_Y
+                : (bossLoc.getWorld() != null ? arenaCenter(bossLoc.getWorld()).getY() : CircularArenaBuilder.DEFAULT_SURFACE_Y);
+        Location impact = new Location(bossLoc.getWorld(), ex, floorY, ez);
+        if (bossLoc.getWorld() != null && !TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(bossLoc.getWorld().getName())) {
+            snapToGroundSurface(impact);
+        }
+        return impact;
     }
 
     private static Location extrapolateYaw(Location origin, float yawDegrees, double length) {
@@ -3026,6 +3088,11 @@ public final class NormalGimmickExecutor {
                 for (Player p : aliveParticipants) {
                     if (p != null && p.isOnline() && p.getLocation() != null) {
                         Location snap = p.getLocation().clone();
+                        if (snap.getWorld() != null && TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(snap.getWorld().getName())) {
+                            snap.setY(CircularArenaBuilder.DEFAULT_SURFACE_Y);
+                        } else {
+                            snap.setY(center.getY());
+                        }
                         int eid = telegraphService.spawnVirtualScaledEnderman(snap.clone().subtract(0.0, 2.4, 0.0), 2.8, 0.0f, true, viewers);
                         sites.add(new EruptionSite(snap, radius, eid));
                     }

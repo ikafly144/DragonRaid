@@ -489,8 +489,12 @@ public final class RaidCrystalManager {
                 double dist = ThreadLocalRandom.current().nextDouble(2.5, 9.0);
                 double sx = crystal.location.getX() + Math.cos(angle) * dist;
                 double sz = crystal.location.getZ() + Math.sin(angle) * dist;
-                double groundY = Math.max(CircularArenaBuilder.DEFAULT_FLOOR_Y, crystal.location.getY() - CircularArenaBuilder.DEFAULT_PILLAR_HEIGHT - 1.0);
+                double groundY = resolveFloorSurfaceY(
+                        crystal.location.getWorld(),
+                        Math.max(CircularArenaBuilder.DEFAULT_SURFACE_Y, crystal.location.getY() - CircularArenaBuilder.DEFAULT_PILLAR_HEIGHT - 1.0)
+                );
                 Location strikeLoc = new Location(crystal.location.getWorld(), sx, groundY, sz);
+                snapLocationToGroundAsync(strikeLoc);
                 synchronized (spawnLock) {
                     pendingLightnings.add(new PendingLightning(telegraphIdSeq.incrementAndGet(), strikeLoc, PILLAR_LIGHTNING_WARN_SECONDS));
                 }
@@ -614,16 +618,53 @@ public final class RaidCrystalManager {
         }
     }
 
+    private double resolveFloorSurfaceY(@Nullable World world, double fallbackY) {
+        if (world != null && TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(world.getName())) {
+            return CircularArenaBuilder.DEFAULT_SURFACE_Y;
+        }
+        return fallbackY;
+    }
+
+    private void snapLocationToGroundAsync(Location loc) {
+        World world = loc.getWorld();
+        if (world == null) {
+            return;
+        }
+        if (TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(world.getName())) {
+            loc.setY(CircularArenaBuilder.DEFAULT_SURFACE_Y);
+            return;
+        }
+        scheduler.runAtRegion(loc, () -> {
+            int bx = (int) Math.floor(loc.getX());
+            int bz = (int) Math.floor(loc.getZ());
+            int maxScanY = Math.min(world.getMaxHeight() - 2, (int) Math.ceil(loc.getY()) + 16);
+            int minScanY = Math.max(world.getMinHeight(), (int) Math.floor(loc.getY()) - 16);
+            for (int y = maxScanY; y >= minScanY; y--) {
+                Block block = world.getBlockAt(bx, y, bz);
+                if (block != null && block.isSolid()) {
+                    loc.setY(y + 1.0);
+                    break;
+                }
+            }
+        });
+    }
+
     private static Location extrapolateBeamEndpoint(Location origin, Location target, double length) {
         double dx = target.getX() - origin.getX();
         double dz = target.getZ() - origin.getZ();
         double horiz = Math.hypot(dx, dz);
+        double minSurfaceY = (origin.getWorld() != null && TheNextLvlRaidInstanceManager.isManagedInstanceWorldName(origin.getWorld().getName()))
+                ? CircularArenaBuilder.DEFAULT_SURFACE_Y
+                : Math.max(CircularArenaBuilder.DEFAULT_FLOOR_Y, origin.getY() - CircularArenaBuilder.DEFAULT_PILLAR_HEIGHT - 1.0);
+        double endpointY = Math.max(minSurfaceY, target.getY());
         if (horiz < 1e-4) {
-            return target.clone();
+            Location copy = target.clone();
+            copy.setY(endpointY);
+            return copy;
         }
         double ex = origin.getX() + (dx / horiz) * length;
         double ez = origin.getZ() + (dz / horiz) * length;
-        return new Location(origin.getWorld(), ex, target.getY() + 0.5, ez);
+        return new Location(origin.getWorld(), ex, endpointY, ez);
     }
 
     private static double distanceToSegment2D(Location point, Location a, Location b) {

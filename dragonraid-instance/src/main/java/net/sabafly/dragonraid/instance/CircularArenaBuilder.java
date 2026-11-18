@@ -24,6 +24,7 @@ public final class CircularArenaBuilder {
     public static final int DEFAULT_PILLAR_COUNT = 8;
     public static final int DEFAULT_PILLAR_HEIGHT = 8;
     public static final int DEFAULT_FLOOR_Y = 64;
+    public static final int DEFAULT_SURFACE_Y = DEFAULT_FLOOR_Y + 1;
 
     private final RaidScheduler scheduler;
     private final double arenaRadius;

@@ -760,4 +760,129 @@ class NormalGimmickExecutorTest {
         );
         verify(telegraphService, org.mockito.Mockito.never()).renderLineAoE(any(), any(), any(), anyDouble(), anyDouble(), any(), any());
     }
+
+    @Test
+    void managedInstanceWorldSnapsFixedGroundTelegraphsToSurfaceY65EvenWhenPlayerJumpsOrFalls() {
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_1");
+        lenient().when(instWorld.getMinHeight()).thenReturn(0);
+        lenient().when(instWorld.getMaxHeight()).thenReturn(256);
+
+        DragonBossController instBoss = mock(DragonBossController.class);
+        lenient().when(instBoss.bossLocation()).thenReturn(new Location(instWorld, 0.0, 82.0, 0.0));
+        lenient().when(instBoss.isStaggered()).thenReturn(false);
+
+        Player jumpingPlayer = mockPlayer("Jumper", 8.0, 67.5, 0.0, false, false);
+        lenient().when(jumpingPlayer.getWorld()).thenReturn(instWorld);
+        lenient().when(jumpingPlayer.getLocation()).thenReturn(new Location(instWorld, 8.0, 67.5, 0.0));
+        Player fallingPlayer = mockPlayer("Faller", 12.0, 62.0, 0.0, false, false);
+        lenient().when(fallingPlayer.getWorld()).thenReturn(instWorld);
+        lenient().when(fallingPlayer.getLocation()).thenReturn(new Location(instWorld, 12.0, 62.0, 0.0));
+
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 2);
+        double expectedSurface = net.sabafly.dragonraid.instance.CircularArenaBuilder.DEFAULT_SURFACE_Y;
+
+        // 1. FIREBALL_BARRAGE locks floor AoEs at DEFAULT_SURFACE_Y (65.0) even if targeted player is jumping (67.5) or falling (62.0)
+        org.mockito.ArgumentCaptor<Location> fbLocCaptor = org.mockito.ArgumentCaptor.forClass(Location.class);
+        executor.startCast(
+                new BossConfig.TimelineStep(7.0, "FIREBALL_BARRAGE", "fireball_barrage"),
+                normalBoss.ability("fireball_barrage").orElseThrow(),
+                instWorld, List.of(jumpingPlayer, fallingPlayer), List.of(jumpingPlayer, fallingPlayer), scaled, instBoss);
+        executor.tickActiveTelegraphs(List.of(jumpingPlayer, fallingPlayer), List.of(jumpingPlayer, fallingPlayer), instBoss);
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                org.mockito.ArgumentMatchers.startsWith("followup:fireball:aoe:"),
+                fbLocCaptor.capture(), anyDouble(), anyDouble(), any(), any());
+        assertTrue(fbLocCaptor.getAllValues().stream().allMatch(l -> Math.abs(l.getY() - expectedSurface) < 1e-6));
+        executor.resetState();
+
+        // 2. SHIELD_WALL_BREATH uses surface Y (65.0) instead of block Y (64.0)
+        org.mockito.ArgumentCaptor<Location> breathLocCaptor = org.mockito.ArgumentCaptor.forClass(Location.class);
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        executor.startCast(
+                new BossConfig.TimelineStep(12.0, "SHIELD_WALL_BREATH", "shield_wall_breath"),
+                normalBoss.ability("shield_wall_breath").orElseThrow(),
+                instWorld, List.of(jumpingPlayer), List.of(jumpingPlayer), scaled, instBoss);
+        executor.tickActiveTelegraphs(List.of(jumpingPlayer), List.of(jumpingPlayer), instBoss);
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                eq("cast:SHIELD_WALL_BREATH:aoe"),
+                breathLocCaptor.capture(), anyDouble(), anyDouble(), any(), any());
+        assertEquals(expectedSurface, breathLocCaptor.getValue().getY(), 1e-6);
+        executor.resetState();
+
+        // 3. SWEEPING_LASER endpoint uses surface Y (65.0) instead of 64.5
+        org.mockito.ArgumentCaptor<Location> laserLocCaptor = org.mockito.ArgumentCaptor.forClass(Location.class);
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        executor.startCast(
+                new BossConfig.TimelineStep(20.0, "SWEEPING_LASER", "sweeping_laser"),
+                normalBoss.ability("sweeping_laser").orElse(null),
+                instWorld, List.of(jumpingPlayer), List.of(jumpingPlayer), scaled, instBoss);
+        executor.tickActiveTelegraphs(List.of(jumpingPlayer), List.of(jumpingPlayer), instBoss);
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                eq("cast:SWEEPING_LASER:end"),
+                laserLocCaptor.capture(), anyDouble(), anyDouble(), any(), any());
+        assertEquals(expectedSurface, laserLocCaptor.getValue().getY(), 1e-6);
+        executor.resetState();
+
+        // 4. KNOCKBACK_COMBO & ENDERMAN_ERUPTION use surface Y (65.0)
+        org.mockito.ArgumentCaptor<Location> kbLocCaptor = org.mockito.ArgumentCaptor.forClass(Location.class);
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        executor.startCast(
+                new BossConfig.TimelineStep(16.0, "KNOCKBACK_COMBO", "knockback_combo"),
+                normalBoss.ability("knockback_combo").orElse(null),
+                instWorld, List.of(jumpingPlayer), List.of(jumpingPlayer), scaled, instBoss);
+        executor.tickActiveTelegraphs(List.of(jumpingPlayer), List.of(jumpingPlayer), instBoss);
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                eq("cast:KNOCKBACK_COMBO:aoe"),
+                kbLocCaptor.capture(), anyDouble(), anyDouble(), any(), any());
+        assertEquals(expectedSurface, kbLocCaptor.getValue().getY(), 1e-6);
+        executor.resetState();
+
+        org.mockito.ArgumentCaptor<Location> erupLocCaptor = org.mockito.ArgumentCaptor.forClass(Location.class);
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        executor.startCast(
+                new BossConfig.TimelineStep(18.0, "ENDERMAN_ERUPTION", "enderman_eruption"),
+                normalBoss.ability("enderman_eruption").orElse(null),
+                instWorld, List.of(fallingPlayer), List.of(fallingPlayer), scaled, instBoss);
+        for (int i = 0; i < 8; i++) {
+            executor.tickActiveTelegraphs(List.of(fallingPlayer), List.of(fallingPlayer), instBoss);
+        }
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                org.mockito.ArgumentMatchers.startsWith("followup:bamboo:"),
+                erupLocCaptor.capture(), anyDouble(), anyDouble(), any(), any());
+        assertEquals(expectedSurface, erupLocCaptor.getValue().getY(), 1e-6);
+        executor.resetState();
+
+        // 5. DRAGON_DIVE_STACK continues to follow player's actual Y (67.5)
+        org.mockito.ArgumentCaptor<Location> stackLocCaptor = org.mockito.ArgumentCaptor.forClass(Location.class);
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        executor.startCast(
+                new BossConfig.TimelineStep(10.0, "DRAGON_DIVE_STACK", "stack"),
+                normalBoss.ability("stack").orElseThrow(),
+                instWorld, List.of(jumpingPlayer, fallingPlayer), List.of(jumpingPlayer, fallingPlayer), scaled, instBoss);
+        executor.tickActiveTelegraphs(List.of(jumpingPlayer, fallingPlayer), List.of(jumpingPlayer, fallingPlayer), instBoss);
+        verify(telegraphService, atLeastOnce()).renderStackMarker(
+                eq("cast:DRAGON_DIVE_STACK:stack"),
+                stackLocCaptor.capture(), anyDouble(), anyDouble(), eq(false), any());
+        double actualStackY = stackLocCaptor.getValue().getY();
+        assertTrue(Math.abs(actualStackY - 67.5) < 1e-6 || Math.abs(actualStackY - 62.0) < 1e-6);
+        executor.resetState();
+
+        // 6. Non-instance world resolves solid block top surface via RegionScheduler
+        org.bukkit.block.Block solidBlock = mock(org.bukkit.block.Block.class);
+        lenient().when(solidBlock.isSolid()).thenReturn(true);
+        lenient().when(endWorld.getBlockAt(org.mockito.ArgumentMatchers.anyInt(), eq(67), org.mockito.ArgumentMatchers.anyInt())).thenReturn(solidBlock);
+        org.mockito.ArgumentCaptor<Location> nonInstCap = org.mockito.ArgumentCaptor.forClass(Location.class);
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        Player endPlayer = mockPlayer("EndPlayer", 8.0, 64.0, 0.0, false, false);
+        executor.startCast(
+                new BossConfig.TimelineStep(16.0, "KNOCKBACK_COMBO", "knockback_combo"),
+                normalBoss.ability("knockback_combo").orElse(null),
+                endWorld, List.of(endPlayer), List.of(endPlayer), scaled, bossController);
+        executor.tickActiveTelegraphs(List.of(endPlayer), List.of(endPlayer), bossController);
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                eq("cast:KNOCKBACK_COMBO:aoe"),
+                nonInstCap.capture(), anyDouble(), anyDouble(), any(), any());
+        assertEquals(68.0, nonInstCap.getValue().getY(), 1e-6);
+    }
 }

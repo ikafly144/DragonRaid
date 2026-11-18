@@ -249,9 +249,9 @@ public final class PacketEventsTelegraphService implements SpatialTelegraphServi
         }
     }
 
-    private static final double FLOOR_SURFACE_Y = 0.025;
-    private static final double FLOOR_CHARGE_Y = 0.04;
-    private static final double FLOOR_BORDER_Y = 0.05;
+    private static final double FLOOR_SURFACE_Y = 0.04;
+    private static final double FLOOR_CHARGE_Y = 0.06;
+    private static final double FLOOR_BORDER_Y = 0.08;
     private static final int CIRCLE_FILL_STRIPS = 4;
     private static final int CIRCLE_RIM_SEGMENTS = 20;
     private static final int DONUT_SEGMENTS = 16;

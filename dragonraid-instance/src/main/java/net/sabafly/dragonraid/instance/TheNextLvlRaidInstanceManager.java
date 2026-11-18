@@ -132,7 +132,7 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
                                 })
                                 .thenApply(pillars -> new RaidInstance(
                                         world,
-                                        new Location(world, 0.0, CircularArenaBuilder.DEFAULT_FLOOR_Y, 0.0),
+                                        new Location(world, 0.0, CircularArenaBuilder.DEFAULT_SURFACE_Y, 0.0),
                                         CircularArenaBuilder.DEFAULT_ARENA_RADIUS,
                                         pillars
                                 ));
@@ -231,10 +231,10 @@ public final class TheNextLvlRaidInstanceManager implements RaidInstanceManager 
 
     @SuppressWarnings("removal")
     private void configureInstanceWorldRules(World world) {
-        Location center = new Location(world, 0.0, CircularArenaBuilder.DEFAULT_FLOOR_Y + 1.0, 0.0);
+        Location center = new Location(world, 0.0, CircularArenaBuilder.DEFAULT_SURFACE_Y, 0.0);
         scheduler.runAtRegion(center, () -> {
             try {
-                world.setSpawnLocation(0, CircularArenaBuilder.DEFAULT_FLOOR_Y + 1, 0);
+                world.setSpawnLocation(0, CircularArenaBuilder.DEFAULT_SURFACE_Y, 0);
                 if (Bukkit.getServer() != null) {
                     world.setGameRule(GameRule.DO_MOB_SPAWNING, false);
                     world.setGameRule(GameRule.MOB_GRIEFING, false);
