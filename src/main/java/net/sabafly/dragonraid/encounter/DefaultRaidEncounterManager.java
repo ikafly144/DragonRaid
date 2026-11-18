@@ -1396,6 +1396,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         Objects.requireNonNull(sender, "sender");
         World mainEndWorld = endWorldSupplier.get();
         World combatWorld = instanceManager != null ? instanceManager.activeCombatWorld(mainEndWorld) : mainEndWorld;
+        RaidInstanceManager.RaidInstance targetInstance =
+                instanceManager != null ? instanceManager.activeInstance() : null;
         long resetGeneration;
         boolean wasActiveOrWiping;
         synchronized (stateLock) {
@@ -1428,13 +1430,17 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             );
         }
         readyPlayers.clear();
+        if (instanceManager != null && targetInstance == null) {
+            instanceManager.destroyActiveInstance(safeSpawn);
+        }
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(combatWorld);
-        CompletableFuture<Void> endingFuture = instanceManager == null
+        CompletableFuture<Void> endingFuture = (instanceManager == null || targetInstance == null)
                 ? rollbackFuture
                 : rollbackFuture
                         .handle((ignored, err) -> (Void) null)
                         .thenCompose(ignored -> {
-                            CompletableFuture<Void> destroyFuture = instanceManager.destroyActiveInstance(safeSpawn);
+                            CompletableFuture<Void> destroyFuture =
+                                    instanceManager.destroyInstance(targetInstance, safeSpawn);
                             return destroyFuture != null
                                     ? destroyFuture.handle((v, err) -> (Void) null)
                                     : CompletableFuture.completedFuture(null);
