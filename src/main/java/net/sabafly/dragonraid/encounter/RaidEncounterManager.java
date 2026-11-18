@@ -113,6 +113,12 @@ public interface RaidEncounterManager {
     }
 
     /**
+     * Records participant damage dealt to a raid boss entity for combat telemetry.
+     */
+    default void onBossDamage(EnderDragon dragon, EntityDamageEvent event) {
+    }
+
+    /**
      * Cancels vanilla explosion side effects for tracked raid crystals or raid-controlled dragons.
      */
     default void onEntityExplode(Entity entity, Cancellable event) {

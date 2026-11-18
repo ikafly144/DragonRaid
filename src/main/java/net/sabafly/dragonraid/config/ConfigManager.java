@@ -13,23 +13,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
+import net.sabafly.dragonraid.api.script.EncounterBlueprint;
+import net.sabafly.dragonraid.script.BuiltInEncounters;
 import org.bukkit.plugin.Plugin;
 
 /**
  * Manages loading, validation, default resource extraction, and atomic hot-reload
- * of DragonRaid YAML configuration files.
+ * of DragonRaid YAML configuration files, paired with pure {@link EncounterBlueprint} definitions.
  */
 public final class ConfigManager {
 
     public static final String CONFIG_FILE = "config.yml";
-    public static final String BOSS_NORMAL_FILE = "boss_normal.yml";
-    public static final String BOSS_HARD_FILE = "boss_hard.yml";
     public static final String REWARDS_FILE = "rewards.yml";
 
     private static final List<String> DEFAULT_RESOURCES = List.of(
             CONFIG_FILE,
-            BOSS_NORMAL_FILE,
-            BOSS_HARD_FILE,
             REWARDS_FILE,
             "lang/ja_JP.yml",
             "lang/en_US.yml"
@@ -37,6 +35,8 @@ public final class ConfigManager {
 
     private record ConfigSnapshot(
             PluginConfig pluginConfig,
+            EncounterBlueprint normalBlueprint,
+            EncounterBlueprint hardBlueprint,
             BossConfig normalBossConfig,
             BossConfig hardBossConfig,
             RewardsConfig rewardsConfig
@@ -176,12 +176,12 @@ public final class ConfigManager {
     }
 
     private ConfigSnapshot buildValidatedSnapshot(PluginConfig pluginConfig) {
-        BossConfig normalBoss = YamlConfigLoader.loadBossConfig(
-                dataFolder.resolve(BOSS_NORMAL_FILE), BossConfig.Difficulty.NORMAL);
-        BossConfig hardBoss = YamlConfigLoader.loadBossConfig(
-                dataFolder.resolve(BOSS_HARD_FILE), BossConfig.Difficulty.HARD);
+        EncounterBlueprint normalBlueprint = BuiltInEncounters.normalEncounter();
+        EncounterBlueprint hardBlueprint = BuiltInEncounters.hardEncounter();
+        BossConfig normalBoss = BossConfig.fromBlueprint(normalBlueprint);
+        BossConfig hardBoss = BossConfig.fromBlueprint(hardBlueprint);
         RewardsConfig rewards = YamlConfigLoader.loadRewardsConfig(dataFolder.resolve(REWARDS_FILE));
-        return new ConfigSnapshot(pluginConfig, normalBoss, hardBoss, rewards);
+        return new ConfigSnapshot(pluginConfig, normalBlueprint, hardBlueprint, normalBoss, hardBoss, rewards);
     }
 
     public Path dataFolder() {
@@ -190,6 +190,22 @@ public final class ConfigManager {
 
     public PluginConfig pluginConfig() {
         return requireSnapshot().pluginConfig();
+    }
+
+    public EncounterBlueprint normalBlueprint() {
+        return requireSnapshot().normalBlueprint();
+    }
+
+    public EncounterBlueprint hardBlueprint() {
+        return requireSnapshot().hardBlueprint();
+    }
+
+    public EncounterBlueprint blueprint(BossConfig.Difficulty difficulty) {
+        Objects.requireNonNull(difficulty, "difficulty");
+        return switch (difficulty) {
+            case NORMAL -> normalBlueprint();
+            case HARD -> hardBlueprint();
+        };
     }
 
     public BossConfig normalBossConfig() {

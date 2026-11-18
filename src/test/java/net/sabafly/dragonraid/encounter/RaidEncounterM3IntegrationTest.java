@@ -24,6 +24,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
+import net.sabafly.dragonraid.achievement.DefaultRaidAchievementService;
+import net.sabafly.dragonraid.api.enemy.EnemyRole;
+import net.sabafly.dragonraid.api.event.EncounterOutcome;
+import net.sabafly.dragonraid.api.event.EncounterResultSnapshot;
+import net.sabafly.dragonraid.api.event.ParticipantCombatMetrics;
+import net.sabafly.dragonraid.api.event.RaidEncounterCompletedEvent;
 import net.sabafly.dragonraid.boss.DragonBossController;
 import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.config.ConfigManager;
@@ -35,8 +41,11 @@ import net.sabafly.dragonraid.instance.RaidInstanceManager;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.DefaultRaidRegionService;
 import net.sabafly.dragonraid.region.RaidRegionService;
+import net.sabafly.dragonraid.reward.DefaultRaidRewardService;
+import net.sabafly.dragonraid.reward.RewardCalculationResult;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
+import net.sabafly.dragonraid.script.BuiltInEncounters;
 import net.sabafly.dragonraid.storage.Difficulty;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.PlayerRaidStats;
@@ -52,6 +61,8 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.EnderCrystal;
 import org.bukkit.entity.EnderDragon;
 import org.bukkit.entity.Player;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -468,5 +479,85 @@ class RaidEncounterM3IntegrationTest {
         deferredGlobalLaterTasks.getFirst().run();
         verify(instanceMgr).destroyInstance(eq(inst), any());
         assertEquals(RaidState.IDLE, instEncounter.state());
+    }
+
+    @Test
+    void emitsTelemetryEventAndConnectsRewardAndAchievementModulesOnVictory() {
+        RaidCrystalManager mockCrystalMgr = mock(RaidCrystalManager.class);
+        lenient().when(mockCrystalMgr.clearAll()).thenReturn(CompletableFuture.completedFuture(null));
+        EnderCrystal crystal = mock(EnderCrystal.class);
+        lenient().when(mockCrystalMgr.isTrackedCrystal(crystal)).thenReturn(true);
+        lenient().when(mockCrystalMgr.onCrystalDamage(eq(crystal), anyDouble(), any())).thenReturn(true);
+
+        DefaultRaidEncounterManager telemetryEncounter = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                null,
+                playerDataRepository,
+                bossController,
+                hudService,
+                mockCrystalMgr,
+                gimmickExecutor,
+                null,
+                Logger.getLogger("TelemetryIntegrationTest"),
+                () -> endWorld,
+                onlinePlayers::values,
+                onlinePlayers::get,
+                nowMillis::get,
+                w -> true
+        );
+
+        DefaultRaidRewardService rewardService = new DefaultRaidRewardService();
+        DefaultRaidAchievementService achievementService = new DefaultRaidAchievementService();
+        telemetryEncounter.setEncounterCompletedSink(snapshot -> {
+            RaidEncounterCompletedEvent event = new RaidEncounterCompletedEvent(snapshot);
+            rewardService.onEncounterCompleted(event);
+            achievementService.onEncounterCompleted(event);
+        });
+
+        Player alice = addPlayer("Alice", 10.0, 64.0, 0.0);
+        telemetryEncounter.adminStart(mock(CommandSender.class), BossConfig.Difficulty.HARD);
+        Runnable countdownTimer = capturedGlobalTimers.getFirst();
+        for (int i = 0; i < 8; i++) {
+            countdownTimer.run();
+        }
+        assertEquals(RaidState.ACTIVE, telemetryEncounter.state());
+        assertTrue(telemetryEncounter.enemyRegistry().find(BuiltInEncounters.ENEMY_ANCIENT_DRAGON).isPresent());
+        assertTrue(telemetryEncounter.enemyRegistry().find(BuiltInEncounters.ENEMY_OBSIDIAN_CRYSTAL).isPresent());
+
+        // Record boss damage and crystal shatter
+        EntityDamageByEntityEvent bossHit = mock(EntityDamageByEntityEvent.class);
+        lenient().when(bossHit.getDamager()).thenReturn(alice);
+        lenient().when(bossHit.getFinalDamage()).thenReturn(620.0);
+        telemetryEncounter.onBossDamage(dragon, bossHit);
+
+        for (int i = 0; i < 3; i++) {
+            EntityDamageByEntityEvent crystalHit = mock(EntityDamageByEntityEvent.class);
+            lenient().when(crystalHit.getDamager()).thenReturn(alice);
+            lenient().when(crystalHit.getDamage()).thenReturn(1.0);
+            telemetryEncounter.onCrystalDamage(crystal, crystalHit);
+        }
+
+        nowMillis.addAndGet(60_000L);
+        telemetryEncounter.onDragonDefeated(dragon);
+
+        EncounterResultSnapshot result = telemetryEncounter.lastCompletedResult();
+        assertEquals(EncounterOutcome.VICTORY, result.outcome());
+        ParticipantCombatMetrics aliceMetrics = result.participantMetrics().get(alice.getUniqueId());
+        assertEquals(620.0, aliceMetrics.damageByRole().get(EnemyRole.PRIMARY_BOSS), 1e-6);
+        assertEquals(3, aliceMetrics.totalCrystalsDestroyed());
+
+        RewardCalculationResult reward = rewardService.lastReward(alice.getUniqueId()).orElseThrow();
+        assertEquals(25, reward.baseTokens());
+        assertEquals(6, reward.crystalBonus());
+        assertEquals(3, reward.damageBonus());
+        assertTrue(achievementService.unlockedFor(alice.getUniqueId())
+                .contains(DefaultRaidAchievementService.ACH_HARD_CONQUEROR));
+        assertTrue(achievementService.unlockedFor(alice.getUniqueId())
+                .contains(DefaultRaidAchievementService.ACH_CRYSTAL_BREAKER));
     }
 }

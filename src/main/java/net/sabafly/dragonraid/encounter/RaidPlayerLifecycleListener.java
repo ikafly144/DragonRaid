@@ -69,6 +69,8 @@ public final class RaidPlayerLifecycleListener implements Listener {
             encounterManager.onPlayerDamage(player, event);
         } else if (event.getEntity() instanceof EnderCrystal crystal) {
             encounterManager.onCrystalDamage(crystal, event);
+        } else if (event.getEntity() instanceof EnderDragon dragon) {
+            encounterManager.onBossDamage(dragon, event);
         }
     }
 

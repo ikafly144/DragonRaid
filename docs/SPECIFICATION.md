@@ -2,9 +2,10 @@
 
 - **プロジェクト名**: DragonRaid
 - **ターゲット環境**: Minecraft 26.3 / Folia
-- **開発言語**: Java
-- **主要依存ポリシー**: パケット系ライブラリ（PacketEvents 等）を前提とし、サーバー負荷の軽減とクライアント表現の最適化を行う
-- **クライアント要件**: バニラクライアント完全対応（リソースパック不要）
+- **開発言語**: Java / Gradle マルチモジュール構成（Kotlin Scripting DSL 拡張設計）
+- **必須プラグイン依存**: `packetevents` / `Worlds`（TheNextLvl Worlds） / `BetterModel`
+- **モデル表現**: `BetterModel` カスタムモデル（`.bbmodel`＋ボーンアニメーション）とバニラ＋PacketEvents モデルの両方を対等なレンダラーとしてサポート
+- **クライアント要件**: バニラクライアント完全対応（リソースパック不要、BetterModel 側のパケット生成を利用可能）
 
 ---
 
@@ -152,12 +153,22 @@
 - `/dr admin points <add|set|take> <player> <type> <amount>` — ポイント管理
 - `/dr admin reload` — YAML 設定および言語ファイルのリロード
 
-### 7.2 設定ファイル構造（YAML 想定）
-- `config.yml`: ワールド名、リージョン座標、難易度解放・保護ルール（ロスト保護、ベッド無効、一時ブロック上限）、スケーリング係数
-- `boss_normal.yml` / `boss_hard.yml`: ボス HP、基礎攻撃力、蘇生上限、フェーズ閾値、各技のダメージ・詠唱時間・タイムライン定義
-- `rewards.yml`: ドロップ確率テーブル、獲得ポイント量、ショップ交換ラインナップ、カスタム装備／特殊エンチャント定義
-- `lang/ja_JP.yml` / `lang/en_US.yml`: MiniMessage 形式の全 UI・ボスセリフ・ギミック警告文言
+### 7.2 設定ファイル・モジュールおよび拡張アーキテクチャ
+- **マルチモジュール構成（`dragonraid-api` 中心スター型アーキテクチャ）**:
+  - `dragonraid-api`: 共通 SPI、データドリブン Enemy 定義（`RaidEnemyDefinition`, `EnemyRole`, `ActorModelSpec`, `EnemyStatsSpec`, `EnemyLinkSpec`）、`ActorModelController`、`EncounterBlueprint` / `RaidScriptContext` / `GimmickAction`、イベント（`RaidEncounterCompletedEvent`, `RaidMechanicResolvedEvent`）、`RaidServiceRegistry`。
+  - `dragonraid-core`: エンカウンター進行管理、Folia スケジューラ／保護／ダウン・蘇生／HUD、統計集計（`CombatMetricsTracker`）、SQLite 永続化。
+  - `dragonraid-instance`: `TheNextLvl Worlds` を用いた一時 Void インスタンス＆真円アリーナ構築。
+  - `dragonraid-model`: `BetterModel` レンダラーと `Vanilla/PacketEvents` レンダラーの双方を提供するモデル／ボーン／アニメーション制御。
+  - `dragonraid-script`: Kotlin DSL 指向の `EncounterBlueprint` 定義（`BuiltInEncounters`）および `GimmickActionRegistry`（YAML タイムライン互換レイヤーは持たず、純粋な Blueprint/DSL に一本化）。
+  - `dragonraid-reward`: `RaidEncounterCompletedEvent` を購読してエネミー別与ダメ・破壊数・蘇生数に応じた報酬ポイントを算出・付与。
+  - `dragonraid-achievement`: `RaidEncounterCompletedEvent` / `RaidMechanicResolvedEvent` を購読して実績解除を判定。
+- **YAML 設定ファイル（運用設定・報酬・多言語のみ）**:
+  - `config.yml`: ワールド名、リージョン座標、難易度解放・保護ルール（ロスト保護、ベッド無効、一時ブロック上限）、スケーリング係数
+  - `rewards.yml`: ドロップ確率テーブル、獲得ポイント量、ショップ交換ラインナップ、カスタム装備／特殊エンチャント定義
+  - `lang/ja_JP.yml` / `lang/en_US.yml`: MiniMessage 形式の全 UI・ボスセリフ・ギミック警告文言
+  - *(ボス・エネミー・タイムライン・ギミックパラメータは旧 `boss_normal.yml` / `boss_hard.yml` を廃止し、`dragonraid-script` の `EncounterBlueprint` / データドリブン `RaidEnemyDefinition` 定義へ移行)*
 
 ### 7.3 Folia マルチスレッド設計要件
 - レイド進行ステートマシンは一貫した管理構造としつつ、ワールド上のブロック操作・エンティティスポーン/移動・プレイヤー状態変更は必ず対象座標の `RegionScheduler` または対象エンティティの `EntityScheduler` 上で実行する。
+- スクリプト／ギミック記述側は `RaidScriptContext` を介してスナップショット参照と自動ディスパッチ呼び出しのみを行い、Folia のリージョン境界違反を構造的に防止する。
 - 大量のサーバー側 Display Entity を生成せず PacketEvents 経由で非同期/軽量にパケット描画することで、Folia リージョンスレッドの tick 負荷を最小化する。

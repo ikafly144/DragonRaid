@@ -11,10 +11,15 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import net.sabafly.dragonraid.api.enemy.ActorModelSpec;
+import net.sabafly.dragonraid.api.model.ActorModelController;
+import net.sabafly.dragonraid.api.model.ActorModelService;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
+import net.sabafly.dragonraid.model.DefaultActorModelService;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
+import net.sabafly.dragonraid.script.BuiltInEncounters;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -49,7 +54,11 @@ public final class FoliaDragonBossController implements DragonBossController {
     private final Logger logger;
     private final Function<World, @Nullable EnderDragon> dragonFinder;
     private final DragonSpawner dragonSpawner;
+    private final ActorModelService modelService;
 
+    private volatile ActorModelSpec modelSpec =
+            BuiltInEncounters.normalEncounter().primaryBossDefinition().modelSpec();
+    private volatile @Nullable ActorModelController modelController;
     private volatile @Nullable EnderDragon activeDragon;
     private volatile @Nullable UUID capturedFlagsDragonId;
     private volatile boolean summonedByPlugin;
@@ -83,7 +92,23 @@ public final class FoliaDragonBossController implements DragonBossController {
                 scheduler,
                 logger,
                 FoliaDragonBossController::findLivingDragonDefault,
-                (world, loc) -> world.spawn(loc, EnderDragon.class)
+                (world, loc) -> world.spawn(loc, EnderDragon.class),
+                null
+        );
+    }
+
+    public FoliaDragonBossController(
+            ConfigManager configManager,
+            RaidScheduler scheduler,
+            Logger logger,
+            @Nullable ActorModelService modelService) {
+        this(
+                configManager,
+                scheduler,
+                logger,
+                FoliaDragonBossController::findLivingDragonDefault,
+                (world, loc) -> world.spawn(loc, EnderDragon.class),
+                modelService
         );
     }
 
@@ -93,11 +118,32 @@ public final class FoliaDragonBossController implements DragonBossController {
             Logger logger,
             Function<World, @Nullable EnderDragon> dragonFinder,
             DragonSpawner dragonSpawner) {
+        this(configManager, scheduler, logger, dragonFinder, dragonSpawner, null);
+    }
+
+    FoliaDragonBossController(
+            ConfigManager configManager,
+            RaidScheduler scheduler,
+            Logger logger,
+            Function<World, @Nullable EnderDragon> dragonFinder,
+            DragonSpawner dragonSpawner,
+            @Nullable ActorModelService modelService) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.dragonFinder = Objects.requireNonNull(dragonFinder, "dragonFinder");
         this.dragonSpawner = Objects.requireNonNull(dragonSpawner, "dragonSpawner");
+        this.modelService = modelService != null ? modelService : new DefaultActorModelService(logger);
+    }
+
+    @Override
+    public void setModelSpec(ActorModelSpec modelSpec) {
+        this.modelSpec = Objects.requireNonNull(modelSpec, "modelSpec");
+    }
+
+    @Override
+    public @Nullable ActorModelController activeModelController() {
+        return modelController;
     }
 
     @Override
@@ -260,6 +306,11 @@ public final class FoliaDragonBossController implements DragonBossController {
                 }
             }
             configureAnimatedDragon(dragon, initialAnchor.getWorld());
+            ActorModelController prevModel = this.modelController;
+            if (prevModel != null) {
+                prevModel.close();
+            }
+            this.modelController = modelService.bindEntity(dragon, this.modelSpec);
             if (applyHealth && targetMaxHp > 0.0) {
                 applyScaledHealth(dragon, targetMaxHp);
             } else {
@@ -550,6 +601,10 @@ public final class FoliaDragonBossController implements DragonBossController {
                 this.preStaggerPosture = null;
             }
         }
+        ActorModelController model = this.modelController;
+        if (model != null) {
+            model.setPosture(posture);
+        }
     }
 
     @Override
@@ -719,6 +774,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.diveTargetLocation = null;
             this.preStaggerPosture = null;
         }
+        closeActiveModel();
         if (dragon != null && !dragon.isDead()) {
             Runnable restoreTask = () -> {
                 if (generation.get() == defeatGen) {
@@ -762,6 +818,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.targetPosture = DragonPosture.LOW_ORBIT;
             this.cachedLocation = null;
         }
+        closeActiveModel();
         if (dragon == null || dragon.isDead()) {
             return CompletableFuture.completedFuture(null);
         }
@@ -814,6 +871,14 @@ public final class FoliaDragonBossController implements DragonBossController {
     private Location arenaAnchor(World world, double yOffset) {
         RegionConfig.Point3D center = arenaCenterFor(world);
         return new Location(world, center.x(), center.y() + yOffset, center.z(), 0.0f, 0.0f);
+    }
+
+    private void closeActiveModel() {
+        ActorModelController prev = this.modelController;
+        this.modelController = null;
+        if (prev != null) {
+            prev.close();
+        }
     }
 
     private void cancelMovementTask() {

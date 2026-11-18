@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -15,23 +16,34 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
+import net.sabafly.dragonraid.api.enemy.RaidEnemyDefinition;
+import net.sabafly.dragonraid.api.event.RaidMechanicResolvedEvent;
+import net.sabafly.dragonraid.api.model.ActorModelController;
+import net.sabafly.dragonraid.api.script.GimmickAction;
+import net.sabafly.dragonraid.api.script.GimmickActionRegistry;
+import net.sabafly.dragonraid.api.script.RaidScriptContext;
 import net.sabafly.dragonraid.boss.DragonBossController;
 import net.sabafly.dragonraid.boss.DragonPosture;
 import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
+import net.sabafly.dragonraid.core.DataDrivenEnemyRegistry;
 import net.sabafly.dragonraid.i18n.MessageService;
 import net.sabafly.dragonraid.instance.CircularArenaBuilder;
 import net.sabafly.dragonraid.instance.TheNextLvlRaidInstanceManager;
 import net.sabafly.dragonraid.scaling.ScaledEncounterParameters;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
+import net.sabafly.dragonraid.script.BuiltInEncounters;
+import net.sabafly.dragonraid.script.DefaultGimmickActionRegistry;
 import net.sabafly.dragonraid.timeline.RaidTimelineEngine;
 import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import net.sabafly.dragonraid.visual.TelegraphStyle;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
@@ -85,11 +97,13 @@ public final class NormalGimmickExecutor {
     private final LongSupplier clockMillis;
     private final BiConsumer<Player, Double> damageApplier;
     private final OcclusionChecker occlusionChecker;
+    private final GimmickActionRegistry actionRegistry;
 
     private final Map<UUID, Long> shieldRaiseMillis = new ConcurrentHashMap<>();
     private final Map<UUID, Boolean> lastBlockingState = new ConcurrentHashMap<>();
     private final List<ActiveFollowUpEffect> followUpEffects = new ArrayList<>();
     private final Set<Integer> liveVirtualEntityIds = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> activeMechanicHitIds = ConcurrentHashMap.newKeySet();
     private final AtomicInteger towerRotationIndex = new AtomicInteger(0);
     private final AtomicInteger mechanicGeneration = new AtomicInteger(0);
     private final AtomicInteger sessionGeneration = new AtomicInteger(0);
@@ -99,6 +113,9 @@ public final class NormalGimmickExecutor {
     private volatile double safeArenaRadius;
     private volatile double softEnrageAccumulatorSeconds;
     private volatile boolean softEnrageStarted;
+    private volatile @Nullable DataDrivenEnemyRegistry enemyRegistry;
+    private volatile @Nullable Consumer<RaidMechanicResolvedEvent> resolvedEventSink;
+    private volatile @Nullable BiConsumer<UUID, String> mechanicHitRecorder;
 
     public NormalGimmickExecutor(
             ConfigManager configManager,
@@ -112,6 +129,24 @@ public final class NormalGimmickExecutor {
                 scheduler,
                 telegraphService,
                 crystalManager,
+                new DefaultGimmickActionRegistry()
+        );
+    }
+
+    public NormalGimmickExecutor(
+            ConfigManager configManager,
+            MessageService messageService,
+            RaidScheduler scheduler,
+            SpatialTelegraphService telegraphService,
+            RaidCrystalManager crystalManager,
+            GimmickActionRegistry actionRegistry) {
+        this(
+                configManager,
+                messageService,
+                scheduler,
+                telegraphService,
+                crystalManager,
+                actionRegistry,
                 System::currentTimeMillis,
                 (player, amount) -> player.damage(amount),
                 null
@@ -127,15 +162,107 @@ public final class NormalGimmickExecutor {
             LongSupplier clockMillis,
             BiConsumer<Player, Double> damageApplier,
             @Nullable OcclusionChecker occlusionChecker) {
+        this(
+                configManager,
+                messageService,
+                scheduler,
+                telegraphService,
+                crystalManager,
+                new DefaultGimmickActionRegistry(),
+                clockMillis,
+                damageApplier,
+                occlusionChecker
+        );
+    }
+
+    NormalGimmickExecutor(
+            ConfigManager configManager,
+            MessageService messageService,
+            RaidScheduler scheduler,
+            SpatialTelegraphService telegraphService,
+            RaidCrystalManager crystalManager,
+            GimmickActionRegistry actionRegistry,
+            LongSupplier clockMillis,
+            BiConsumer<Player, Double> damageApplier,
+            @Nullable OcclusionChecker occlusionChecker) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.telegraphService = Objects.requireNonNull(telegraphService, "telegraphService");
         this.crystalManager = Objects.requireNonNull(crystalManager, "crystalManager");
+        this.actionRegistry = Objects.requireNonNull(actionRegistry, "actionRegistry");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.damageApplier = Objects.requireNonNull(damageApplier, "damageApplier");
         this.occlusionChecker = occlusionChecker != null ? occlusionChecker : this::checkRayOccludedFoliaSafe;
+        registerBuiltInActions();
         resetState();
+    }
+
+    public GimmickActionRegistry actionRegistry() {
+        return actionRegistry;
+    }
+
+    public void setEnemyRegistry(@Nullable DataDrivenEnemyRegistry enemyRegistry) {
+        this.enemyRegistry = enemyRegistry;
+    }
+
+    public void setResolvedEventSink(@Nullable Consumer<RaidMechanicResolvedEvent> resolvedEventSink) {
+        this.resolvedEventSink = resolvedEventSink;
+    }
+
+    public void setMechanicHitRecorder(@Nullable BiConsumer<UUID, String> mechanicHitRecorder) {
+        this.mechanicHitRecorder = mechanicHitRecorder;
+    }
+
+    private void registerBuiltInActions() {
+        for (String id : List.of(
+                "DRAGON_DIVE_STACK",
+                "GROUND_SLAM_DIVE",
+                "LIGHTNING_STORM",
+                "SWEEPING_LASER",
+                "SHIELD_WALL_BREATH",
+                "FIREBALL_BARRAGE",
+                "ENDERMAN_ERUPTION",
+                "EXAFLARE_WAVES",
+                "KNOCKBACK_COMBO",
+                "ENDERMAN_ROTATING_BEAM",
+                "DUAL_DIVE_DICE",
+                "TETHER_DIVE_RELAY")) {
+            actionRegistry.register(new BuiltInGimmickAction(id));
+        }
+    }
+
+    private final class BuiltInGimmickAction implements GimmickAction {
+        private final String id;
+
+        private BuiltInGimmickAction(String id) {
+            this.id = id;
+        }
+
+        @Override
+        public String id() {
+            return id;
+        }
+
+        @Override
+        public void execute(RaidScriptContext context, Map<String, Object> params) {
+            Objects.requireNonNull(context, "context");
+            Location center = context.arenaCenter();
+            for (Player player : context.aliveParticipants()) {
+                double dmg = params.get("damage") instanceof Number n ? n.doubleValue() : 12.0;
+                if ("KNOCKBACK_COMBO".equals(id) && player.getLocation() != null && center != null) {
+                    Vector push = player.getLocation().toVector().subtract(center.toVector());
+                    if (push.lengthSquared() > 1e-4) {
+                        context.knockbackPlayer(player, push.normalize().multiply(1.5).setY(0.5));
+                    }
+                } else if ("SHIELD_WALL_BREATH".equals(id) && context.isShieldBlocking(player.getUniqueId())) {
+                    continue;
+                }
+                if (dmg > 0.0) {
+                    context.damagePlayer(player, dmg, id);
+                }
+            }
+        }
     }
 
     /**
@@ -153,6 +280,7 @@ public final class NormalGimmickExecutor {
         this.mechanicGeneration.incrementAndGet();
         destroyAllLiveVirtualEntities(viewers);
         this.activeMechanic = null;
+        this.activeMechanicHitIds.clear();
         synchronized (followUpEffects) {
             this.followUpEffects.clear();
         }
@@ -241,6 +369,7 @@ public final class NormalGimmickExecutor {
         rememberViewers(viewers);
         cleanupActiveVirtualEntities(viewers);
         this.mechanicGeneration.incrementAndGet();
+        this.activeMechanicHitIds.clear();
         String action = step.action().toUpperCase(Locale.ROOT);
         double castSec = ability != null ? ability.castSeconds() : 3.5;
         Location center = arenaCenter(endWorld);
@@ -387,7 +516,15 @@ public final class NormalGimmickExecutor {
                 this.activeMechanic = ActiveMechanic.simple(MechanicType.LOS_BREATH, ability, castSec);
                 playWarningSound(viewers, "minecraft:entity.ender_dragon.ambient", 0.8f);
             }
-            default -> this.activeMechanic = null;
+            default -> {
+                this.activeMechanic = null;
+                Optional<GimmickAction> customAction = actionRegistry.get(action);
+                if (customAction.isPresent()) {
+                    RaidScriptContext scriptContext = buildScriptContext(endWorld, aliveParticipants, bossController);
+                    Map<String, Object> params = ability != null ? ability.parameters() : Map.of();
+                    customAction.get().execute(scriptContext, params);
+                }
+            }
         }
     }
 
@@ -636,6 +773,7 @@ public final class NormalGimmickExecutor {
         ActiveMechanic mech = this.activeMechanic;
         this.activeMechanic = null;
         if (mech == null) {
+            this.activeMechanicHitIds.clear();
             return;
         }
         int expectedMechGen = mechanicGeneration.get();
@@ -771,6 +909,28 @@ public final class NormalGimmickExecutor {
             BossConfig.PhaseConfig currentPhase = timelineEngine.currentPhase();
             bossController.setPosture(defaultPostureForPhase(currentPhase));
         }
+
+        Set<UUID> hitsSnapshot = Set.copyOf(activeMechanicHitIds);
+        activeMechanicHitIds.clear();
+        List<UUID> eligibleIds = new ArrayList<>(aliveParticipants.size());
+        for (Player p : aliveParticipants) {
+            if (p != null && p.getUniqueId() != null) {
+                eligibleIds.add(p.getUniqueId());
+            }
+        }
+        String mechanicId = step != null && step.action() != null ? step.action().toUpperCase(Locale.ROOT) : mech.type.name();
+        boolean perfectResolve = hitsSnapshot.isEmpty() && !eligibleIds.isEmpty();
+        RaidMechanicResolvedEvent resolvedEvent = new RaidMechanicResolvedEvent(
+                mechanicId,
+                BuiltInEncounters.ENEMY_ANCIENT_DRAGON,
+                hitsSnapshot,
+                perfectResolve,
+                Map.of(
+                        "eligiblePlayers", List.copyOf(eligibleIds),
+                        "mechanicType", mech.type.name()
+                )
+        );
+        dispatchResolvedEvent(resolvedEvent);
     }
 
     /**
@@ -787,6 +947,7 @@ public final class NormalGimmickExecutor {
         this.mechanicGeneration.incrementAndGet();
         ActiveMechanic current = this.activeMechanic;
         this.activeMechanic = null;
+        this.activeMechanicHitIds.clear();
         if (current != null) {
             destroyMechanicVirtualEntities(current, viewers);
         }
@@ -1183,6 +1344,7 @@ public final class NormalGimmickExecutor {
                     damageApplier.accept(p, damage * mult);
                 }
             });
+            recordPlayerMechanicHit(p.getUniqueId(), "KNOCKBACK_COMBO", expectedMechGen, expectedSessionGen);
         }
         // Follow-up center bamboo eruption 1.4s after knockback
         scheduleBambooEruption(origin.clone(), ability, viewers, expectedSessionGen, 1.4);
@@ -2030,6 +2192,9 @@ public final class NormalGimmickExecutor {
         if (amount <= 0.0) {
             return;
         }
+        ActiveMechanic current = this.activeMechanic;
+        String mechName = current != null ? current.type.name() : "MECHANIC";
+        recordPlayerMechanicHit(player.getUniqueId(), mechName, expectedMechGen, expectedSessionGen);
         scheduler.runAtEntity(player, () -> {
             if (player.isOnline()
                     && mechanicGeneration.get() == expectedMechGen
@@ -2039,12 +2204,132 @@ public final class NormalGimmickExecutor {
         });
     }
 
+    private void recordPlayerMechanicHit(
+            @Nullable UUID playerId,
+            String mechanicId,
+            int expectedMechGen,
+            int expectedSessionGen) {
+        if (playerId == null) {
+            return;
+        }
+        if (mechanicGeneration.get() == expectedMechGen && sessionGeneration.get() == expectedSessionGen) {
+            activeMechanicHitIds.add(playerId);
+            BiConsumer<UUID, String> recorder = this.mechanicHitRecorder;
+            if (recorder != null) {
+                recorder.accept(playerId, mechanicId);
+            }
+        }
+    }
+
+    private void dispatchResolvedEvent(RaidMechanicResolvedEvent event) {
+        Consumer<RaidMechanicResolvedEvent> sink = this.resolvedEventSink;
+        if (sink != null) {
+            sink.accept(event);
+        }
+        if (Bukkit.getServer() != null) {
+            Bukkit.getPluginManager().callEvent(event);
+        }
+    }
+
+    private RaidScriptContext buildScriptContext(
+            World world,
+            List<Player> aliveParticipants,
+            DragonBossController bossController) {
+        List<Player> participantSnapshot = List.copyOf(aliveParticipants);
+        Location center = arenaCenter(world);
+        Location bossLoc = bossController.bossLocation();
+        return new RaidScriptContext() {
+            @Override
+            public World world() {
+                return world;
+            }
+
+            @Override
+            public List<Player> aliveParticipants() {
+                return participantSnapshot;
+            }
+
+            @Override
+            public @Nullable Location bossLocation() {
+                return bossLoc != null ? bossLoc.clone() : null;
+            }
+
+            @Override
+            public Location arenaCenter() {
+                return center.clone();
+            }
+
+            @Override
+            public boolean isShieldBlocking(UUID playerId) {
+                for (Player p : participantSnapshot) {
+                    if (p != null && p.getUniqueId().equals(playerId)) {
+                        return p.isBlocking();
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public Optional<RaidEnemyDefinition> enemyDefinition(String enemyId) {
+                DataDrivenEnemyRegistry reg = enemyRegistry;
+                return reg != null ? reg.find(enemyId) : Optional.empty();
+            }
+
+            @Override
+            public @Nullable ActorModelController primaryBossModel() {
+                return bossController.activeModelController();
+            }
+
+            @Override
+            public RaidScheduler scheduler() {
+                return scheduler;
+            }
+
+            @Override
+            public void damagePlayer(Player player, double amount, String mechanicId) {
+                if (player == null || amount <= 0.0) {
+                    return;
+                }
+                int expectedSessionGen = sessionGeneration.get();
+                applySessionDamageOnEntityThread(player, amount, expectedSessionGen, mechanicId);
+            }
+
+            @Override
+            public void knockbackPlayer(Player player, Vector velocity) {
+                if (player == null || velocity == null) {
+                    return;
+                }
+                int expectedSessionGen = sessionGeneration.get();
+                Vector cloned = velocity.clone();
+                scheduler.runAtEntity(player, () -> {
+                    if (player.isOnline() && sessionGeneration.get() == expectedSessionGen) {
+                        player.setVelocity(cloned);
+                    }
+                });
+            }
+        };
+    }
+
     private void applySessionDamageOnEntityThread(
             Player player,
             double amount,
             int expectedSessionGen) {
+        applySessionDamageOnEntityThread(player, amount, expectedSessionGen, "FOLLOW_UP");
+    }
+
+    private void applySessionDamageOnEntityThread(
+            Player player,
+            double amount,
+            int expectedSessionGen,
+            String mechanicId) {
         if (amount <= 0.0) {
             return;
+        }
+        if (sessionGeneration.get() == expectedSessionGen) {
+            BiConsumer<UUID, String> recorder = this.mechanicHitRecorder;
+            if (recorder != null && player.getUniqueId() != null) {
+                recorder.accept(player.getUniqueId(), mechanicId);
+            }
         }
         scheduler.runAtEntity(player, () -> {
             if (player.isOnline() && sessionGeneration.get() == expectedSessionGen) {

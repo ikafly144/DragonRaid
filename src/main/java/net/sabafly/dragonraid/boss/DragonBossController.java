@@ -1,6 +1,8 @@
 package net.sabafly.dragonraid.boss;
 
 import java.util.concurrent.CompletableFuture;
+import net.sabafly.dragonraid.api.enemy.ActorModelSpec;
+import net.sabafly.dragonraid.api.model.ActorModelController;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.EnderDragon;
@@ -128,6 +130,20 @@ public interface DragonBossController {
      * and DragonBattle progression complete naturally.
      */
     void prepareForVanillaDefeat();
+
+    /**
+     * Updates the {@link ActorModelSpec} ({@code BETTER_MODEL} or {@code VANILLA}) applied when
+     * binding the next boss entity.
+     */
+    default void setModelSpec(ActorModelSpec modelSpec) {
+    }
+
+    /**
+     * Returns the {@link ActorModelController} bound to the active boss entity, or {@code null}.
+     */
+    default @Nullable ActorModelController activeModelController() {
+        return null;
+    }
 
     /**
      * Stops controller tasks and either restores vanilla flags or removes a plugin-summoned dragon.
