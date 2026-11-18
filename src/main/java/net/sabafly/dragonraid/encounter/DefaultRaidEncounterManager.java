@@ -1428,11 +1428,18 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             );
         }
         readyPlayers.clear();
-        if (instanceManager != null) {
-            instanceManager.destroyActiveInstance(safeSpawn);
-        }
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(combatWorld);
-        completeEndingWhenRolledBack(resetGeneration, rollbackFuture);
+        CompletableFuture<Void> endingFuture = instanceManager == null
+                ? rollbackFuture
+                : rollbackFuture
+                        .handle((ignored, err) -> (Void) null)
+                        .thenCompose(ignored -> {
+                            CompletableFuture<Void> destroyFuture = instanceManager.destroyActiveInstance(safeSpawn);
+                            return destroyFuture != null
+                                    ? destroyFuture.handle((v, err) -> (Void) null)
+                                    : CompletableFuture.completedFuture(null);
+                        });
+        completeEndingWhenRolledBack(resetGeneration, endingFuture);
         messageService.send(sender, "command.admin-reset");
     }
 

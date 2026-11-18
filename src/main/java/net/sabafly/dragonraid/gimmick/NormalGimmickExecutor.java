@@ -1034,10 +1034,19 @@ public final class NormalGimmickExecutor {
             }
             destroyMechanicVirtualEntities(current, viewers);
         }
-        for (MechanicResolutionTracker tracker : pendingTrackers) {
-            tracker.cancel();
+        Set<MechanicResolutionTracker> followUpTrackers = new LinkedHashSet<>();
+        synchronized (followUpEffects) {
+            for (ActiveFollowUpEffect eff : this.followUpEffects) {
+                if (eff.resolutionTracker != null) {
+                    followUpTrackers.add(eff.resolutionTracker);
+                }
+            }
         }
-        pendingTrackers.clear();
+        for (MechanicResolutionTracker tracker : List.copyOf(pendingTrackers)) {
+            if (!followUpTrackers.contains(tracker)) {
+                tracker.cancel();
+            }
+        }
     }
 
     /**
