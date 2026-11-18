@@ -6,3 +6,13 @@
  */
 
 rootProject.name = "DragonRaid"
+
+include(
+    "dragonraid-api",
+    "dragonraid-core",
+    "dragonraid-instance",
+    "dragonraid-model",
+    "dragonraid-script",
+    "dragonraid-reward",
+    "dragonraid-achievement",
+)

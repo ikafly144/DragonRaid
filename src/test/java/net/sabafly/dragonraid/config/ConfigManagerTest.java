@@ -24,8 +24,8 @@ class ConfigManagerTest {
         manager.initialize();
 
         assertTrue(Files.exists(tempDir.resolve("config.yml")));
-        assertTrue(Files.exists(tempDir.resolve("boss_normal.yml")));
-        assertTrue(Files.exists(tempDir.resolve("boss_hard.yml")));
+        assertFalse(Files.exists(tempDir.resolve("boss_normal.yml")));
+        assertFalse(Files.exists(tempDir.resolve("boss_hard.yml")));
         assertTrue(Files.exists(tempDir.resolve("rewards.yml")));
         assertTrue(Files.exists(tempDir.resolve("lang/ja_JP.yml")));
         assertTrue(Files.exists(tempDir.resolve("lang/en_US.yml")));
@@ -98,17 +98,17 @@ class ConfigManagerTest {
     }
 
     @Test
-    void bossValidation_rejectsUnknownAbilityReference(@TempDir Path tempDir) throws IOException {
-        ConfigManager manager = newManager(tempDir);
-        manager.initialize();
+    void blueprintConversion_rejectsUnknownAbilityReference() {
+        net.sabafly.dragonraid.api.script.EncounterBlueprint invalid =
+                new net.sabafly.dragonraid.script.dsl.EncounterBlueprintBuilder("bad_bp")
+                        .difficulty(net.sabafly.dragonraid.api.script.EncounterDifficulty.NORMAL)
+                        .displayNameKey("boss.normal.name")
+                        .primaryBoss("ancient_dragon")
+                        .enemy("ancient_dragon", e -> e.displayNameKey("boss.normal.name"))
+                        .phase("p1", p -> p.displayNameKey("phase.p1.name").step(2.0, "FIREBALL_BARRAGE", "nonexistent_skill"))
+                        .build();
 
-        Path normalFile = tempDir.resolve("boss_normal.yml");
-        String invalid = Files.readString(normalFile, StandardCharsets.UTF_8)
-                .replace("ability: tank_buster", "ability: nonexistent_skill");
-        Files.writeString(normalFile, invalid, StandardCharsets.UTF_8);
-
-        ConfigException ex = assertThrows(ConfigException.class, manager::reload);
-        assertEquals("boss_normal.yml", ex.fileName());
+        ConfigException ex = assertThrows(ConfigException.class, () -> BossConfig.fromBlueprint(invalid));
         assertTrue(ex.getMessage().contains("nonexistent_skill"));
     }
 
@@ -242,14 +242,14 @@ class ConfigManagerTest {
         manager.initialize();
 
         Path configFile = tempDir.resolve("config.yml");
-        Path hardBossFile = tempDir.resolve("boss_hard.yml");
+        Path rewardsFile = tempDir.resolve("rewards.yml");
         String originalConfig = Files.readString(configFile, StandardCharsets.UTF_8);
         double originalRadius = manager.pluginConfig().regions().arena().radius();
 
-        // Corrupt companion boss_hard.yml after initialization.
-        String corruptedBoss = Files.readString(hardBossFile, StandardCharsets.UTF_8)
-                .replace("base-hp: 2400.0", "base-hp: -10.0");
-        Files.writeString(hardBossFile, corruptedBoss, StandardCharsets.UTF_8);
+        // Corrupt companion rewards.yml after initialization.
+        String corruptedRewards = Files.readString(rewardsFile, StandardCharsets.UTF_8)
+                .replace("slot: 10", "slot: 99");
+        Files.writeString(rewardsFile, corruptedRewards, StandardCharsets.UTF_8);
 
         RegionConfig current = manager.pluginConfig().regions();
         RegionConfig.ArenaRegion candidateArena = new RegionConfig.ArenaRegion(
@@ -264,7 +264,7 @@ class ConfigManagerTest {
         RegionConfig candidate = new RegionConfig(candidateArena, current.safeZone(), current.voidYThreshold());
 
         ConfigException ex = assertThrows(ConfigException.class, () -> manager.updateRegions(candidate));
-        assertEquals("boss_hard.yml", ex.fileName());
+        assertEquals("rewards.yml", ex.fileName());
         assertEquals(originalConfig, Files.readString(configFile, StandardCharsets.UTF_8));
         assertEquals(originalRadius, manager.pluginConfig().regions().arena().radius(), 1e-6);
     }

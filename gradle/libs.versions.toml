@@ -4,6 +4,8 @@
 java = "25"
 folia-api = "26.3.build.8-stable"
 packetevents = "2.14.0"
+worlds = "4.5.1"
+bettermodel = "3.6.0"
 configurate = "4.2.0"
 sqlite-jdbc = "3.54.1.0"
 hikaricp = "7.1.0"
@@ -17,6 +19,8 @@ run-paper = "3.1.0"
 [libraries]
 folia-api = { group = "dev.folia", name = "folia-api", version.ref = "folia-api" }
 packetevents-spigot = { group = "com.github.retrooper", name = "packetevents-spigot", version.ref = "packetevents" }
+thenextlvl-worlds = { group = "net.thenextlvl", name = "worlds", version.ref = "worlds" }
+bettermodel-bukkit-api = { group = "io.github.toxicity188", name = "bettermodel-bukkit-api", version.ref = "bettermodel" }
 configurate-yaml = { group = "org.spongepowered", name = "configurate-yaml", version.ref = "configurate" }
 sqlite-jdbc = { group = "org.xerial", name = "sqlite-jdbc", version.ref = "sqlite-jdbc" }
 hikaricp = { group = "com.zaxxer", name = "HikariCP", version.ref = "hikaricp" }

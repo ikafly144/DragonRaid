@@ -6,8 +6,11 @@ import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.scaling.ScaledEncounterParameters;
 import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.EnderCrystal;
 import org.bukkit.entity.EnderDragon;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Cancellable;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
@@ -54,6 +57,21 @@ public interface RaidEncounterManager {
 
     void triggerStart(CommandSender sender);
 
+    /**
+     * Initiates an encounter pull from the Exit Portal Altar GUI, returning {@code true} if countdown started.
+     */
+    default boolean startAltarPull(Player initiator, BossConfig.Difficulty difficulty) {
+        triggerStart(initiator);
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if an unkilled first-clear dragon is currently present and eligible for free start.
+     */
+    default boolean isFirstClearEncounterAvailable() {
+        return false;
+    }
+
     void adminStart(CommandSender sender, BossConfig.Difficulty difficulty);
 
     void adminReset(CommandSender sender);
@@ -81,6 +99,30 @@ public interface RaidEncounterManager {
      * Records a right-click interaction pulse to support hold-to-revive with empty/non-usable hands.
      */
     void recordRightClickPulse(Player player);
+
+    /**
+     * Records a shield-raise pulse for Just Guard timing detection.
+     */
+    default void recordShieldPulse(Player player) {
+    }
+
+    /**
+     * Handles incoming damage on an {@link EnderCrystal}, cancelling vanilla 1-hit explosions for raid crystals.
+     */
+    default void onCrystalDamage(EnderCrystal crystal, EntityDamageEvent event) {
+    }
+
+    /**
+     * Records participant damage dealt to a raid boss entity for combat telemetry.
+     */
+    default void onBossDamage(EnderDragon dragon, EntityDamageEvent event) {
+    }
+
+    /**
+     * Cancels vanilla explosion side effects for tracked raid crystals or raid-controlled dragons.
+     */
+    default void onEntityExplode(Entity entity, Cancellable event) {
+    }
 
     /**
      * Handles EnderDragon defeat during an active encounter, performing cleanup and rollback.

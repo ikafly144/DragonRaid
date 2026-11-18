@@ -146,6 +146,28 @@ ability:
   hard_enrage:
     name: "Cataclysm of Ruin"
     warning: "<dark_red><bold>⚠ Enrage timer reached! Casting Cataclysm of Ruin!</bold></dark_red>"
+  ground_slam_dive:
+    name: "Cataclysmic Plunge"
+  lightning_storm:
+    name: "Violet Tempest"
+  sweeping_laser:
+    name: "Oblivion Ray"
+  shield_wall_breath:
+    name: "Torrent of Ruin"
+  fireball_barrage:
+    name: "Abyssal Barrage"
+  enderman_eruption:
+    name: "Rift Eruption"
+  exaflare_waves:
+    name: "Exaflare Cascade"
+  knockback_combo:
+    name: "Sovereign Shockwave"
+  enderman_rotating_beam:
+    name: "Void Apostle Sweep"
+  dual_dive_dice:
+    name: "Twin Dragon Convergence"
+  tether_dive_relay:
+    name: "Fated Dive Relay"
 
 altar:
   title: "<dark_purple>Altar of the End — Select Difficulty</dark_purple>"
@@ -154,6 +176,9 @@ altar:
   hard-name: "<dark_red><bold>Hard / Savage Difficulty</bold></dark_red>"
   hard-lore: "<gray>4 Phases / Aerial phase, combo mechanics & Hard Enrage</gray>\n<gray>Revives: ceil(N/2) | 45s revive window</gray>\n<yellow>Click to summon</yellow>"
   hard-locked: "<red>Clear Normal difficulty at least once to unlock.</red>"
+  hard-unavailable: "<prefix><yellow>Hard / Savage difficulty is scheduled for Milestone 4.</yellow>"
+  cost-line: "<gray>Summon Cost: <aqua><cost></aqua></gray>"
+  cost-free: "<green>No cost for first-clear encounter</green>"
   insufficient-cost: "<prefix><red>Missing required summoning items (Need: <cost>).</red>"
   open-shop-button: "<gold>Open Reward Shop</gold>"
 

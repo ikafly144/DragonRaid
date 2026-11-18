@@ -2,29 +2,51 @@ package net.sabafly.dragonraid;
 
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.PacketEventsAPI;
+import net.sabafly.dragonraid.achievement.DefaultRaidAchievementService;
+import net.sabafly.dragonraid.achievement.RaidAchievementService;
+import net.sabafly.dragonraid.altar.AltarGuiService;
+import net.sabafly.dragonraid.altar.AltarInteractionListener;
+import net.sabafly.dragonraid.api.model.ActorModelService;
+import net.sabafly.dragonraid.api.script.GimmickActionRegistry;
+import net.sabafly.dragonraid.api.service.RaidServiceRegistry;
+import net.sabafly.dragonraid.boss.DragonBossController;
+import net.sabafly.dragonraid.boss.FoliaDragonBossController;
 import net.sabafly.dragonraid.command.DefaultRaidCommandHandler;
 import net.sabafly.dragonraid.command.DragonRaidCommandRegistrar;
 import net.sabafly.dragonraid.command.RaidCommandHandler;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.PluginConfig;
+import net.sabafly.dragonraid.core.DefaultRaidServiceRegistry;
 import net.sabafly.dragonraid.encounter.DefaultRaidEncounterManager;
 import net.sabafly.dragonraid.encounter.RaidEncounterManager;
 import net.sabafly.dragonraid.encounter.RaidPlayerLifecycleListener;
+import net.sabafly.dragonraid.gimmick.NormalGimmickExecutor;
+import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
+import net.sabafly.dragonraid.hud.AdventureRaidHudService;
+import net.sabafly.dragonraid.hud.RaidHudService;
 import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.instance.RaidInstanceManager;
+import net.sabafly.dragonraid.instance.TheNextLvlRaidInstanceManager;
+import net.sabafly.dragonraid.model.DefaultActorModelService;
 import net.sabafly.dragonraid.permission.RaidPermissions;
 import net.sabafly.dragonraid.protection.ArenaProtectionListener;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.DefaultRaidRegionService;
 import net.sabafly.dragonraid.region.RaidRegionService;
+import net.sabafly.dragonraid.reward.DefaultRaidRewardService;
+import net.sabafly.dragonraid.reward.RaidRewardService;
 import net.sabafly.dragonraid.scheduler.FoliaRaidScheduler;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
+import net.sabafly.dragonraid.script.DefaultGimmickActionRegistry;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository;
 import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
 import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
+import net.sabafly.dragonraid.visual.PacketEventsTelegraphService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
+import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import java.nio.file.Path;
 import java.util.logging.Level;
 import org.bukkit.entity.Player;
@@ -45,7 +67,19 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private RaidRegionService regionService;
     private TemporaryBlockTracker temporaryBlockTracker;
     private SoulMarkerService soulMarkerService;
+    private SpatialTelegraphService telegraphService;
+    private RaidHudService hudService;
+    private DragonBossController bossController;
+    private RaidCrystalManager crystalManager;
+    private NormalGimmickExecutor gimmickExecutor;
+    private RaidInstanceManager instanceManager;
     private DefaultRaidEncounterManager encounterManager;
+    private AltarGuiService altarGuiService;
+    private RaidServiceRegistry serviceRegistry;
+    private ActorModelService actorModelService;
+    private GimmickActionRegistry gimmickActionRegistry;
+    private DefaultRaidRewardService rewardService;
+    private DefaultRaidAchievementService achievementService;
 
     @Override
     public void onEnable() {
@@ -92,9 +126,29 @@ public final class DragonRaidPlugin extends JavaPlugin {
         try {
             RaidPermissions.registerDefaults(getServer().getPluginManager());
 
+            this.serviceRegistry = new DefaultRaidServiceRegistry();
+            this.actorModelService = new DefaultActorModelService(getLogger());
+            this.gimmickActionRegistry = new DefaultGimmickActionRegistry();
+            this.rewardService = new DefaultRaidRewardService();
+            this.achievementService = new DefaultRaidAchievementService();
+
             this.regionService = new DefaultRaidRegionService(configManager, raidScheduler);
             this.temporaryBlockTracker = new TemporaryBlockTracker();
             this.soulMarkerService = new PacketEventsSoulMarkerService(configManager, messageService, getLogger());
+            this.telegraphService = new PacketEventsTelegraphService(configManager, getLogger());
+            this.hudService = new AdventureRaidHudService(messageService, raidScheduler);
+            this.bossController = new FoliaDragonBossController(configManager, raidScheduler, getLogger(), actorModelService);
+            this.crystalManager = new RaidCrystalManager(configManager, raidScheduler, telegraphService, getLogger());
+            this.gimmickExecutor = new NormalGimmickExecutor(
+                configManager,
+                messageService,
+                raidScheduler,
+                telegraphService,
+                crystalManager,
+                gimmickActionRegistry
+            );
+            this.instanceManager = new TheNextLvlRaidInstanceManager(raidScheduler, getLogger());
+            this.instanceManager.cleanupOrphanedInstances();
             this.encounterManager = new DefaultRaidEncounterManager(
                 configManager,
                 messageService,
@@ -103,10 +157,25 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 temporaryBlockTracker,
                 soulMarkerService,
                 recoveryRepository,
+                playerDataRepository,
+                bossController,
+                hudService,
+                crystalManager,
+                gimmickExecutor,
+                instanceManager,
                 getLogger()
             );
+
+            serviceRegistry.register(RaidScheduler.class, raidScheduler);
+            serviceRegistry.register(RaidInstanceManager.class, instanceManager);
+            serviceRegistry.register(ActorModelService.class, actorModelService);
+            serviceRegistry.register(GimmickActionRegistry.class, gimmickActionRegistry);
+            serviceRegistry.register(RaidRewardService.class, rewardService);
+            serviceRegistry.register(RaidAchievementService.class, achievementService);
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
 
+            getServer().getPluginManager().registerEvents(rewardService, this);
+            getServer().getPluginManager().registerEvents(achievementService, this);
             getServer().getPluginManager().registerEvents(
                 new ArenaProtectionListener(
                     configManager,
@@ -130,6 +199,20 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 getLogger(),
                 encounterManager
             );
+            this.altarGuiService = new AltarGuiService(
+                configManager,
+                messageService,
+                raidScheduler,
+                regionService,
+                playerDataRepository,
+                encounterManager,
+                commandHandler,
+                getLogger()
+            );
+            getServer().getPluginManager().registerEvents(
+                new AltarInteractionListener(altarGuiService, encounterManager),
+                this
+            );
             new DragonRaidCommandRegistrar(
                 commandHandler,
                 () -> getServer().getOnlinePlayers().stream().map(Player::getName).toList(),
@@ -137,6 +220,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
             ).register(this);
 
             logPacketEventsStatus();
+            logBetterModelStatus();
             getLogger().info("DragonRaid enabled.");
         } catch (RuntimeException ex) {
             getLogger().log(Level.SEVERE, "Failed during DragonRaid startup; cleaning up resources", ex);
@@ -239,6 +323,19 @@ public final class DragonRaidPlugin extends JavaPlugin {
      */
     public RaidEncounterManager encounterManager() {
         return encounterManager;
+    }
+
+    public RaidServiceRegistry serviceRegistry() {
+        return serviceRegistry;
+    }
+
+    private void logBetterModelStatus() {
+        Plugin bmPlugin = getServer().getPluginManager().getPlugin("BetterModel");
+        if (bmPlugin != null) {
+            getLogger().info("BetterModel detected: " + bmPlugin.getPluginMeta().getVersion());
+        } else {
+            getLogger().warning("BetterModel plugin not found; BETTER_MODEL actor rigs will be unavailable.");
+        }
     }
 
     private void logPacketEventsStatus() {

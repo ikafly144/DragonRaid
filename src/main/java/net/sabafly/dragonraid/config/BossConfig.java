@@ -1,13 +1,24 @@
 package net.sabafly.dragonraid.config;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import net.sabafly.dragonraid.api.script.EncounterBlueprint;
+import net.sabafly.dragonraid.api.script.EncounterDifficulty;
+import net.sabafly.dragonraid.api.script.EncounterPhaseSpec;
+import net.sabafly.dragonraid.api.script.EnrageRuleSpec;
+import net.sabafly.dragonraid.api.script.ReviveRuleSpec;
+import net.sabafly.dragonraid.api.script.TimelineEntrySpec;
 import org.spongepowered.configurate.objectmapping.ConfigSerializable;
 import org.spongepowered.configurate.objectmapping.meta.Setting;
 
 /**
- * Strongly-typed immutable representation of {@code boss_normal.yml} and {@code boss_hard.yml}.
+ * Strongly-typed immutable boss encounter settings built from {@link EncounterBlueprint}
+ * definitions in {@code dragonraid-script}.
  */
 @ConfigSerializable
 public record BossConfig(
@@ -92,8 +103,17 @@ public record BossConfig(
             parameters = Map.copyOf(parameters);
         }
 
+        public double castSeconds() {
+            return getDouble("cast-seconds", 3.5);
+        }
+
         public double castSeconds(double fallback) {
             return getDouble("cast-seconds", fallback);
+        }
+
+        public String getString(String key, String fallback) {
+            Object value = parameters.get(key);
+            return value != null ? String.valueOf(value) : fallback;
         }
 
         public double damage(double fallback) {
@@ -136,11 +156,109 @@ public record BossConfig(
             @Setting("hp-threshold-min") double hpThresholdMin,
             @Setting("timeline-speed") double timelineSpeed,
             @Setting("soft-enrage") boolean softEnrage,
-            @Setting("timeline") List<TimelineStep> timeline
+            @Setting("timeline") List<TimelineStep> timeline,
+            List<String> onEnterActions
     ) {
+        public PhaseConfig {
+            timeline = timeline == null ? List.of() : List.copyOf(timeline);
+            onEnterActions = onEnterActions == null ? List.of() : List.copyOf(onEnterActions);
+        }
+
+        public PhaseConfig(
+                String id,
+                String nameKey,
+                double hpThresholdMax,
+                double hpThresholdMin,
+                double timelineSpeed,
+                boolean softEnrage,
+                List<TimelineStep> timeline) {
+            this(id, nameKey, hpThresholdMax, hpThresholdMin, timelineSpeed, softEnrage, timeline, List.of());
+        }
+
         public boolean matchesHpRatio(double hpRatio) {
             return hpRatio <= hpThresholdMax && hpRatio >= hpThresholdMin;
         }
+    }
+
+    /**
+     * Converts a data-driven {@link EncounterBlueprint} into {@link BossConfig} for encounter execution.
+     */
+    public static BossConfig fromBlueprint(EncounterBlueprint blueprint) {
+        Objects.requireNonNull(blueprint, "blueprint");
+        Difficulty difficulty = blueprint.difficulty() == EncounterDifficulty.HARD
+                ? Difficulty.HARD
+                : Difficulty.NORMAL;
+        double baseHp = blueprint.primaryBossDefinition().statsSpec().baseMaxHp();
+
+        ReviveRuleSpec rev = blueprint.reviveRule();
+        ReviveFormula formula = rev.formula() == ReviveRuleSpec.Formula.HALF_CEIL
+                ? ReviveFormula.HALF_CEIL
+                : ReviveFormula.PER_PLAYER;
+        BossReviveSettings reviveSettings = new BossReviveSettings(
+                formula, rev.multiplier(), rev.downedTimeoutSeconds());
+
+        EnrageRuleSpec enr = blueprint.enrageRule();
+        EnrageSettings enrageSettings = new EnrageSettings(
+                new SoftEnrageSettings(
+                        enr.softEnabled(),
+                        enr.softStartPhase(),
+                        enr.voidShrinkPerSecond(),
+                        enr.voidDamagePerSecond()),
+                new HardEnrageSettings(
+                        enr.hardEnabled(),
+                        enr.hardTimeLimitSeconds(),
+                        enr.hardAbilityNameKey(),
+                        enr.hardCastSeconds()));
+
+        Map<String, AbilitySettings> abilities = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Object>> entry : blueprint.mechanicParams().entrySet()) {
+            String abilityId = entry.getKey();
+            Map<String, Object> raw = entry.getValue();
+            String nameKey = raw.containsKey("name-key")
+                    ? String.valueOf(raw.get("name-key"))
+                    : "ability." + abilityId + ".name";
+            Map<String, Object> params = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> param : raw.entrySet()) {
+                if (!"name-key".equals(param.getKey()) && param.getValue() != null) {
+                    params.put(param.getKey(), param.getValue());
+                }
+            }
+            abilities.put(abilityId, new AbilitySettings(abilityId, nameKey, params));
+        }
+
+        List<PhaseConfig> phases = new ArrayList<>(blueprint.phases().size());
+        for (EncounterPhaseSpec spec : blueprint.phases()) {
+            List<TimelineStep> steps = new ArrayList<>(spec.timeline().size());
+            for (TimelineEntrySpec stepSpec : spec.timeline()) {
+                String abilityId = stepSpec.abilityId().isBlank() ? null : stepSpec.abilityId();
+                if (abilityId != null && !abilities.containsKey(abilityId)) {
+                    throw new ConfigException(
+                            "blueprint:" + blueprint.id(),
+                            "phases." + spec.id() + ".timeline",
+                            "Unknown ability referenced in blueprint timeline: " + abilityId);
+                }
+                steps.add(new TimelineStep(stepSpec.delaySeconds(), stepSpec.actionId(), abilityId));
+            }
+            phases.add(new PhaseConfig(
+                    spec.id(),
+                    spec.displayNameKey(),
+                    spec.hpThresholdMax(),
+                    spec.hpThresholdMin(),
+                    spec.timelineSpeed(),
+                    spec.softEnrage(),
+                    List.copyOf(steps),
+                    spec.onEnterActions()));
+        }
+
+        return new BossConfig(
+                difficulty,
+                blueprint.displayNameKey(),
+                baseHp,
+                blueprint.baseAttackDamage(),
+                reviveSettings,
+                enrageSettings,
+                Collections.unmodifiableMap(abilities),
+                List.copyOf(phases));
     }
 
     public Optional<AbilitySettings> ability(String id) {
