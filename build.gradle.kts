@@ -162,17 +162,15 @@ tasks {
                 "v${libs.versions.packetevents.get()}",
                 "packetevents-spigot-${libs.versions.packetevents.get()}.jar"
             )
-            github(
-                "TheNextLvl-net",
-                "worlds",
-                "v${libs.versions.worlds.get()}",
-                "worlds-${libs.versions.worlds.get()}.jar"
+            modrinth(
+                "worlds-1",
+                libs.versions.worlds.get()
             )
             github(
                 "toxicity188",
                 "BetterModel",
                 libs.versions.bettermodel.get(),
-                "BetterModel-bukkit-${libs.versions.bettermodel.get()}.jar"
+                "bettermodel-${libs.versions.bettermodel.get()}-paper.jar"
             )
         }
     }
