@@ -12,6 +12,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -77,7 +78,9 @@ public final class RaidCrystalManager {
     private final List<PendingCrystalBeam> pendingBeams = new ArrayList<>();
     private final AtomicInteger waveCounter = new AtomicInteger(0);
     private final AtomicInteger generation = new AtomicInteger(0);
+    private final AtomicLong telegraphIdSeq = new AtomicLong(0L);
     private int pendingSpawns;
+    private volatile Collection<? extends Player> lastViewers = List.of();
     private volatile double bossRegenPerSecond;
     private volatile double lightningTimerSeconds;
     private volatile double beamTimerSeconds;
@@ -362,6 +365,12 @@ public final class RaidCrystalManager {
         boolean allDestroyed = trackedCrystals.isEmpty();
 
         World world = crystal.getWorld();
+        Collection<? extends Player> cleanupViewers = resolveCleanupViewers(world);
+        if (allDestroyed) {
+            telegraphService.clearTelegraphsByPrefix("crystal:", cleanupViewers);
+        } else {
+            telegraphService.clearTelegraph("crystal:tether:" + crystal.getUniqueId(), cleanupViewers);
+        }
         if (world != null) {
             Location loc = tracked.location;
             for (Player p : world.getPlayers()) {
@@ -420,27 +429,33 @@ public final class RaidCrystalManager {
             @Nullable Location bossLocation,
             Collection<? extends Player> viewers) {
         Objects.requireNonNull(viewers, "viewers");
+        this.lastViewers = List.copyOf(viewers);
         pruneDead();
         if (trackedCrystals.isEmpty()) {
             synchronized (spawnLock) {
                 pendingLightnings.clear();
                 pendingBeams.clear();
             }
+            telegraphService.clearTelegraphsByPrefix("crystal:", viewers);
             return 0.0;
         }
         int activeCount = trackedCrystals.size();
         if (bossLocation != null && bossLocation.getWorld() != null) {
-            for (TrackedCrystal tracked : trackedCrystals.values()) {
+            for (Map.Entry<UUID, TrackedCrystal> entry : trackedCrystals.entrySet()) {
+                TrackedCrystal tracked = entry.getValue();
                 if (tracked.removed) {
                     continue;
                 }
                 telegraphService.renderTetherLine(
+                        "crystal:tether:" + entry.getKey(),
                         tracked.location,
                         bossLocation,
                         TelegraphStyle.TETHER,
                         viewers
                 );
             }
+        } else {
+            telegraphService.clearTelegraphsByPrefix("crystal:tether:", viewers);
         }
         if (deltaSeconds > 0.0) {
             tickCrystalDefenses(deltaSeconds, viewers);
@@ -477,7 +492,7 @@ public final class RaidCrystalManager {
                 double groundY = Math.max(CircularArenaBuilder.DEFAULT_FLOOR_Y, crystal.location.getY() - CircularArenaBuilder.DEFAULT_PILLAR_HEIGHT - 1.0);
                 Location strikeLoc = new Location(crystal.location.getWorld(), sx, groundY, sz);
                 synchronized (spawnLock) {
-                    pendingLightnings.add(new PendingLightning(strikeLoc, PILLAR_LIGHTNING_WARN_SECONDS));
+                    pendingLightnings.add(new PendingLightning(telegraphIdSeq.incrementAndGet(), strikeLoc, PILLAR_LIGHTNING_WARN_SECONDS));
                 }
             }
         }
@@ -495,6 +510,7 @@ public final class RaidCrystalManager {
                         && shooter.location.getWorld().equals(targetSnap.getWorld())) {
                     synchronized (spawnLock) {
                         pendingBeams.add(new PendingCrystalBeam(
+                                telegraphIdSeq.incrementAndGet(),
                                 shooter.location.clone(),
                                 target.getUniqueId(),
                                 targetSnap.clone(),
@@ -516,12 +532,21 @@ public final class RaidCrystalManager {
                     readyLightnings.add(pl);
                     it.remove();
                 } else {
-                    telegraphService.renderCircleAoE(pl.location, PILLAR_LIGHTNING_RADIUS, TelegraphStyle.WARNING, viewers);
+                    double progress = Math.min(1.0, Math.max(0.0, 1.0 - (pl.remainingSeconds / pl.totalSeconds)));
+                    telegraphService.renderCircleAoE(
+                            "crystal:lightning:" + pl.id,
+                            pl.location,
+                            PILLAR_LIGHTNING_RADIUS,
+                            progress,
+                            TelegraphStyle.WARNING,
+                            viewers
+                    );
                 }
             }
         }
         final int expectedGen = generation.get();
         for (PendingLightning strike : readyLightnings) {
+            telegraphService.clearTelegraph("crystal:lightning:" + strike.id, viewers);
             telegraphService.renderLightningStrike(strike.location, viewers);
             double rSq = PILLAR_LIGHTNING_RADIUS * PILLAR_LIGHTNING_RADIUS;
             for (Player p : alivePlayers) {
@@ -558,10 +583,13 @@ public final class RaidCrystalManager {
                     readyBeams.add(beam);
                     it.remove();
                 } else {
+                    double progress = Math.min(1.0, Math.max(0.0, 1.0 - (beam.remainingSeconds / beam.totalSeconds)));
                     telegraphService.renderLineAoE(
+                            "crystal:beam:" + beam.id,
                             beam.crystalOrigin,
                             beam.lockedEndpoint,
                             TRACKING_BEAM_WIDTH,
+                            progress,
                             TelegraphStyle.WARNING,
                             viewers
                     );
@@ -569,6 +597,7 @@ public final class RaidCrystalManager {
             }
         }
         for (PendingCrystalBeam beam : readyBeams) {
+            telegraphService.clearTelegraph("crystal:beam:" + beam.id, viewers);
             telegraphService.renderLaserBeam(beam.crystalOrigin, beam.lockedEndpoint, viewers);
             for (Player p : alivePlayers) {
                 Location pLoc = p.getLocation();
@@ -647,6 +676,7 @@ public final class RaidCrystalManager {
             lightningTimerSeconds = 0.0;
             beamTimerSeconds = 0.0;
         }
+        telegraphService.clearTelegraphsByPrefix("crystal:", this.lastViewers);
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (TrackedCrystal tracked : snapshot) {
             synchronized (tracked) {
@@ -729,25 +759,41 @@ public final class RaidCrystalManager {
         }
     }
 
+    private Collection<? extends Player> resolveCleanupViewers(@Nullable World world) {
+        Collection<? extends Player> cached = this.lastViewers;
+        if (!cached.isEmpty()) {
+            return cached;
+        }
+        return world != null ? world.getPlayers() : List.of();
+    }
+
     private static final class PendingLightning {
+        final long id;
         final Location location;
+        final double totalSeconds;
         double remainingSeconds;
 
-        PendingLightning(Location location, double remainingSeconds) {
+        PendingLightning(long id, Location location, double remainingSeconds) {
+            this.id = id;
             this.location = location;
+            this.totalSeconds = Math.max(0.05, remainingSeconds);
             this.remainingSeconds = remainingSeconds;
         }
     }
 
     private static final class PendingCrystalBeam {
+        final long id;
         final Location crystalOrigin;
         final UUID targetPlayerId;
+        final double totalSeconds;
         Location lockedEndpoint;
         double remainingSeconds;
 
-        PendingCrystalBeam(Location crystalOrigin, UUID targetPlayerId, Location initialTarget, double remainingSeconds) {
+        PendingCrystalBeam(long id, Location crystalOrigin, UUID targetPlayerId, Location initialTarget, double remainingSeconds) {
+            this.id = id;
             this.crystalOrigin = crystalOrigin;
             this.targetPlayerId = targetPlayerId;
+            this.totalSeconds = Math.max(0.05, remainingSeconds);
             this.lockedEndpoint = extrapolateBeamEndpoint(crystalOrigin, initialTarget, 40.0);
             this.remainingSeconds = remainingSeconds;
         }

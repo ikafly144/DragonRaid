@@ -97,7 +97,13 @@ class RaidCrystalManagerTest {
         Player viewer = mock(Player.class);
         double regen = crystalManager.tick(0.5, bossLoc, List.of(viewer));
         assertEquals(4 * 4.0 * 0.5, regen, 1e-6);
-        verify(telegraphService, atLeastOnce()).renderTetherLine(any(), eq(bossLoc), eq(TelegraphStyle.TETHER), any());
+        verify(telegraphService, atLeastOnce()).renderTetherLine(
+                org.mockito.ArgumentMatchers.startsWith("crystal:tether:"),
+                any(),
+                eq(bossLoc),
+                eq(TelegraphStyle.TETHER),
+                any()
+        );
 
         // Spawn a single targeted crystal test to verify partial and lethal damage
         crystalManager.clearAll();
@@ -265,5 +271,59 @@ class RaidCrystalManagerTest {
         );
         verify(crystal).remove();
         assertEquals(0, singleMgr.activeCount());
+        verify(telegraphService, atLeastOnce()).clearTelegraphsByPrefix(eq("crystal:"), any());
+    }
+
+    @Test
+    void crystalDefenseTelegraphsUpdateWithProgressAndClearOnDetonationOrClearAll() {
+        crystalManager.spawnWave(endWorld, 1, 80.0, 4.0);
+        Location bossLoc = new Location(endWorld, 0.0, 80.0, 0.0);
+        Player viewer = mock(Player.class);
+        lenient().when(viewer.getUniqueId()).thenReturn(UUID.randomUUID());
+        lenient().when(viewer.isOnline()).thenReturn(true);
+        lenient().when(viewer.isDead()).thenReturn(false);
+        lenient().when(viewer.getLocation()).thenReturn(new Location(endWorld, 18.0, 64.0, 0.0));
+
+        // Trigger lightning + tracking beam spawns
+        for (int i = 0; i < 6; i++) {
+            crystalManager.tick(1.0, bossLoc, List.of(viewer));
+        }
+        crystalManager.tick(0.3, bossLoc, List.of(viewer));
+
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                org.mockito.ArgumentMatchers.startsWith("crystal:lightning:"),
+                any(),
+                eq(3.2),
+                org.mockito.ArgumentMatchers.anyDouble(),
+                eq(TelegraphStyle.WARNING),
+                any()
+        );
+        verify(telegraphService, atLeastOnce()).renderLineAoE(
+                org.mockito.ArgumentMatchers.startsWith("crystal:beam:"),
+                any(),
+                any(),
+                eq(2.0),
+                org.mockito.ArgumentMatchers.anyDouble(),
+                eq(TelegraphStyle.WARNING),
+                any()
+        );
+
+        // Advance past warning duration so both detonate and clear their keys
+        for (int i = 0; i < 5; i++) {
+            crystalManager.tick(0.5, bossLoc, List.of(viewer));
+        }
+        verify(telegraphService, atLeastOnce()).clearTelegraph(
+                org.mockito.ArgumentMatchers.startsWith("crystal:lightning:"),
+                any()
+        );
+        verify(telegraphService, atLeastOnce()).renderLightningStrike(any(), any());
+        verify(telegraphService, atLeastOnce()).clearTelegraph(
+                org.mockito.ArgumentMatchers.startsWith("crystal:beam:"),
+                any()
+        );
+        verify(telegraphService, atLeastOnce()).renderLaserBeam(any(), any(), any());
+
+        crystalManager.clearAll().join();
+        verify(telegraphService, atLeastOnce()).clearTelegraphsByPrefix(eq("crystal:"), any());
     }
 }

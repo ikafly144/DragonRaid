@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -43,6 +44,7 @@ import net.sabafly.dragonraid.scheduler.TaskHandle;
 import net.sabafly.dragonraid.script.BuiltInEncounters;
 import net.sabafly.dragonraid.script.DefaultGimmickActionRegistry;
 import net.sabafly.dragonraid.timeline.RaidTimelineEngine;
+import net.sabafly.dragonraid.visual.ImpactStyle;
 import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import net.sabafly.dragonraid.visual.TelegraphStyle;
 import org.bukkit.Bukkit;
@@ -292,6 +294,7 @@ public final class NormalGimmickExecutor {
         this.sessionGeneration.incrementAndGet();
         this.mechanicGeneration.incrementAndGet();
         destroyAllLiveVirtualEntities(viewers);
+        telegraphService.clearAllTelegraphs(viewers);
         ActiveMechanic cancelled = this.activeMechanic;
         this.activeMechanic = null;
         if (cancelled != null && cancelled.resolutionTracker != null) {
@@ -418,6 +421,7 @@ public final class NormalGimmickExecutor {
 
         rememberViewers(viewers);
         cleanupActiveVirtualEntities(viewers);
+        telegraphService.clearTelegraphsByPrefix("cast:", viewers);
         ActiveMechanic previous = this.activeMechanic;
         if (previous != null && previous.resolutionTracker != null) {
             previous.resolutionTracker.cancel();
@@ -621,9 +625,9 @@ public final class NormalGimmickExecutor {
                 Player target = byId.get(mech.primaryTargetId);
                 if (target != null && target.isOnline()) {
                     double radius = mech.ability != null ? mech.ability.getDouble("telegraph-radius", 3.5) : 3.5;
-                    telegraphService.renderCircleAoE(target.getLocation(), radius, TelegraphStyle.DANGER, viewers);
+                    telegraphService.renderCircleAoE("cast:TANK_BUSTER:circle", target.getLocation(), radius, progress, TelegraphStyle.DANGER, viewers);
                     if (bossLoc != null) {
-                        telegraphService.renderLineAoE(bossLoc, target.getLocation(), 0.9, TelegraphStyle.DANGER, viewers);
+                        telegraphService.renderLineAoE("cast:TANK_BUSTER:line", bossLoc, target.getLocation(), 0.9, progress, TelegraphStyle.DANGER, viewers);
                     }
                 }
             }
@@ -631,23 +635,23 @@ public final class NormalGimmickExecutor {
                 Player target = byId.get(mech.primaryTargetId);
                 if (target != null && target.isOnline()) {
                     double radius = mech.ability != null ? mech.ability.radius(4.5) : 4.5;
-                    telegraphService.renderStackMarker(target.getLocation(), radius, mech.soloMode, viewers);
+                    telegraphService.renderStackMarker("cast:DRAGON_DIVE_STACK:stack", target.getLocation(), radius, progress, mech.soloMode, viewers);
                     if (bossLoc != null) {
-                        telegraphService.renderLineAoE(bossLoc, target.getLocation(), 1.2, TelegraphStyle.STACK, viewers);
+                        telegraphService.renderLineAoE("cast:DRAGON_DIVE_STACK:line", bossLoc, target.getLocation(), 1.2, progress, TelegraphStyle.STACK, viewers);
                     }
                 }
             }
             case GROUND_SLAM_DIVE -> {
                 if (!mech.locations.isEmpty()) {
                     Location impact = mech.locations.getFirst();
-                    telegraphService.renderCircleAoE(impact, 6.0, TelegraphStyle.DANGER, viewers);
-                    telegraphService.renderCircleAoE(impact, 12.0 + progress * 8.0, TelegraphStyle.WARNING, viewers);
+                    telegraphService.renderCircleAoE("cast:GROUND_SLAM_DIVE:epicenter", impact, 6.0, progress, TelegraphStyle.DANGER, viewers);
+                    telegraphService.renderCircleAoE("cast:GROUND_SLAM_DIVE:falloff", impact, 20.0, progress, TelegraphStyle.WARNING, viewers);
                 }
             }
             case LIGHTNING_STORM -> {
                 double radius = mech.ability != null ? mech.ability.radius(3.5) : 3.5;
-                for (Location loc : mech.locations) {
-                    telegraphService.renderCircleAoE(loc, radius, TelegraphStyle.WARNING, viewers);
+                for (int i = 0; i < mech.locations.size(); i++) {
+                    telegraphService.renderCircleAoE("cast:LIGHTNING_STORM:" + i, mech.locations.get(i), radius, progress, TelegraphStyle.WARNING, viewers);
                 }
             }
             case SWEEPING_LASER -> {
@@ -657,11 +661,16 @@ public final class NormalGimmickExecutor {
                     Location beamEnd = computeLaserGroundImpact(bossLoc, currentYaw, 36.0);
                     double beamWidth = mech.ability != null ? mech.ability.getDouble("beam-width", 2.6) : 2.6;
                     if (progress < 0.30) {
-                        telegraphService.renderLineAoE(bossLoc, beamEnd, 1.8, TelegraphStyle.WARNING, viewers);
-                        telegraphService.renderCircleAoE(beamEnd, beamWidth, TelegraphStyle.WARNING, viewers);
+                        double windupProgress = Math.min(1.0, progress / 0.30);
+                        telegraphService.renderLineAoE("cast:SWEEPING_LASER:line", bossLoc, beamEnd, 1.8, windupProgress, TelegraphStyle.WARNING, viewers);
+                        telegraphService.renderCircleAoE("cast:SWEEPING_LASER:end", beamEnd, beamWidth, windupProgress, TelegraphStyle.WARNING, viewers);
                     } else {
+                        if (!mech.laserClearedTelegraph) {
+                            mech.laserClearedTelegraph = true;
+                            telegraphService.clearTelegraphsByPrefix("cast:SWEEPING_LASER:", viewers);
+                        }
                         telegraphService.renderLaserBeam(bossLoc, beamEnd, viewers);
-                        telegraphService.renderCircleAoE(beamEnd, beamWidth * 1.2, TelegraphStyle.DANGER, viewers);
+                        telegraphService.renderImpactBurst(beamEnd, beamWidth * 1.2, ImpactStyle.LASER_SCORCH, viewers);
                         double tickDamage = (mech.ability != null ? mech.ability.damage(24.0) : 24.0) * 0.20;
                         double impactRadiusSq = (beamWidth * 1.2) * (beamWidth * 1.2);
                         int expectedMechGen = mechanicGeneration.get();
@@ -688,10 +697,14 @@ public final class NormalGimmickExecutor {
                     double dx = shieldBlocker.getLocation().getX() - bossLoc.getX();
                     double dz = shieldBlocker.getLocation().getZ() - bossLoc.getZ();
                     double yaw = Math.toDegrees(Math.atan2(-dx, dz));
-                    telegraphService.renderShieldSafeCone(shieldBlocker.getLocation(), yaw, 24.0, 32.0, viewers);
+                    telegraphService.renderShieldSafeCone("cast:SHIELD_WALL_BREATH:cone", shieldBlocker.getLocation(), yaw, 24.0, 32.0, viewers);
+                } else {
+                    telegraphService.clearTelegraph("cast:SHIELD_WALL_BREATH:cone", viewers);
                 }
                 if (bossLoc != null) {
-                    telegraphService.renderCircleAoE(bossLoc, 8.0 + progress * 26.0, TelegraphStyle.DANGER, viewers);
+                    Location groundCenter = bossLoc.clone();
+                    groundCenter.setY(CircularArenaBuilder.DEFAULT_FLOOR_Y);
+                    telegraphService.renderCircleAoE("cast:SHIELD_WALL_BREATH:aoe", groundCenter, 34.0, progress, TelegraphStyle.DANGER, viewers);
                 }
             }
             case FIREBALL_BARRAGE -> {
@@ -717,8 +730,9 @@ public final class NormalGimmickExecutor {
                         }
                     }
                 }
-                for (EruptionSite site : mech.eruptionSites) {
-                    telegraphService.renderCircleAoE(site.location, site.radius, TelegraphStyle.DANGER, viewers);
+                for (int i = 0; i < mech.eruptionSites.size(); i++) {
+                    EruptionSite site = mech.eruptionSites.get(i);
+                    telegraphService.renderCircleAoE("cast:ENDERMAN_ERUPTION:" + i, site.location, site.radius, progress, TelegraphStyle.DANGER, viewers);
                     double riseY = site.location.getY() - 2.4 + progress * 2.4;
                     Location risen = site.location.clone();
                     risen.setY(riseY);
@@ -726,31 +740,35 @@ public final class NormalGimmickExecutor {
                 }
             }
             case EXAFLARE_WAVES -> {
-                for (ExaflareLane lane : mech.exaflareLanes) {
-                    telegraphService.renderCircleAoE(lane.origin, 3.8, TelegraphStyle.DANGER, viewers);
+                for (int i = 0; i < mech.exaflareLanes.size(); i++) {
+                    ExaflareLane lane = mech.exaflareLanes.get(i);
+                    telegraphService.renderCircleAoE("cast:EXAFLARE_WAVES:" + i, lane.origin, 3.8, progress, TelegraphStyle.DANGER, viewers);
                 }
             }
             case KNOCKBACK_COMBO -> {
                 if (!mech.locations.isEmpty()) {
                     Location kbCenter = mech.locations.getFirst();
-                    telegraphService.renderCircleAoE(kbCenter, 4.5 + progress * 10.0, TelegraphStyle.WARNING, viewers);
+                    telegraphService.renderCircleAoE("cast:KNOCKBACK_COMBO:aoe", kbCenter, 14.5, progress, TelegraphStyle.WARNING, viewers);
                 }
             }
             case ENDERMAN_ROTATING_BEAM -> {
-                for (RotatingEndermanBeam beam : mech.rotatingBeams) {
+                for (int i = 0; i < mech.rotatingBeams.size(); i++) {
+                    RotatingEndermanBeam beam = mech.rotatingBeams.get(i);
                     Player owner = byId.get(beam.ownerPlayerId);
                     if (progress < 0.75 && owner != null && owner.isOnline() && owner.getLocation() != null) {
                         double dx = owner.getLocation().getX() - beam.origin.getX();
                         double dz = owner.getLocation().getZ() - beam.origin.getZ();
                         beam.lockedYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-                        telegraphService.renderTetherLine(beam.origin, owner.getLocation(), TelegraphStyle.TETHER, viewers);
+                        telegraphService.renderTetherLine("cast:ENDERMAN_ROTATING_BEAM:tether:" + i, beam.origin, owner.getLocation(), TelegraphStyle.TETHER, viewers);
+                    } else {
+                        telegraphService.clearTelegraph("cast:ENDERMAN_ROTATING_BEAM:tether:" + i, viewers);
                     }
                     double riseY = beam.origin.getY() - 1.8 + Math.min(1.0, progress * 1.5) * 1.8;
                     Location eLoc = beam.origin.clone();
                     eLoc.setY(riseY);
                     telegraphService.moveAndRotateVirtualEnderman(beam.virtualEntityId, eLoc, beam.lockedYaw, viewers);
                     Location previewEnd = extrapolateYaw(beam.origin, beam.lockedYaw, 34.0);
-                    telegraphService.renderLineAoE(beam.origin, previewEnd, 2.0, TelegraphStyle.WARNING, viewers);
+                    telegraphService.renderLineAoE("cast:ENDERMAN_ROTATING_BEAM:line:" + i, beam.origin, previewEnd, 2.0, progress, TelegraphStyle.WARNING, viewers);
                 }
             }
             case DUAL_DIVE_DICE -> {
@@ -758,7 +776,7 @@ public final class NormalGimmickExecutor {
                 for (int i = 0; i < Math.min(2, mech.targetIds.size()); i++) {
                     Player t = byId.get(mech.targetIds.get(i));
                     if (t != null && t.isOnline() && t.getLocation() != null) {
-                        telegraphService.renderStackMarker(t.getLocation(), radius, false, viewers);
+                        telegraphService.renderStackMarker("cast:DUAL_DIVE_DICE:" + i, t.getLocation(), radius, progress, false, viewers);
                     }
                 }
                 for (DiceAssignment d : mech.diceAssignments) {
@@ -775,14 +793,17 @@ public final class NormalGimmickExecutor {
             }
             case TETHER_DIVE_RELAY -> {
                 if (bossLoc != null && !aliveParticipants.isEmpty()) {
+                    double stepInterval = mech.totalCastSeconds / Math.max(1, mech.relayTotalHits);
+                    double stepProgress = stepInterval > 1e-4
+                            ? Math.min(1.0, (mech.elapsedSeconds % stepInterval) / stepInterval)
+                            : progress;
                     Player nearest = selectNearestToBoss(aliveParticipants, bossLoc);
                     if (nearest != null && nearest.getLocation() != null) {
                         boolean vulnerable = mech.vulnerablePlayerIds.contains(nearest.getUniqueId());
                         TelegraphStyle style = vulnerable ? TelegraphStyle.DANGER : TelegraphStyle.SAFE;
-                        telegraphService.renderTetherLine(bossLoc, nearest.getLocation(), style, viewers);
-                        telegraphService.renderCircleAoE(nearest.getLocation(), 3.2, style, viewers);
+                        telegraphService.renderTetherLine("cast:TETHER_DIVE_RELAY:tether", bossLoc, nearest.getLocation(), style, viewers);
+                        telegraphService.renderCircleAoE("cast:TETHER_DIVE_RELAY:circle", nearest.getLocation(), 3.2, stepProgress, style, viewers);
                     }
-                    double stepInterval = mech.totalCastSeconds / Math.max(1, mech.relayTotalHits);
                     if (mech.relayCompletedHits < mech.relayTotalHits - 1
                             && mech.elapsedSeconds >= (mech.relayCompletedHits + 1) * stepInterval) {
                         mech.relayCompletedHits++;
@@ -790,6 +811,7 @@ public final class NormalGimmickExecutor {
                                 mech,
                                 aliveParticipants,
                                 bossController,
+                                viewers,
                                 mechanicGeneration.get(),
                                 currentSessionGen,
                                 mech.resolutionTracker
@@ -799,21 +821,24 @@ public final class NormalGimmickExecutor {
             }
             case SPREAD -> {
                 double radius = mech.ability != null ? mech.ability.radius(4.5) : 4.5;
-                for (UUID targetId : mech.targetIds) {
-                    Player target = byId.get(targetId);
+                for (int i = 0; i < mech.targetIds.size(); i++) {
+                    Player target = byId.get(mech.targetIds.get(i));
                     if (target != null && target.isOnline()) {
-                        telegraphService.renderSpreadMarker(target.getLocation(), radius, viewers);
+                        telegraphService.renderSpreadMarker("cast:SPREAD:" + i, target.getLocation(), radius, progress, viewers);
                     }
                 }
             }
             case METEOR_TOWERS -> {
                 double towerRadius = mech.ability != null ? mech.ability.getDouble("tower-radius", 3.0) : 3.0;
                 double radiusSq = towerRadius * towerRadius;
-                for (Location towerLoc : mech.locations) {
+                for (int i = 0; i < mech.locations.size(); i++) {
+                    Location towerLoc = mech.locations.get(i);
                     boolean soaked = hasAnyPlayerInside(towerLoc, radiusSq, aliveParticipants);
                     telegraphService.renderCircleAoE(
+                            "cast:METEOR_TOWERS:" + i,
                             towerLoc,
                             towerRadius,
+                            progress,
                             soaked ? TelegraphStyle.SAFE : TelegraphStyle.DANGER,
                             viewers
                     );
@@ -821,12 +846,15 @@ public final class NormalGimmickExecutor {
             }
             case LOS_BREATH -> {
                 if (bossLoc != null) {
-                    for (Player p : aliveParticipants) {
+                    for (int i = 0; i < aliveParticipants.size(); i++) {
+                        Player p = aliveParticipants.get(i);
                         if (p.isOnline() && bossLoc.getWorld() != null && bossLoc.getWorld().equals(p.getWorld())) {
                             telegraphService.renderLineAoE(
+                                    "cast:LOS_BREATH:" + i,
                                     bossLoc,
                                     p.getLocation().clone().add(0.0, 1.0, 0.0),
                                     0.8,
+                                    progress,
                                     TelegraphStyle.WARNING,
                                     viewers
                             );
@@ -866,12 +894,15 @@ public final class NormalGimmickExecutor {
         Map<UUID, Player> byId = indexPlayers(aliveParticipants);
         BossConfig.AbilitySettings effAbility = mech.ability != null ? mech.ability : ability;
 
+        telegraphService.clearTelegraphsByPrefix("cast:", viewers);
+
         switch (mech.type) {
             case TANK_BUSTER -> resolveTankBuster(
                     effAbility,
                     byId.get(mech.primaryTargetId),
                     bossController,
                     timelineEngine,
+                    viewers,
                     expectedMechGen,
                     expectedSessionGen,
                     tracker
@@ -969,6 +1000,7 @@ public final class NormalGimmickExecutor {
                     mech,
                     aliveParticipants,
                     bossController,
+                    viewers,
                     expectedMechGen,
                     expectedSessionGen,
                     tracker
@@ -978,6 +1010,7 @@ public final class NormalGimmickExecutor {
                     mech.targetIds,
                     aliveParticipants,
                     byId,
+                    viewers,
                     expectedMechGen,
                     expectedSessionGen,
                     tracker
@@ -986,6 +1019,7 @@ public final class NormalGimmickExecutor {
                     effAbility,
                     mech.locations,
                     aliveParticipants,
+                    viewers,
                     expectedMechGen,
                     expectedSessionGen,
                     tracker
@@ -994,6 +1028,7 @@ public final class NormalGimmickExecutor {
                     effAbility,
                     bossController.bossLocation(),
                     aliveParticipants,
+                    viewers,
                     expectedMechGen,
                     expectedSessionGen,
                     tracker
@@ -1034,6 +1069,7 @@ public final class NormalGimmickExecutor {
             }
             destroyMechanicVirtualEntities(current, viewers);
         }
+        telegraphService.clearTelegraphsByPrefix("cast:", viewers);
         Set<MechanicResolutionTracker> followUpTrackers = new LinkedHashSet<>();
         synchronized (followUpEffects) {
             for (ActiveFollowUpEffect eff : this.followUpEffects) {
@@ -1070,7 +1106,7 @@ public final class NormalGimmickExecutor {
                 MIN_SOFT_ENRAGE_RADIUS,
                 this.safeArenaRadius - soft.voidCorruptionShrinkPerSecond() * deltaSeconds
         );
-        telegraphService.renderArenaBoundary(centerLoc, this.safeArenaRadius, viewers);
+        telegraphService.renderArenaBoundary("arena:boundary", centerLoc, this.safeArenaRadius, viewers);
 
         this.softEnrageAccumulatorSeconds += deltaSeconds;
         if (this.softEnrageAccumulatorSeconds + 1e-6 >= 1.0) {
@@ -1150,11 +1186,15 @@ public final class NormalGimmickExecutor {
             @Nullable Player target,
             DragonBossController bossController,
             RaidTimelineEngine timelineEngine,
+            Collection<? extends Player> viewers,
             int expectedMechGen,
             int expectedSessionGen,
             @Nullable MechanicResolutionTracker tracker) {
         if (target == null || !target.isOnline()) {
             return;
+        }
+        if (target.getLocation() != null) {
+            telegraphService.renderImpactBurst(target.getLocation(), 3.0, ImpactStyle.EXPLOSION, viewers);
         }
         double baseDamage = ability != null ? ability.damage(24.0) : 24.0;
         double shieldMult = ability != null ? ability.getDouble("shield-damage-multiplier", 0.25) : 0.25;
@@ -1221,6 +1261,9 @@ public final class NormalGimmickExecutor {
         playWarningSound(viewers, "minecraft:entity.generic.explode", 0.9f);
 
         if (soloMode) {
+            if (target.getLocation() != null) {
+                telegraphService.renderImpactBurst(target.getLocation(), radius, ImpactStyle.STACK_IMPACT, viewers);
+            }
             double soloDamage = totalDamage * scaled.soloStackDamageMultiplier();
             if (target.isBlocking()) {
                 soloDamage *= 0.5;
@@ -1230,6 +1273,9 @@ public final class NormalGimmickExecutor {
         }
 
         Location anchor = target.getLocation();
+        if (anchor != null) {
+            telegraphService.renderImpactBurst(anchor, radius, ImpactStyle.STACK_IMPACT, viewers);
+        }
         double radiusSq = radius * radius;
         List<Player> soakers = new ArrayList<>();
         for (Player p : aliveParticipants) {
@@ -1266,6 +1312,7 @@ public final class NormalGimmickExecutor {
 
         playWarningSound(viewers, "minecraft:entity.warden.sonic_boom", 1.3f);
         playWarningSound(viewers, "minecraft:entity.generic.explode", 0.8f);
+        telegraphService.renderImpactBurst(impactPoint, 6.0, ImpactStyle.DIVE_SLAM, viewers);
 
         for (Player p : aliveParticipants) {
             if (p == null || !p.isOnline() || p.getLocation() == null
@@ -1328,6 +1375,7 @@ public final class NormalGimmickExecutor {
 
         Player blocker = findFrontShieldingPlayer(aliveParticipants, bossLocation);
         playWarningSound(viewers, "minecraft:entity.ender_dragon.growl", 0.8f);
+        telegraphService.renderImpactBurst(bossLocation, 14.0, ImpactStyle.VOID_ERUPTION, viewers);
 
         for (Player p : aliveParticipants) {
             if (p == null || !p.isOnline() || p.getLocation() == null
@@ -1369,6 +1417,7 @@ public final class NormalGimmickExecutor {
         double damage = ability != null ? ability.damage(20.0) : 20.0;
         playWarningSound(viewers, "minecraft:entity.enderman.teleport", 0.7f);
         for (EruptionSite site : mech.eruptionSites) {
+            telegraphService.renderImpactBurst(site.location, site.radius, ImpactStyle.VOID_ERUPTION, viewers);
             double rSq = site.radius * site.radius;
             for (Player p : aliveParticipants) {
                 if (p != null && p.isOnline() && p.getLocation() != null
@@ -1466,6 +1515,7 @@ public final class NormalGimmickExecutor {
             }
         }
         // Follow-up center bamboo eruption 1.4s after knockback
+        telegraphService.renderImpactBurst(origin, 10.0, ImpactStyle.EXPLOSION, viewers);
         scheduleBambooEruption(origin.clone(), ability, viewers, expectedSessionGen, 1.4, tracker);
     }
 
@@ -1518,6 +1568,7 @@ public final class NormalGimmickExecutor {
             ActiveMechanic mech,
             List<Player> aliveParticipants,
             DragonBossController bossController,
+            Collection<? extends Player> viewers,
             int expectedMechGen,
             int expectedSessionGen,
             @Nullable MechanicResolutionTracker tracker) {
@@ -1535,6 +1586,7 @@ public final class NormalGimmickExecutor {
         }
         if (nearest.getLocation() != null) {
             bossController.beginDive(nearest.getLocation(), 0.25);
+            telegraphService.renderImpactBurst(nearest.getLocation(), 3.2, ImpactStyle.DIVE_SLAM, viewers);
         }
         applyMechanicDamageOnEntityThread(nearest, finalDamage, expectedMechGen, expectedSessionGen, tracker);
     }
@@ -1581,11 +1633,14 @@ public final class NormalGimmickExecutor {
                 }
                 case BAMBOO_ERUPTION -> {
                     double progress = Math.min(1.0, effect.elapsedSeconds / Math.max(0.1, effect.durationSeconds));
-                    telegraphService.renderCircleAoE(effect.origin, 3.2, TelegraphStyle.DANGER, viewers);
+                    String key = "followup:bamboo:" + effect.effectId;
+                    telegraphService.renderCircleAoE(key, effect.origin, 3.2, progress, TelegraphStyle.DANGER, viewers);
                     Location eLoc = effect.origin.clone();
                     eLoc.setY(effect.origin.getY() - 2.4 + progress * 2.4);
                     telegraphService.moveAndRotateVirtualEnderman(effect.virtualEntityId, eLoc, 0.0f, viewers);
                     if (effect.elapsedSeconds >= effect.durationSeconds) {
+                        telegraphService.clearTelegraph(key, viewers);
+                        telegraphService.renderImpactBurst(effect.origin, 3.2, ImpactStyle.VOID_ERUPTION, viewers);
                         double rSq = 3.2 * 3.2;
                         for (Player p : aliveParticipants) {
                             if (p != null && p.isOnline() && p.getLocation() != null
@@ -1601,15 +1656,31 @@ public final class NormalGimmickExecutor {
                 }
                 case RING_CASCADE -> {
                     if (effect.elapsedSeconds < 0.9) {
-                        telegraphService.renderDonutAoE(effect.origin, 7.0, 15.0, TelegraphStyle.WARNING, viewers);
+                        telegraphService.renderDonutAoE(
+                                "followup:ring:1:" + effect.effectId,
+                                effect.origin,
+                                7.0,
+                                15.0,
+                                Math.min(1.0, effect.elapsedSeconds / 0.9),
+                                TelegraphStyle.DANGER,
+                                viewers
+                        );
                     } else if (!effect.ring1Detonated) {
                         effect.ring1Detonated = true;
-                        detonateRingBand(effect.origin, 7.0, 15.0, effect.damage, aliveParticipants, viewers, currentSessionGen, effect.resolutionTracker);
+                        detonateRingBand(effect.origin, 7.0, 15.0, effect.damage, aliveParticipants, viewers, currentSessionGen, effect.resolutionTracker, effect.effectId, 1);
                     } else if (effect.elapsedSeconds < 1.8) {
-                        telegraphService.renderDonutAoE(effect.origin, 15.0, 24.0, TelegraphStyle.WARNING, viewers);
+                        telegraphService.renderDonutAoE(
+                                "followup:ring:2:" + effect.effectId,
+                                effect.origin,
+                                15.0,
+                                24.0,
+                                Math.min(1.0, (effect.elapsedSeconds - 0.9) / 0.9),
+                                TelegraphStyle.DANGER,
+                                viewers
+                        );
                     } else if (!effect.ring2Detonated) {
                         effect.ring2Detonated = true;
-                        detonateRingBand(effect.origin, 15.0, 24.0, effect.damage, aliveParticipants, viewers, currentSessionGen, effect.resolutionTracker);
+                        detonateRingBand(effect.origin, 15.0, 24.0, effect.damage, aliveParticipants, viewers, currentSessionGen, effect.resolutionTracker, effect.effectId, 2);
                         finished.add(effect);
                     } else {
                         finished.add(effect);
@@ -1617,6 +1688,7 @@ public final class NormalGimmickExecutor {
                 }
                 case EXAFLARE -> {
                     if (effect.elapsedSeconds - effect.lastStepSeconds >= 0.70) {
+                        telegraphService.clearTelegraphsByPrefix("followup:exaflare:" + effect.effectId + ":", viewers);
                         effect.lastStepSeconds = effect.elapsedSeconds;
                         effect.stepIndex++;
                         for (ExaflareLane lane : effect.lanes) {
@@ -1628,7 +1700,7 @@ public final class NormalGimmickExecutor {
                                     lane.origin.getY(),
                                     lane.origin.getZ() + Math.cos(rad) * dist
                             );
-                            telegraphService.renderCircleAoE(burst, 3.6, TelegraphStyle.DANGER, viewers);
+                            telegraphService.renderImpactBurst(burst, 3.6, ImpactStyle.EXPLOSION, viewers);
                             int eid = telegraphService.spawnVirtualScaledEnderman(burst, 2.2, lane.yawDegrees, true, viewers);
                             registerVirtualIds(eid);
                             scheduler.runGlobalLater(() -> destroyVirtualEntitiesAndUnregister(viewers, eid), 10L);
@@ -1642,8 +1714,31 @@ public final class NormalGimmickExecutor {
                                 }
                             }
                         }
+                    } else if (effect.stepIndex < 8) {
+                        int nextStep = effect.stepIndex + 1;
+                        double stepProg = Math.min(1.0, Math.max(0.0, (effect.elapsedSeconds - effect.lastStepSeconds) / 0.70));
+                        for (int li = 0; li < effect.lanes.size(); li++) {
+                            ExaflareLane lane = effect.lanes.get(li);
+                            double rad = Math.toRadians(lane.yawDegrees);
+                            double dist = nextStep * 5.5;
+                            Location nextBurst = new Location(
+                                    lane.origin.getWorld(),
+                                    lane.origin.getX() - Math.sin(rad) * dist,
+                                    lane.origin.getY(),
+                                    lane.origin.getZ() + Math.cos(rad) * dist
+                            );
+                            telegraphService.renderCircleAoE(
+                                    "followup:exaflare:" + effect.effectId + ":" + li,
+                                    nextBurst,
+                                    3.6,
+                                    stepProg,
+                                    TelegraphStyle.WARNING,
+                                    viewers
+                            );
+                        }
                     }
                     if (effect.stepIndex >= 8) {
+                        telegraphService.clearTelegraphsByPrefix("followup:exaflare:" + effect.effectId + ":", viewers);
                         finished.add(effect);
                     }
                 }
@@ -1689,7 +1784,7 @@ public final class NormalGimmickExecutor {
                         }
                     }
                     if (hit || effect.elapsedSeconds >= 4.0) {
-                        telegraphService.renderCircleAoE(effect.origin, 3.5, TelegraphStyle.DANGER, viewers);
+                        telegraphService.renderImpactBurst(effect.origin, 3.5, ImpactStyle.EXPLOSION, viewers);
                         for (Player p : aliveParticipants) {
                             if (p != null && p.isOnline() && p.getLocation() != null
                                     && effect.origin.getWorld() != null
@@ -1755,8 +1850,10 @@ public final class NormalGimmickExecutor {
             List<Player> aliveParticipants,
             Collection<? extends Player> viewers,
             int expectedSessionGen,
-            @Nullable MechanicResolutionTracker tracker) {
-        telegraphService.renderDonutAoE(origin, innerRadius, outerRadius, TelegraphStyle.DANGER, viewers);
+            @Nullable MechanicResolutionTracker tracker,
+            long effectId,
+            int ringStage) {
+        telegraphService.clearTelegraph("followup:ring:" + ringStage + ":" + effectId, viewers);
         double midRadius = (innerRadius + outerRadius) * 0.5;
         List<Integer> ringIds = new ArrayList<>(6);
         for (int i = 0; i < 6; i++) {
@@ -1767,6 +1864,7 @@ public final class NormalGimmickExecutor {
                     origin.getY(),
                     origin.getZ() + Math.sin(angle) * midRadius
             );
+            telegraphService.renderImpactBurst(spot, 4.0, ImpactStyle.VOID_ERUPTION, viewers);
             int eid = telegraphService.spawnVirtualScaledEnderman(spot, 2.6, 0.0f, true, viewers);
             registerVirtualIds(eid);
             ringIds.add(eid);
@@ -1808,6 +1906,7 @@ public final class NormalGimmickExecutor {
             List<UUID> targetIds,
             List<Player> aliveParticipants,
             Map<UUID, Player> byId,
+            Collection<? extends Player> viewers,
             int expectedMechGen,
             int expectedSessionGen,
             @Nullable MechanicResolutionTracker tracker) {
@@ -1822,6 +1921,9 @@ public final class NormalGimmickExecutor {
                 continue;
             }
             Location loc = target.getLocation();
+            if (loc != null) {
+                telegraphService.renderImpactBurst(loc, radius, ImpactStyle.SPREAD_BURST, viewers);
+            }
             boolean overlapped = false;
             for (Player other : aliveParticipants) {
                 if (other == null || !other.isOnline() || other.getUniqueId().equals(targetId)) {
@@ -1844,6 +1946,7 @@ public final class NormalGimmickExecutor {
             @Nullable BossConfig.AbilitySettings ability,
             List<Location> towers,
             List<Player> aliveParticipants,
+            Collection<? extends Player> viewers,
             int expectedMechGen,
             int expectedSessionGen,
             @Nullable MechanicResolutionTracker tracker) {
@@ -1863,6 +1966,12 @@ public final class NormalGimmickExecutor {
                     inside.add(p);
                 }
             }
+            telegraphService.renderImpactBurst(
+                    tower,
+                    towerRadius,
+                    inside.isEmpty() ? ImpactStyle.EXPLOSION : ImpactStyle.STACK_IMPACT,
+                    viewers
+            );
             if (inside.isEmpty()) {
                 unsoakedCount++;
             } else {
@@ -1886,12 +1995,14 @@ public final class NormalGimmickExecutor {
             @Nullable BossConfig.AbilitySettings ability,
             @Nullable Location bossLocation,
             List<Player> aliveParticipants,
+            Collection<? extends Player> viewers,
             int expectedMechGen,
             int expectedSessionGen,
             @Nullable MechanicResolutionTracker tracker) {
         if (bossLocation == null || bossLocation.getWorld() == null) {
             return;
         }
+        telegraphService.renderImpactBurst(bossLocation, 8.0, ImpactStyle.VOID_ERUPTION, viewers);
         double damage = ability != null ? ability.damage(26.0) : 26.0;
         double range = ability != null ? ability.getDouble("range", 96.0) : 96.0;
         double rangeSq = range * range;
@@ -2776,6 +2887,7 @@ public final class NormalGimmickExecutor {
         double elapsedSeconds;
         double lastWaveSpawnSeconds;
         int relayCompletedHits;
+        boolean laserClearedTelegraph;
 
         private ActiveMechanic(
                 MechanicType type,
@@ -2970,6 +3082,9 @@ public final class NormalGimmickExecutor {
     }
 
     private static final class ActiveFollowUpEffect {
+        private static final AtomicLong EFFECT_ID_SEQ = new AtomicLong(0L);
+
+        final long effectId = EFFECT_ID_SEQ.incrementAndGet();
         final FollowUpKind kind;
         final Location origin;
         final Vector direction;

@@ -391,4 +391,81 @@ class FoliaDragonBossControllerTest {
         assertNull(controller.activeModelController());
         verify(modelController).close();
     }
+
+    @Test
+    void vanillaEnderDragonApplies180DegreeYawOffsetWhileKeepingLogicalBossYawForward() {
+        EnderDragon dragon = mockDragon(new Location(endWorld, 20.0, 72.0, 0.0), 1200.0);
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                scheduler,
+                Logger.getLogger("YawFacingTest"),
+                w -> dragon,
+                (w, loc) -> dragon
+        );
+
+        // 1. HIGH_HOVER transit moving from x=20 toward center (0,76,0) => -X => logical yaw +90, entity yaw -90
+        controller.bindOrSpawn(endWorld, 1200.0).join();
+        controller.setPosture(DragonPosture.HIGH_HOVER);
+        entityTimers.getFirst().run();
+        Location logicalHover = controller.bossLocation();
+        assertNotNull(logicalHover);
+        assertYawNear(90.0f, logicalHover.getYaw(), 1.0f);
+        assertYawNear(-90.0f, dragon.getLocation().getYaw(), 1.0f);
+
+        // 2. SWEEPING_LASER / HIGH_HOVER fixed hover aim => logical yaw matches targetYaw, entity yaw is targetYaw + 180
+        controller.setPosture(DragonPosture.HIGH_HOVER);
+        controller.setHoverAim(45.0f, 0.0f);
+        entityTimers.getFirst().run();
+        assertYawNear(45.0f, controller.bossLocation().getYaw(), 1.0f);
+        assertYawNear(-135.0f, dragon.getLocation().getYaw(), 1.0f);
+
+        // 3. DIVING from current x~17.5 toward (+35,64,0) => +X => logical yaw -90, entity yaw +90
+        controller.setPosture(DragonPosture.LOW_ORBIT);
+        controller.beginDive(new Location(endWorld, 35.0, 64.0, 0.0), 0.05);
+        controller.tick(0.10);
+        entityTimers.getFirst().run();
+        assertYawNear(-90.0f, controller.bossLocation().getYaw(), 1.0f);
+        assertYawNear(90.0f, dragon.getLocation().getYaw(), 1.0f);
+
+        // 4. LOW_ORBIT circular movement rotates entity yaw by +180 relative to logical forward velocity yaw
+        controller.setPosture(DragonPosture.LOW_ORBIT);
+        entityTimers.getFirst().run();
+        Location orbitLogical = controller.bossLocation();
+        assertYawNear(orbitLogical.getYaw() + 180.0f, dragon.getLocation().getYaw(), 1.0f);
+        org.mockito.ArgumentCaptor<Float> yawCaptor = org.mockito.ArgumentCaptor.forClass(Float.class);
+        verify(dragon, atLeastOnce()).setRotation(yawCaptor.capture(), org.mockito.ArgumentMatchers.anyFloat());
+        assertYawNear(orbitLogical.getYaw() + 180.0f, yawCaptor.getValue(), 1.0f);
+    }
+
+    @Test
+    void betterModelRendererDoesNotApplyVanilla180DegreeYawInversion() {
+        EnderDragon dragon = mockDragon(new Location(endWorld, 0.0, 72.0, 0.0), 1200.0);
+        ActorModelService modelService = mock(ActorModelService.class);
+        ActorModelController bmController = mock(ActorModelController.class);
+        lenient().when(bmController.rendererType()).thenReturn(net.sabafly.dragonraid.api.enemy.ModelRendererType.BETTER_MODEL);
+        lenient().when(modelService.bindEntity(eq(dragon), any())).thenReturn(bmController);
+
+        FoliaDragonBossController controller = new FoliaDragonBossController(
+                configManager,
+                scheduler,
+                Logger.getLogger("BetterModelYawTest"),
+                w -> dragon,
+                (w, loc) -> dragon,
+                modelService
+        );
+
+        controller.bindOrSpawn(endWorld, 1200.0).join();
+        controller.setPosture(DragonPosture.HIGH_HOVER);
+        controller.setHoverAim(45.0f, 0.0f);
+        entityTimers.getFirst().run();
+
+        assertYawNear(45.0f, controller.bossLocation().getYaw(), 1.0f);
+        assertYawNear(45.0f, dragon.getLocation().getYaw(), 1.0f);
+    }
+
+    private static void assertYawNear(float expectedDeg, float actualDeg, float toleranceDeg) {
+        double diff = ((actualDeg - expectedDeg) % 360.0 + 540.0) % 360.0 - 180.0;
+        assertTrue(Math.abs(diff) <= toleranceDeg,
+                "Expected yaw near " + expectedDeg + " but was " + actualDeg);
+    }
 }

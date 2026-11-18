@@ -20,6 +20,20 @@ public interface SpatialTelegraphService {
             Collection<? extends Player> viewers);
 
     /**
+     * Renders or updates a retained floor-lit circle telegraph keyed by {@code telegraphKey}
+     * with cast fill progression {@code castProgress} ({@code 0.0..1.0}).
+     */
+    default void renderCircleAoE(
+            String telegraphKey,
+            Location center,
+            double radius,
+            double castProgress,
+            TelegraphStyle style,
+            Collection<? extends Player> viewers) {
+        renderCircleAoE(center, radius, style, viewers);
+    }
+
+    /**
      * Renders a donut AoE telegraph with a safe inner circle and outer danger boundary.
      */
     void renderDonutAoE(
@@ -28,6 +42,21 @@ public interface SpatialTelegraphService {
             double outerRadius,
             TelegraphStyle style,
             Collection<? extends Player> viewers);
+
+    /**
+     * Renders or updates a retained floor-lit donut telegraph keyed by {@code telegraphKey}
+     * with cast fill progression {@code castProgress} ({@code 0.0..1.0}).
+     */
+    default void renderDonutAoE(
+            String telegraphKey,
+            Location center,
+            double innerRadius,
+            double outerRadius,
+            double castProgress,
+            TelegraphStyle style,
+            Collection<? extends Player> viewers) {
+        renderDonutAoE(center, innerRadius, outerRadius, style, viewers);
+    }
 
     /**
      * Renders a rectangular/linear telegraph from {@code start} to {@code end} with {@code width}.
@@ -40,6 +69,21 @@ public interface SpatialTelegraphService {
             Collection<? extends Player> viewers);
 
     /**
+     * Renders or updates a retained floor-lit line telegraph keyed by {@code telegraphKey}
+     * with cast fill progression {@code castProgress} ({@code 0.0..1.0}).
+     */
+    default void renderLineAoE(
+            String telegraphKey,
+            Location start,
+            Location end,
+            double width,
+            double castProgress,
+            TelegraphStyle style,
+            Collection<? extends Player> viewers) {
+        renderLineAoE(start, end, width, style, viewers);
+    }
+
+    /**
      * Renders a stack convergence marker ring (or solo guard ring when {@code soloMode} is true).
      */
     void renderStackMarker(
@@ -47,6 +91,20 @@ public interface SpatialTelegraphService {
             double radius,
             boolean soloMode,
             Collection<? extends Player> viewers);
+
+    /**
+     * Renders or updates a retained floor-lit stack marker keyed by {@code telegraphKey}
+     * with cast fill progression {@code castProgress} ({@code 0.0..1.0}).
+     */
+    default void renderStackMarker(
+            String telegraphKey,
+            Location center,
+            double radius,
+            double castProgress,
+            boolean soloMode,
+            Collection<? extends Player> viewers) {
+        renderStackMarker(center, radius, soloMode, viewers);
+    }
 
     /**
      * Renders a personal spread danger ring around a targeted player location.
@@ -57,7 +115,20 @@ public interface SpatialTelegraphService {
             Collection<? extends Player> viewers);
 
     /**
-     * Renders a particle tether line connecting {@code from} and {@code to}.
+     * Renders or updates a retained floor-lit spread marker keyed by {@code telegraphKey}
+     * with cast fill progression {@code castProgress} ({@code 0.0..1.0}).
+     */
+    default void renderSpreadMarker(
+            String telegraphKey,
+            Location center,
+            double radius,
+            double castProgress,
+            Collection<? extends Player> viewers) {
+        renderSpreadMarker(center, radius, viewers);
+    }
+
+    /**
+     * Renders a tether line connecting {@code from} and {@code to}.
      */
     void renderTetherLine(
             Location from,
@@ -66,12 +137,35 @@ public interface SpatialTelegraphService {
             Collection<? extends Player> viewers);
 
     /**
+     * Renders or updates a retained solid tether bar keyed by {@code telegraphKey}.
+     */
+    default void renderTetherLine(
+            String telegraphKey,
+            Location from,
+            Location to,
+            TelegraphStyle style,
+            Collection<? extends Player> viewers) {
+        renderTetherLine(from, to, style, viewers);
+    }
+
+    /**
      * Renders the shrinking safe arena perimeter during Soft Enrage.
      */
     void renderArenaBoundary(
             Location center,
             double safeRadius,
             Collection<? extends Player> viewers);
+
+    /**
+     * Renders or updates the retained arena boundary keyed by {@code telegraphKey}.
+     */
+    default void renderArenaBoundary(
+            String telegraphKey,
+            Location center,
+            double safeRadius,
+            Collection<? extends Player> viewers) {
+        renderArenaBoundary(center, safeRadius, viewers);
+    }
 
     /**
      * Renders True Ending-inspired magenta-to-deep-blue transition aura and dragon breath trail
@@ -111,6 +205,51 @@ public interface SpatialTelegraphService {
             double coneLength,
             double halfAngleDegrees,
             Collection<? extends Player> viewers) {
+    }
+
+    /**
+     * Renders or updates a retained floor-lit safe cone keyed by {@code telegraphKey}.
+     */
+    default void renderShieldSafeCone(
+            String telegraphKey,
+            Location blockerLocation,
+            double directionYawDegrees,
+            double coneLength,
+            double halfAngleDegrees,
+            Collection<? extends Player> viewers) {
+        renderShieldSafeCone(blockerLocation, directionYawDegrees, coneLength, halfAngleDegrees, viewers);
+    }
+
+    /**
+     * Emits a particle-driven impact burst strictly at detonation/damage resolution time.
+     */
+    default void renderImpactBurst(
+            Location center,
+            double radius,
+            ImpactStyle style,
+            Collection<? extends Player> viewers) {
+    }
+
+    /**
+     * Destroys all retained display entities associated with {@code telegraphKey}.
+     */
+    default void clearTelegraph(
+            String telegraphKey,
+            Collection<? extends Player> viewers) {
+    }
+
+    /**
+     * Destroys all retained display entities whose keys begin with {@code keyPrefix}.
+     */
+    default void clearTelegraphsByPrefix(
+            String keyPrefix,
+            Collection<? extends Player> viewers) {
+    }
+
+    /**
+     * Destroys all retained telegraph display entities across the current encounter.
+     */
+    default void clearAllTelegraphs(Collection<? extends Player> viewers) {
     }
 
     /**

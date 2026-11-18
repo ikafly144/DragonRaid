@@ -13,6 +13,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.entity.EnderDragon;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.jetbrains.annotations.Nullable;
@@ -87,8 +88,22 @@ public final class VanillaActorController implements ActorModelController {
     public @Nullable Location boneLocation(String boneName) {
         Objects.requireNonNull(boneName, "boneName");
         Location origin = entity != null ? entity.getLocation() : propAnchor;
+        if (origin == null) {
+            return null;
+        }
+        Location logicalOrigin = origin.clone();
+        double appliedOffset = (entity instanceof EnderDragon ? 180.0 : 0.0) + spec.yawOffsetDegrees();
+        if (Math.abs(appliedOffset) > 1e-6) {
+            float normalized = (float) ((logicalOrigin.getYaw() - appliedOffset) % 360.0);
+            if (normalized >= 180.0f) {
+                normalized -= 360.0f;
+            } else if (normalized < -180.0f) {
+                normalized += 360.0f;
+            }
+            logicalOrigin.setYaw(normalized);
+        }
         BoneOffset offset = spec.boneOffsets().getOrDefault(boneName, BoneOffset.ZERO);
-        return BoneMath.resolveWorldOffset(origin, offset, currentScale);
+        return BoneMath.resolveWorldOffset(logicalOrigin, offset, currentScale);
     }
 
     @Override

@@ -12,6 +12,7 @@ import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.sabafly.dragonraid.api.enemy.ActorModelSpec;
+import net.sabafly.dragonraid.api.enemy.ModelRendererType;
 import net.sabafly.dragonraid.api.model.ActorModelController;
 import net.sabafly.dragonraid.api.model.ActorModelService;
 import net.sabafly.dragonraid.config.ConfigManager;
@@ -419,7 +420,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                     this.movementTask = null;
                 }
             }
-        }, 2L, 2L);
+        }, 1L, 1L);
         ownHandle.set(scheduled);
         synchronized (lock) {
             if (this.activeDragon == dragon) {
@@ -458,19 +459,48 @@ public final class FoliaDragonBossController implements DragonBossController {
 
         Location target = computeTargetLocation(world, current, effective);
         double stepSpeed = (effective == DragonPosture.DIVING || effective == DragonPosture.ASCENDING_CHARGE)
-                ? DIVE_STEP_PER_TICK * 2.0
-                : MAX_MOVE_STEP_PER_TICK * 2.0;
+                ? DIVE_STEP_PER_TICK
+                : MAX_MOVE_STEP_PER_TICK;
         Location next = stepTowards(current, target, stepSpeed);
+        if (this.customHoverYaw == null) {
+            double travelDx = target.getX() - current.getX();
+            double travelDz = target.getZ() - current.getZ();
+            if (travelDx * travelDx + travelDz * travelDz > 0.0625) {
+                next.setYaw(computeYawDegrees(travelDx, travelDz));
+            }
+        }
         this.cachedLocation = next.clone();
 
         Vector velocity = new Vector(
-                (next.getX() - current.getX()) * 0.5,
-                (next.getY() - current.getY()) * 0.5,
-                (next.getZ() - current.getZ()) * 0.5
+                next.getX() - current.getX(),
+                next.getY() - current.getY(),
+                next.getZ() - current.getZ()
         );
+        float entityYaw = toEntityYaw(next.getYaw());
+        Location entityNext = next.clone();
+        entityNext.setYaw(entityYaw);
+
         dragon.setVelocity(velocity);
-        dragon.setRotation(next.getYaw(), next.getPitch());
-        dragon.teleportAsync(next);
+        dragon.setRotation(entityYaw, entityNext.getPitch());
+        dragon.teleportAsync(entityNext);
+    }
+
+    private float toEntityYaw(float logicalYaw) {
+        ActorModelSpec spec = this.modelSpec;
+        ActorModelController activeModel = this.modelController;
+        ModelRendererType effectiveRenderer = activeModel != null ? activeModel.rendererType() : spec.rendererType();
+        float rendererOffset = effectiveRenderer == ModelRendererType.VANILLA ? 180.0f : 0.0f;
+        return normalizeYaw(logicalYaw + rendererOffset + (float) spec.yawOffsetDegrees());
+    }
+
+    static float normalizeYaw(float yaw) {
+        float wrapped = yaw % 360.0f;
+        if (wrapped >= 180.0f) {
+            wrapped -= 360.0f;
+        } else if (wrapped < -180.0f) {
+            wrapped += 360.0f;
+        }
+        return wrapped;
     }
 
     private static EnderDragon.Phase desiredVanillaPhase(DragonPosture posture) {
@@ -484,9 +514,11 @@ public final class FoliaDragonBossController implements DragonBossController {
 
     private Location computeTargetLocation(World world, Location current, DragonPosture effective) {
         RegionConfig.Point3D center = arenaCenterFor(world);
+        Location fallbackLoc = this.cachedLocation;
+        float fallbackLogicalYaw = fallbackLoc != null ? fallbackLoc.getYaw() : 0.0f;
         return switch (effective) {
             case LOW_ORBIT -> {
-                orbitAngleRad = (orbitAngleRad + ORBIT_ANGULAR_SPEED_RAD_PER_TICK * 2.0) % (Math.PI * 2.0);
+                orbitAngleRad = (orbitAngleRad + ORBIT_ANGULAR_SPEED_RAD_PER_TICK) % (Math.PI * 2.0);
                 double x = center.x() + Math.cos(orbitAngleRad) * ORBIT_RADIUS;
                 double z = center.z() + Math.sin(orbitAngleRad) * ORBIT_RADIUS;
                 double y = center.y() + LOW_ORBIT_Y_OFFSET + Math.sin(orbitAngleRad * 2.0) * 2.5;
@@ -499,7 +531,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                 Location diveTarget = this.diveTargetLocation;
                 float yaw = diveTarget != null
                         ? computeYawDegrees(diveTarget.getX() - current.getX(), diveTarget.getZ() - current.getZ())
-                        : current.getYaw();
+                        : fallbackLogicalYaw;
                 yield new Location(
                         world,
                         current.getX() * 0.85 + center.x() * 0.15,
@@ -514,7 +546,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                 if (diveTarget != null && diveTarget.getWorld() != null && diveTarget.getWorld().equals(world)) {
                     double dx = diveTarget.getX() - current.getX();
                     double dz = diveTarget.getZ() - current.getZ();
-                    float yaw = computeYawDegrees(dx, dz);
+                    float yaw = (dx * dx + dz * dz) > 0.0625 ? computeYawDegrees(dx, dz) : fallbackLogicalYaw;
                     yield new Location(
                             world,
                             diveTarget.getX(),
@@ -524,14 +556,14 @@ public final class FoliaDragonBossController implements DragonBossController {
                             55.0f
                     );
                 }
-                yield new Location(world, center.x(), center.y() + CENTER_LANDED_Y_OFFSET, center.z(), 0.0f, 45.0f);
+                yield new Location(world, center.x(), center.y() + CENTER_LANDED_Y_OFFSET, center.z(), fallbackLogicalYaw, 45.0f);
             }
             case CENTER_LANDED -> new Location(
                     world,
                     center.x(),
                     center.y() + CENTER_LANDED_Y_OFFSET,
                     center.z(),
-                    customHoverYaw != null ? customHoverYaw : 0.0f,
+                    customHoverYaw != null ? customHoverYaw : fallbackLogicalYaw,
                     customHoverPitch != null ? customHoverPitch : 10.0f
             );
             case HIGH_HOVER -> new Location(
@@ -539,7 +571,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                     center.x(),
                     center.y() + HIGH_HOVER_Y_OFFSET,
                     center.z(),
-                    customHoverYaw != null ? customHoverYaw : 0.0f,
+                    customHoverYaw != null ? customHoverYaw : fallbackLogicalYaw,
                     customHoverPitch != null ? customHoverPitch : 25.0f
             );
             case STAGGERED -> new Location(
@@ -547,7 +579,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                     center.x(),
                     center.y() + STAGGERED_Y_OFFSET,
                     center.z(),
-                    0.0f,
+                    fallbackLogicalYaw,
                     30.0f
             );
         };

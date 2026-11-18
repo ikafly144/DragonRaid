@@ -123,4 +123,22 @@ class DefaultActorModelServiceTest {
         assertFalse(controller.playAnimation("idle", 1.0, true));
         controller.close();
     }
+
+    @Test
+    void enderDragonVanillaYawSubtractsClientFacingInversionForBoneLocation() {
+        World world = mock(World.class);
+        org.bukkit.entity.EnderDragon dragon = mock(org.bukkit.entity.EnderDragon.class);
+        // Logical forward toward +Z is yaw=0, which vanilla EnderDragon receives as yaw=180
+        when(dragon.getLocation()).thenReturn(new Location(world, 10.0, 65.0, 10.0, 180.0f, 0.0f));
+        ActorModelSpec spec = ActorModelSpec.vanilla(1.0, Map.of("mouth", new BoneOffset(0.0, 0.0, 4.0)));
+        DefaultActorModelService service = new DefaultActorModelService(Logger.getLogger("DragonBoneTest"));
+
+        ActorModelController controller = service.bindEntity(dragon, spec);
+        Location mouth = controller.boneLocation("mouth");
+        assertNotNull(mouth);
+        assertEquals(10.0, mouth.getX(), 1e-6);
+        assertEquals(65.0, mouth.getY(), 1e-6);
+        assertEquals(14.0, mouth.getZ(), 1e-6);
+        controller.close();
+    }
 }

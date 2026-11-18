@@ -611,4 +611,71 @@ class NormalGimmickExecutorTest {
                 customStep, null, endWorld, List.of(participant), List.of(participant), scaled, bossController);
         org.junit.jupiter.api.Assertions.assertNotNull(capturedCtx.get());
     }
+
+    @Test
+    void castTelegraphsClearOnCompletionCancelResetAndLaserSwitchesAtThirtyPercent() {
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), normalBoss, 1);
+        Player target = mockPlayer("TelegraphTarget", 6.0, 64.0, 0.0, false, false);
+        BossConfig.AbilitySettings busterAbility = normalBoss.ability("tank_buster").orElseThrow();
+        BossConfig.TimelineStep busterStep = new BossConfig.TimelineStep(8.0, "TANK_BUSTER", "tank_buster");
+
+        executor.startCast(busterStep, busterAbility, endWorld, List.of(target), List.of(target), scaled, bossController);
+        executor.tickActiveTelegraphs(List.of(target), List.of(target), bossController);
+        verify(telegraphService, atLeastOnce()).renderCircleAoE(
+                org.mockito.ArgumentMatchers.startsWith("cast:"),
+                any(),
+                anyDouble(),
+                anyDouble(),
+                eq(net.sabafly.dragonraid.visual.TelegraphStyle.DANGER),
+                any()
+        );
+        verify(telegraphService, org.mockito.Mockito.never()).renderImpactBurst(any(), anyDouble(), any(), any());
+
+        executor.completeCast(busterStep, busterAbility, List.of(target), List.of(target), scaled, bossController, timelineEngine);
+        verify(telegraphService, atLeastOnce()).clearTelegraphsByPrefix(eq("cast:"), any());
+        verify(telegraphService, atLeastOnce()).renderImpactBurst(
+                any(),
+                eq(3.0),
+                eq(net.sabafly.dragonraid.visual.ImpactStyle.EXPLOSION),
+                any()
+        );
+
+        // Cancel clears active cast telegraphs (startCast #1, completeCast #2, startCast #3, cancelActiveMechanic #4)
+        executor.startCast(busterStep, busterAbility, endWorld, List.of(target), List.of(target), scaled, bossController);
+        executor.cancelActiveMechanic(List.of(target));
+        verify(telegraphService, org.mockito.Mockito.times(4)).clearTelegraphsByPrefix(eq("cast:"), any());
+
+        // Sweeping laser: Display telegraph < 0.30, beam + LASER_SCORCH impact >= 0.30
+        org.mockito.Mockito.clearInvocations(telegraphService);
+        BossConfig.AbilitySettings laserAbility = normalBoss.ability("sweeping_laser").orElse(null);
+        BossConfig.TimelineStep laserStep = new BossConfig.TimelineStep(20.0, "SWEEPING_LASER", "sweeping_laser");
+        executor.startCast(laserStep, laserAbility, endWorld, List.of(target), List.of(target), scaled, bossController);
+        executor.tickActiveTelegraphs(List.of(target), List.of(target), bossController);
+        verify(telegraphService, atLeastOnce()).renderLineAoE(
+                org.mockito.ArgumentMatchers.startsWith("cast:"),
+                any(),
+                any(),
+                anyDouble(),
+                anyDouble(),
+                eq(net.sabafly.dragonraid.visual.TelegraphStyle.WARNING),
+                any()
+        );
+        verify(telegraphService, org.mockito.Mockito.never()).renderLaserBeam(any(), any(), any());
+
+        for (int i = 0; i < 30; i++) {
+            executor.tickActiveTelegraphs(List.of(target), List.of(target), bossController);
+        }
+        verify(telegraphService, atLeastOnce()).clearTelegraphsByPrefix(eq("cast:"), any());
+        verify(telegraphService, atLeastOnce()).renderLaserBeam(any(), any(), any());
+        verify(telegraphService, atLeastOnce()).renderImpactBurst(
+                any(),
+                eq(3.12),
+                eq(net.sabafly.dragonraid.visual.ImpactStyle.LASER_SCORCH),
+                any()
+        );
+
+        executor.resetState();
+        verify(telegraphService, atLeastOnce()).clearAllTelegraphs(any());
+    }
 }
