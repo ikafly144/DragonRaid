@@ -32,6 +32,7 @@ public final class DefaultRaidPartyService implements RaidPartyService {
             MutableParty party = new MutableParty(partyId, leaderId);
             partiesById.put(partyId, party);
             partyIdByPlayer.put(leaderId, partyId);
+            pendingInvitesByTarget.remove(leaderId);
             return party.snapshot();
         }
     }
@@ -86,7 +87,11 @@ public final class DefaultRaidPartyService implements RaidPartyService {
                 return false;
             }
             Set<UUID> invites = pendingInvitesByTarget.get(playerId);
-            if (invites == null || !invites.remove(partyId)) {
+            boolean removedInvite = invites != null && invites.remove(partyId);
+            if (invites != null && invites.isEmpty()) {
+                pendingInvitesByTarget.remove(playerId);
+            }
+            if (!removedInvite) {
                 return false;
             }
             MutableParty party = partiesById.get(partyId);
@@ -115,6 +120,7 @@ public final class DefaultRaidPartyService implements RaidPartyService {
             party.memberIds.remove(playerId);
             if (party.memberIds.isEmpty()) {
                 partiesById.remove(partyId);
+                removeInvitesForPartyLocked(partyId);
                 return true;
             }
             if (party.leaderId.equals(playerId)) {
@@ -180,11 +186,20 @@ public final class DefaultRaidPartyService implements RaidPartyService {
                 return false;
             }
             partiesById.remove(partyId);
+            removeInvitesForPartyLocked(partyId);
             for (UUID memberId : party.memberIds) {
                 partyIdByPlayer.remove(memberId);
             }
             return true;
         }
+    }
+
+    private void removeInvitesForPartyLocked(UUID partyId) {
+        pendingInvitesByTarget.entrySet().removeIf(entry -> {
+            Set<UUID> invites = entry.getValue();
+            invites.remove(partyId);
+            return invites.isEmpty();
+        });
     }
 
     private static final class MutableParty {

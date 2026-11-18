@@ -44,6 +44,12 @@ public final class DefaultRaidItemService implements RaidItemService {
         equippedItemIdsByPlayer.put(playerId, List.copyOf(itemIds));
     }
 
+    public void clearEquippedItems(UUID playerId) {
+        if (playerId != null) {
+            equippedItemIdsByPlayer.remove(playerId);
+        }
+    }
+
     @Override
     public int averageItemLevel(UUID playerId) {
         if (playerId == null) {
@@ -53,13 +59,13 @@ public final class DefaultRaidItemService implements RaidItemService {
         if (equipped == null || equipped.isEmpty()) {
             return 0;
         }
-        int total = 0;
+        long total = 0L;
         for (String itemId : equipped) {
             CustomItemDefinition def = items.get(itemId);
             if (def != null) {
                 total += def.itemLevel();
             }
         }
-        return Math.round((float) total / equipped.size());
+        return (int) Math.round((double) total / equipped.size());
     }
 }

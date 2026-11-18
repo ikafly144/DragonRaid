@@ -39,7 +39,6 @@ public record PluginConfig(
     @ConfigSerializable
     public record WorldSettings(
             @Setting("end-world-name") String endWorldName,
-            @Setting("replace-first-dragon") boolean replaceFirstDragon,
             @Setting("preserve-vanilla-progression") boolean preserveVanillaProgression
     ) {
     }
@@ -118,29 +117,9 @@ public record PluginConfig(
     }
 
     @ConfigSerializable
-    public record ItemCost(
-            @Setting("material") String material,
-            @Setting("amount") int amount
-    ) {
-    }
-
-    @ConfigSerializable
-    public record AltarSettings(
-            @Setting("location") RegionConfig.Point3D location,
-            @Setting("interact-radius") double interactRadius,
-            @Setting("unlock-hard-after-normal-clear") boolean unlockHardAfterNormalClear,
-            List<ItemCost> normalCosts,
-            List<ItemCost> hardCosts
-    ) {
-    }
-
-    @ConfigSerializable
     public record EncounterSettings(
             @Setting("pull-countdown-seconds") int pullCountdownSeconds,
-            @Setting("auto-start-on-arena-enter") boolean autoStartOnArenaEnter,
-            @Setting("altar-gui-only") boolean altarGuiOnly,
-            @Setting("lock-late-joiners-to-safe-zone") boolean lockLateJoinersToSafeZone,
-            @Setting("altar") AltarSettings altar
+            @Setting("lock-late-joiners-to-safe-zone") boolean lockLateJoinersToSafeZone
     ) {
     }
 

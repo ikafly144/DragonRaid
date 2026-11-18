@@ -21,6 +21,19 @@ public record CustomItemDefinition(
         if (itemLevel < 0) {
             throw new IllegalArgumentException("itemLevel must be >= 0");
         }
-        baseStats = baseStats == null ? Map.of() : Map.copyOf(baseStats);
+        if (baseStats == null) {
+            baseStats = Map.of();
+        } else {
+            for (Map.Entry<String, Double> entry : baseStats.entrySet()) {
+                if (entry.getKey() == null || entry.getKey().isBlank()) {
+                    throw new IllegalArgumentException("Stat key must not be blank");
+                }
+                Double value = entry.getValue();
+                if (value == null || !Double.isFinite(value)) {
+                    throw new IllegalArgumentException("Stat value for '" + entry.getKey() + "' must be finite: " + value);
+                }
+            }
+            baseStats = Map.copyOf(baseStats);
+        }
     }
 }

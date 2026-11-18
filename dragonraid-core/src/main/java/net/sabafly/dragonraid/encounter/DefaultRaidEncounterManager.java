@@ -23,7 +23,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -123,7 +122,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private final Supplier<Collection<? extends Player>> onlinePlayersSupplier;
     private final Function<UUID, @Nullable Player> playerLookup;
     private final LongSupplier clockMillis;
-    private final Predicate<World> livingDragonPredicate;
 
     private volatile RaidState state = RaidState.IDLE;
     private volatile @Nullable BossConfig.Difficulty activeDifficulty;
@@ -199,8 +197,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 () -> Bukkit.getWorld(configManager.pluginConfig().world().endWorldName()),
                 Bukkit::getOnlinePlayers,
                 Bukkit::getPlayer,
-                System::currentTimeMillis,
-                DefaultRaidEncounterManager::hasLivingDragonInWorld
+                System::currentTimeMillis
         );
     }
 
@@ -237,8 +234,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 () -> Bukkit.getWorld(configManager.pluginConfig().world().endWorldName()),
                 Bukkit::getOnlinePlayers,
                 Bukkit::getPlayer,
-                System::currentTimeMillis,
-                DefaultRaidEncounterManager::hasLivingDragonInWorld
+                System::currentTimeMillis
         );
     }
 
@@ -254,8 +250,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             Supplier<@Nullable World> endWorldSupplier,
             Supplier<Collection<? extends Player>> onlinePlayersSupplier,
             Function<UUID, @Nullable Player> playerLookup,
-            LongSupplier clockMillis,
-            Predicate<World> livingDragonPredicate) {
+            LongSupplier clockMillis) {
         this(
                 configManager,
                 messageService,
@@ -274,8 +269,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 endWorldSupplier,
                 onlinePlayersSupplier,
                 playerLookup,
-                clockMillis,
-                livingDragonPredicate
+                clockMillis
         );
     }
 
@@ -297,8 +291,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             Supplier<@Nullable World> endWorldSupplier,
             Supplier<Collection<? extends Player>> onlinePlayersSupplier,
             Function<UUID, @Nullable Player> playerLookup,
-            LongSupplier clockMillis,
-            Predicate<World> livingDragonPredicate) {
+            LongSupplier clockMillis) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
@@ -317,7 +310,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         this.onlinePlayersSupplier = Objects.requireNonNull(onlinePlayersSupplier, "onlinePlayersSupplier");
         this.playerLookup = Objects.requireNonNull(playerLookup, "playerLookup");
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
-        this.livingDragonPredicate = Objects.requireNonNull(livingDragonPredicate, "livingDragonPredicate");
         loadPendingCleanupsFromStorage();
     }
 
@@ -445,10 +437,13 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     public boolean startEncounter(EncounterBlueprint blueprint, Collection<? extends Player> players) {
         Objects.requireNonNull(blueprint, "blueprint");
         Objects.requireNonNull(players, "players");
-        List<Player> party = players.stream()
-                .filter(p -> p != null && p.isOnline())
-                .<Player>map(p -> p)
-                .toList();
+        Map<UUID, Player> uniquePlayers = new LinkedHashMap<>();
+        for (Player p : players) {
+            if (p != null && p.isOnline()) {
+                uniquePlayers.putIfAbsent(p.getUniqueId(), p);
+            }
+        }
+        List<Player> party = List.copyOf(uniquePlayers.values());
         if (party.isEmpty()) {
             return false;
         }
@@ -465,18 +460,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             return false;
         }
         BossConfig bossConfig = BossConfig.fromBlueprint(blueprint);
-        final long activationGen;
-        synchronized (stateLock) {
-            if (state != RaidState.IDLE || arenaUpdatesInFlight.get() > 0 || hasPendingBlockRollbacks()) {
-                return false;
-            }
-            state = RaidState.COUNTDOWN;
-            this.activeDifficulty = bossConfig.difficulty();
-            this.activeBlueprint = blueprint;
-            activationGen = encounterGeneration.incrementAndGet();
-        }
-        activateEncounterWithParty(blueprint, bossConfig, endWorld, party, List.of(), activationGen);
-        return true;
+        return activateEncounterWithParty(blueprint, bossConfig, endWorld, party, List.of(), true, 0L);
     }
 
     @Override
@@ -651,6 +635,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             countdownTask = null;
             state = RaidState.IDLE;
             activeDifficulty = null;
+            activeBlueprint = null;
         }
         if (world != null) {
             for (Player player : onlinePlayersInWorld(world)) {
@@ -725,15 +710,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
 
         BossConfig bossConfig = BossConfig.fromBlueprint(blueprint);
-        activateEncounterWithParty(blueprint, bossConfig, endWorld, party, overflow, expectedGeneration);
+        activateEncounterWithParty(blueprint, bossConfig, endWorld, party, overflow, false, expectedGeneration);
     }
 
-    private void activateEncounterWithParty(
+    private boolean activateEncounterWithParty(
             EncounterBlueprint blueprint,
             BossConfig bossConfig,
             World endWorld,
             List<Player> party,
             List<Player> overflow,
+            boolean directStart,
             long expectedGeneration) {
         ScalingSettings scaling = configManager.pluginConfig().scaling();
         BossConfig.Difficulty difficulty = bossConfig.difficulty();
@@ -745,8 +731,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
         final long activationGen;
         synchronized (stateLock) {
-            if (state != RaidState.COUNTDOWN || encounterGeneration.get() != expectedGeneration) {
-                return;
+            if (directStart) {
+                if (state != RaidState.IDLE || arenaUpdatesInFlight.get() > 0 || hasPendingBlockRollbacks()) {
+                    return false;
+                }
+            } else if (state != RaidState.COUNTDOWN || encounterGeneration.get() != expectedGeneration) {
+                return false;
             }
             activationGen = encounterGeneration.incrementAndGet();
             participants.clear();
@@ -826,7 +816,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             });
         }
 
-        startM3EncounterSystems(endWorld, party, bossConfig, scaled, activationGen);
+        startEncounterSystems(endWorld, party, bossConfig, scaled, activationGen);
 
         AtomicReference<TaskHandle> monitorHandle = new AtomicReference<>();
         TaskHandle scheduledMonitor = scheduler.runGlobalTimer(() -> {
@@ -844,6 +834,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 cancelHandle(scheduledMonitor);
             }
         }
+        return true;
     }
 
     /**
@@ -945,8 +936,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             );
         }
 
-        // 3. Tick M3 Boss AI, Crystal Regeneration, Timeline, Mechanics, and Integrated HUD.
-        tickM3Systems(endWorld, endPlayers, channelingRevivers);
+        // 3. Tick Boss AI, Timeline, and Integrated HUD.
+        tickEncounterSystems(endWorld, endPlayers, channelingRevivers);
 
         // 4. Evaluate wipe condition.
         evaluateWipeCondition(endWorld, reviveSettings);
@@ -1304,7 +1295,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World targetWorld = endWorld != null ? endWorld : endWorldSupplier.get();
         List<Player> viewers = targetWorld != null ? onlinePlayersInWorld(targetWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
-        cleanupM3Systems(viewers, true);
+        cleanupEncounterSystems(viewers, true);
 
         Location safeSpawn = targetWorld != null ? regionService.safeZoneSpawnLocation(targetWorld) : null;
         int partySizeSnapshot = participants.size();
@@ -1341,7 +1332,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
         List<Player> viewers = combatWorld != null ? onlinePlayersInWorld(combatWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
-        cleanupM3Systems(viewers, true);
+        cleanupEncounterSystems(viewers, true);
         Location safeSpawn = mainEndWorld != null ? regionService.safeZoneSpawnLocation(mainEndWorld) : null;
         int partySizeSnapshot = participants.size();
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
@@ -1406,7 +1397,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World endWorld = dragon.getWorld();
         List<Player> viewers = onlinePlayersInWorld(endWorld);
         soulMarkerService.removeAllMarkers(viewers);
-        prepareVictoryM3Cleanup(dragon, endWorld, viewers, difficulty, durationMs);
+        prepareVictoryCleanup(dragon, endWorld, viewers, difficulty, durationMs);
 
         // On victory, restore participant flags where they stand so they can collect drops/egg.
         int partySizeSnapshot = participants.size();
@@ -1833,18 +1824,18 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World combatWorld = instanceManager != null ? instanceManager.activeCombatWorld(mainEndWorld) : mainEndWorld;
         List<Player> viewers = combatWorld != null ? onlinePlayersInWorld(combatWorld) : List.of();
         soulMarkerService.removeAllMarkers(viewers);
-        CompletableFuture<Void> m3CleanupFuture = cleanupM3Systems(viewers, true);
+        CompletableFuture<Void> encounterCleanupFuture = cleanupEncounterSystems(viewers, true);
         if (instanceManager != null) {
             Location returnLoc = mainEndWorld != null ? regionService.safeZoneSpawnLocation(mainEndWorld) : null;
             instanceManager.destroyActiveInstance(returnLoc);
         }
-        if (!m3CleanupFuture.isDone()) {
+        if (!encounterCleanupFuture.isDone()) {
             try {
-                m3CleanupFuture.get(500L, TimeUnit.MILLISECONDS);
+                encounterCleanupFuture.get(500L, TimeUnit.MILLISECONDS);
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
             } catch (ExecutionException | TimeoutException ex) {
-                logger.log(Level.FINE, "Timed out or failed waiting for M3 entity cleanup on shutdown", ex);
+                logger.log(Level.FINE, "Timed out or failed waiting for encounter entity cleanup on shutdown", ex);
             }
         }
         if (recoveryRepository != null) {
@@ -2096,19 +2087,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
     }
 
-    private int countPlayersInCombatArena(List<Player> players) {
-        int count = 0;
-        for (Player player : players) {
-            PlayerSnapshot snap = snapshots.get(player.getUniqueId());
-            boolean inArena = snap != null ? snap.inArena() : regionService.isInArena(player.getLocation());
-            boolean inSafe = snap != null ? snap.inSafeZone() : regionService.isInSafeZone(player.getLocation());
-            if (inArena && !inSafe) {
-                count++;
-            }
-        }
-        return count;
-    }
-
     private void sendRevivingActionBar(Player reviver, String targetName, double ratio) {
         int percent = Math.max(0, Math.min(100, (int) Math.round(ratio * 100.0)));
         int filled = Math.max(0, Math.min(10, (int) Math.round(ratio * 10.0)));
@@ -2155,16 +2133,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
     }
 
-    private static boolean hasLivingDragonInWorld(World world) {
-        DragonBattle battle = world.getEnderDragonBattle();
-        if (battle == null) {
-            return false;
-        }
-        EnderDragon dragon = battle.getEnderDragon();
-        return dragon != null && !dragon.isDead();
-    }
-
-    private void startM3EncounterSystems(
+    private void startEncounterSystems(
             World fallbackEndWorld,
             List<Player> party,
             BossConfig bossConfig,
@@ -2224,14 +2193,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                         }
                     }
                 });
-                activateM3InCombatWorld(instWorld, instance.arenaCenter(), bossConfig, scaled, expectedGeneration);
+                activateInCombatWorld(instWorld, instance.arenaCenter(), bossConfig, scaled, expectedGeneration);
             });
             return;
         }
-        activateM3InCombatWorld(fallbackEndWorld, null, bossConfig, scaled, expectedGeneration);
+        activateInCombatWorld(fallbackEndWorld, null, bossConfig, scaled, expectedGeneration);
     }
 
-    private void activateM3InCombatWorld(
+    private void activateInCombatWorld(
             World endWorld,
             @Nullable Location customArenaCenter,
             BossConfig bossConfig,
@@ -2246,7 +2215,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
                 return;
             }
-            List<Player> initialViewers = onlinePlayersInWorld(endWorld);
 
             timeline = new RaidTimelineEngine(bossConfig, new TimelineListener() {
                 @Override
@@ -2288,7 +2256,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     if (hudService != null) {
                         hudService.updateCastBossBar(null, 0.0, 0.0, viewers);
                     }
-                    dispatchRegisteredGimmickAction(step.action(), ability, endWorld, customArenaCenter, bossConfig);
+                    dispatchRegisteredGimmickAction(step.action(), ability, endWorld, customArenaCenter, bossConfig, expectedGeneration);
                 }
 
                 @Override
@@ -2305,7 +2273,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 public void onInstantAction(
                         BossConfig.TimelineStep step,
                         @Nullable BossConfig.AbilitySettings ability) {
-                    dispatchRegisteredGimmickAction(step.action(), ability, endWorld, customArenaCenter, bossConfig);
+                    dispatchRegisteredGimmickAction(step.action(), ability, endWorld, customArenaCenter, bossConfig, expectedGeneration);
                 }
             });
             this.activeTimeline = timeline;
@@ -2334,7 +2302,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             @Nullable BossConfig.AbilitySettings ability,
             World endWorld,
             @Nullable Location customArenaCenter,
-            BossConfig bossConfig) {
+            BossConfig bossConfig,
+            long expectedGeneration) {
         if (gimmickActionRegistry == null || actionId == null || actionId.isBlank()) {
             return;
         }
@@ -2343,7 +2312,13 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     ? customArenaCenter.clone()
                     : regionService.clampToArenaAnchor(new Location(endWorld, 0.0, 64.0, 0.0), 0.0);
             List<Player> aliveSnapshot = List.copyOf(aliveOnlineParticipants());
-            RaidScriptContext scriptContext = new EncounterScriptContext(endWorld, aliveSnapshot, center, bossConfig.baseAttackDamage());
+            RaidScriptContext scriptContext = new EncounterScriptContext(
+                    endWorld,
+                    aliveSnapshot,
+                    center,
+                    bossConfig.baseAttackDamage(),
+                    expectedGeneration
+            );
             action.execute(scriptContext, ability != null ? ability.parameters() : Map.of());
         });
     }
@@ -2354,16 +2329,19 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         private final List<Player> aliveSnapshot;
         private final Location arenaCenter;
         private final double fallbackAttackDamage;
+        private final long expectedGeneration;
 
         private EncounterScriptContext(
                 World world,
                 List<Player> aliveSnapshot,
                 Location arenaCenter,
-                double fallbackAttackDamage) {
+                double fallbackAttackDamage,
+                long expectedGeneration) {
             this.world = world;
             this.aliveSnapshot = aliveSnapshot;
             this.arenaCenter = arenaCenter;
             this.fallbackAttackDamage = fallbackAttackDamage;
+            this.expectedGeneration = expectedGeneration;
         }
 
         @Override
@@ -2413,12 +2391,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             double damage = amount > 0.0 ? amount : fallbackAttackDamage;
             scheduler.runAtEntity(player, () -> {
-                if (state != RaidState.ACTIVE) {
-                    return;
-                }
-                RaidParticipant participant = participants.get(player.getUniqueId());
-                if (participant == null || participant.state() != ParticipantState.ALIVE) {
-                    return;
+                synchronized (stateLock) {
+                    if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
+                        return;
+                    }
+                    RaidParticipant participant = participants.get(player.getUniqueId());
+                    if (participant == null || participant.state() != ParticipantState.ALIVE) {
+                        return;
+                    }
                 }
                 combatMetricsTracker.recordMechanicHit(player.getUniqueId(), player.getName());
                 player.damage(damage);
@@ -2431,7 +2411,18 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 return;
             }
             Vector copy = velocity.clone();
-            scheduler.runAtEntity(player, () -> player.setVelocity(player.getVelocity().add(copy)));
+            scheduler.runAtEntity(player, () -> {
+                synchronized (stateLock) {
+                    if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
+                        return;
+                    }
+                    RaidParticipant participant = participants.get(player.getUniqueId());
+                    if (participant == null || participant.state() != ParticipantState.ALIVE) {
+                        return;
+                    }
+                }
+                player.setVelocity(player.getVelocity().add(copy));
+            });
         }
     }
 
@@ -2449,7 +2440,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
         List<Player> viewers = onlinePlayersInWorld(endWorld);
         soulMarkerService.removeAllMarkers(viewers);
-        cleanupM3Systems(viewers, true);
+        cleanupEncounterSystems(viewers, true);
         int partySizeSnapshot = participants.size();
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
                 combatMetricsTracker.snapshot();
@@ -2459,7 +2450,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
     }
 
-    private void tickM3Systems(World endWorld, List<Player> endPlayers, Set<UUID> channelingRevivers) {
+    private void tickEncounterSystems(World endWorld, List<Player> endPlayers, Set<UUID> channelingRevivers) {
         if (bossController == null) {
             return;
         }
@@ -2486,7 +2477,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
     }
 
-    private void prepareVictoryM3Cleanup(
+    private void prepareVictoryCleanup(
             EnderDragon dragon,
             World endWorld,
             List<Player> viewers,
@@ -2538,7 +2529,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
     }
 
-    private CompletableFuture<Void> cleanupM3Systems(List<Player> viewers, boolean removeDragonIfSummoned) {
+    private CompletableFuture<Void> cleanupEncounterSystems(List<Player> viewers, boolean removeDragonIfSummoned) {
         RaidTimelineEngine timeline = this.activeTimeline;
         this.activeTimeline = null;
         if (timeline != null) {

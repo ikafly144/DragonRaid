@@ -12,25 +12,18 @@ command:
   stats-load-failed: "<prefix><red>Failed to load stats.</red>"
   help: "<prefix><gray>DragonRaid commands: <white>/dr shop, /dr stats [player], /dr admin \\<region|start|reset|points|reload></white></gray>"
   milestone-shop: "<prefix><yellow>Reward shop GUI is not yet available (scheduled for Milestone 4).</yellow>"
-  milestone-ready: "<prefix><yellow>Raid ready/encounter flow is now managed through Content Finder.</yellow>"
-  milestone-start: "<prefix><yellow>Raid encounter flow is now managed through Content Finder.</yellow>"
   blueprint-not-found: "<prefix><red>No encounter blueprint is currently registered for difficulty '<difficulty>'.</red>"
   milestone-admin-start: "<prefix><yellow>Forced raid start (<difficulty>) is not yet available (scheduled for Milestone 2).</yellow>"
   milestone-admin-reset: "<prefix><yellow>Raid encounter reset is not yet available (scheduled for Milestone 2).</yellow>"
   invalid-usage: "<prefix><yellow>Usage: <usage></yellow>"
   reload-success: "<prefix><green>Configuration and language files reloaded.</green>"
   reload-failed: "<prefix><red>Failed to reload configuration: <error></red>"
-  ready-toggled: "<prefix><aqua>Ready status: <state></aqua>"
-  ready-state-true: "<green>Ready</green>"
-  ready-state-false: "<gray>Not Ready</gray>"
-  ready-not-available: "<prefix><yellow>Ready status cannot be toggled while a raid is active.</yellow>"
   start-no-players: "<prefix><red>No eligible players found in the End world to start the raid.</red>"
   start-too-few-players: "<prefix><red>Not enough players to start the raid (<current>/<min> required).</red>"
   start-too-many-players: "<prefix><red>Too many players in the raid area (<current>/<max> allowed).</red>"
   region-invalid-arg: "<prefix><red>Invalid region parameter: <details></red>"
   region-locked-during-raid: "<prefix><red>Arena region bounds cannot be modified while a raid is active or temporary blocks are pending rollback.</red>"
   rollback-pending: "<prefix><yellow>Cannot start a new raid until pending temporary block rollbacks finish.</yellow>"
-  altar-only-mode: "<prefix><yellow>Currently, raids can only be started from the Exit Portal Altar.</yellow>"
   start-triggered: "<prefix><gold>Started pull countdown for <difficulty> raid.</gold>"
   already-running: "<prefix><red>A raid encounter is already in progress.</red>"
   admin-reset: "<prefix><yellow>Raid encounter has been force-reset by an administrator.</yellow>"
@@ -43,7 +36,6 @@ command:
   points-updated: "<prefix><green>Updated <player>'s <currency> to <amount> (action: <action>).</green>"
 
 raid:
-  first-clear-init: "<prefix><light_purple>Initialized first End Dragon fight as DragonRaid (Normal). Enter the central arena to begin.</light_purple>"
   pull-countdown-title: "<gold><bold>PULL IN <seconds></bold></gold>"
   pull-countdown-subtitle: "<gray>Difficulty: <difficulty> | Players: <players></gray>"
   pull-cancelled: "<prefix><yellow>Pull countdown cancelled because players returned to the safe zone.</yellow>"
@@ -169,19 +161,6 @@ ability:
     name: "Twin Dragon Convergence"
   tether_dive_relay:
     name: "Fated Dive Relay"
-
-altar:
-  title: "<dark_purple>Altar of the End — Select Difficulty</dark_purple>"
-  normal-name: "<green><bold>Normal Difficulty</bold></green>"
-  normal-lore: "<gray>3 Phases / Ground-focused action</gray>\n<gray>Revives: N×1 | No downed timer</gray>\n<yellow>Click to summon</yellow>"
-  hard-name: "<dark_red><bold>Hard / Savage Difficulty</bold></dark_red>"
-  hard-lore: "<gray>4 Phases / Aerial phase, combo mechanics & Hard Enrage</gray>\n<gray>Revives: ceil(N/2) | 45s revive window</gray>\n<yellow>Click to summon</yellow>"
-  hard-locked: "<red>Clear Normal difficulty at least once to unlock.</red>"
-  hard-unavailable: "<prefix><yellow>Hard / Savage difficulty is scheduled for Milestone 4.</yellow>"
-  cost-line: "<gray>Summon Cost: <aqua><cost></aqua></gray>"
-  cost-free: "<green>No cost for first-clear encounter</green>"
-  insufficient-cost: "<prefix><red>Missing required summoning items (Need: <cost>).</red>"
-  open-shop-button: "<gold>Open Reward Shop</gold>"
 
 shop:
   title: "<dark_purple>DragonRaid Reward Shop</dark_purple>"

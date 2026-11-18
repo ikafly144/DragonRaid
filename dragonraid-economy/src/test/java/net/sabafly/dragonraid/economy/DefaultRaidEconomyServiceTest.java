@@ -27,5 +27,14 @@ class DefaultRaidEconomyServiceTest {
         assertFalse(economy.withdraw(player, "tomestone_astrality", 500L));
         assertTrue(economy.withdraw(player, "tomestone_astrality", 120L));
         assertEquals(330L, economy.balance(player, "tomestone_astrality"));
+
+        // Rejects Long.MAX_VALUE overflow on both capped and uncapped currencies
+        assertFalse(economy.deposit(player, "tomestone_astrality", Long.MAX_VALUE));
+        assertEquals(330L, economy.balance(player, "tomestone_astrality"));
+
+        economy.registerCurrency(new CurrencyDefinition("unlimited_gil", "currency.gil", 0L, 0L));
+        assertTrue(economy.deposit(player, "unlimited_gil", 100L));
+        assertFalse(economy.deposit(player, "unlimited_gil", Long.MAX_VALUE));
+        assertEquals(100L, economy.balance(player, "unlimited_gil"));
     }
 }

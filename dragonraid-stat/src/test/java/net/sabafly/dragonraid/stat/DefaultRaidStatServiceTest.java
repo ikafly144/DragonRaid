@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.stat;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Map;
 import java.util.UUID;
@@ -31,5 +32,23 @@ class DefaultRaidStatServiceTest {
 
         statService.clearTemporaryModifiers(entityId);
         assertEquals(0.05, statService.snapshotFor(entityId).get(StatKey.MOVE_SPEED_BONUS, 0.0), 1e-6);
+
+        statService.clearBaseStats(entityId);
+        assertEquals(StatSnapshot.EMPTY, statService.snapshotFor(entityId));
+    }
+
+    @Test
+    void rejectsBlankKeysAndNonFiniteValues() {
+        DefaultRaidStatService statService = new DefaultRaidStatService();
+        UUID entityId = UUID.randomUUID();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> statService.setBaseStats(entityId, Map.of(" ", 1.0)));
+        assertThrows(IllegalArgumentException.class,
+                () -> statService.setTemporaryModifiers(entityId, Map.of("stat", Double.NaN)));
+        assertThrows(IllegalArgumentException.class,
+                () -> statService.setTemporaryModifiers(entityId, Map.of("stat", Double.NEGATIVE_INFINITY)));
+        assertThrows(IllegalArgumentException.class,
+                () -> new StatSnapshot(Map.of("stat", Double.NaN)));
     }
 }

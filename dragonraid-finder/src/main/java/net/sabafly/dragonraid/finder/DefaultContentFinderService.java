@@ -87,7 +87,10 @@ public final class DefaultContentFinderService implements ContentFinderService {
                 }
             }
         }
-        if (spec.minAverageItemLevel() > 0 && itemService != null) {
+        if (spec.minAverageItemLevel() > 0) {
+            if (itemService == null) {
+                return false;
+            }
             for (UUID memberId : applicants) {
                 if (itemService.averageItemLevel(memberId) < spec.minAverageItemLevel()) {
                     return false;

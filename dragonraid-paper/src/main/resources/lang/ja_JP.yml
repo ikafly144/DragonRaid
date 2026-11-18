@@ -12,25 +12,18 @@ command:
   stats-load-failed: "<prefix><red>統計情報の取得に失敗しました。</red>"
   help: "<prefix><gray>コマンド一覧: <white>/dr shop, /dr stats [player], /dr admin \\<region|start|reset|points|reload></white></gray>"
   milestone-shop: "<prefix><yellow>報酬ショップ GUI は現在未実装です（Milestone 4 で実装予定）。</yellow>"
-  milestone-ready: "<prefix><yellow>レイド参加フローはコンテンツファインダーへ移行しました。</yellow>"
-  milestone-start: "<prefix><yellow>レイド開始フローはコンテンツファインダーへ移行しました。</yellow>"
   blueprint-not-found: "<prefix><red>難易度「<difficulty>」に対応するエンカウンターブループリントが登録されていません。</red>"
   milestone-admin-start: "<prefix><yellow>強制レイド開始（<difficulty>）は現在未実装です（Milestone 2 で実装予定）。</yellow>"
   milestone-admin-reset: "<prefix><yellow>レイド強制リセットは現在未実装です（Milestone 2 で実装予定）。</yellow>"
   invalid-usage: "<prefix><yellow>使用法: <usage></yellow>"
   reload-success: "<prefix><green>設定ファイルと言語ファイルをリロードしました。</green>"
   reload-failed: "<prefix><red>リロードに失敗しました: <error></red>"
-  ready-toggled: "<prefix><aqua>準備状態: <state></aqua>"
-  ready-state-true: "<green>準備完了</green>"
-  ready-state-false: "<gray>未準備</gray>"
-  ready-not-available: "<prefix><yellow>レイド進行中は準備状態を切り替えられません。</yellow>"
   start-no-players: "<prefix><red>エンドワールドに開始可能なプレイヤーが見つかりません。</red>"
   start-too-few-players: "<prefix><red>参加人数が不足しています（現在 <current>人 / 最小 <min>人）。</red>"
   start-too-many-players: "<prefix><red>参加人数が上限を超えています（現在 <current>人 / 最大 <max>人）。</red>"
   region-invalid-arg: "<prefix><red>リージョンパラメータが不正です: <details></red>"
   region-locked-during-raid: "<prefix><red>レイド進行中または一時ブロック復元待ちのため、アリーナ境界を変更できません。</red>"
   rollback-pending: "<prefix><yellow>一時ブロックの復元が完了するまで新しいレイドを開始できません。</yellow>"
-  altar-only-mode: "<prefix><yellow>現在、帰還ポータル祭壇からのみ開始できます。</yellow>"
   start-triggered: "<prefix><gold><difficulty> レイドの開始カウントダウンを開始しました。</gold>"
   already-running: "<prefix><red>現在レイドが進行中です。</red>"
   admin-reset: "<prefix><yellow>管理者によりレイドを強制リセットしました。</yellow>"
@@ -43,7 +36,6 @@ command:
   points-updated: "<prefix><green><player> の <currency> を <amount> に更新しました（操作: <action>）。</green>"
 
 raid:
-  first-clear-init: "<prefix><light_purple>初回エンドドラゴン戦を DragonRaid (Normal) として初期化しました。中央アリーナへ入ると開戦します。</light_purple>"
   pull-countdown-title: "<gold><bold>開戦まで <seconds></bold></gold>"
   pull-countdown-subtitle: "<gray>難易度: <difficulty> | 参加人数: <players>人</gray>"
   pull-cancelled: "<prefix><yellow>参加者が待機エリアに戻ったためカウントダウンを中断しました。</yellow>"
@@ -169,19 +161,6 @@ ability:
     name: "双竜の交叉突撃"
   tether_dive_relay:
     name: "宿命の連撃ダイブ"
-
-altar:
-  title: "<dark_purple>終焉の祭壇 — 難易度選択</dark_purple>"
-  normal-name: "<green><bold>Normal 難易度</bold></green>"
-  normal-lore: "<gray>3フェーズ / 徒歩アクション主軸</gray>\n<gray>蘇生上限: N×1回 | 時間猶予制限なし</gray>\n<yellow>クリックして召喚</yellow>"
-  hard-name: "<dark_red><bold>Hard / Savage 難易度</bold></dark_red>"
-  hard-lore: "<gray>4フェーズ / 立体機動・複合ギミック・時間切れあり</gray>\n<gray>蘇生上限: ceil(N/2)回 | 蘇生猶予 45秒</gray>\n<yellow>クリックして召喚</yellow>"
-  hard-locked: "<red>Normal 難易度を1回以上クリアすると解放されます。</red>"
-  hard-unavailable: "<prefix><yellow>Hard / Savage 難易度は Milestone 4 で実装予定です。</yellow>"
-  cost-line: "<gray>必要コスト: <aqua><cost></aqua></gray>"
-  cost-free: "<green>初回討伐のためコスト不要</green>"
-  insufficient-cost: "<prefix><red>召喚に必要なアイテムが不足しています（必要: <cost>）。</red>"
-  open-shop-button: "<gold>報酬交換ショップを開く</gold>"
 
 shop:
   title: "<dark_purple>DragonRaid 報酬交換ショップ</dark_purple>"

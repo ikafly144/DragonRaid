@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.item;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -25,5 +26,18 @@ class DefaultRaidItemServiceTest {
 
         itemService.setEquippedItems(player, List.of("blade_alpha", "helm_alpha"));
         assertEquals(110, itemService.averageItemLevel(player));
+
+        itemService.clearEquippedItems(player);
+        assertEquals(0, itemService.averageItemLevel(player));
+    }
+
+    @Test
+    void rejectsBlankKeysAndNonFiniteBaseStats() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new CustomItemDefinition("bad1", "item.bad1", 10, Map.of(" ", 1.0)));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CustomItemDefinition("bad2", "item.bad2", 10, Map.of("attack_damage_multiplier", Double.NaN)));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CustomItemDefinition("bad3", "item.bad3", 10, Map.of("attack_damage_multiplier", Double.POSITIVE_INFINITY)));
     }
 }

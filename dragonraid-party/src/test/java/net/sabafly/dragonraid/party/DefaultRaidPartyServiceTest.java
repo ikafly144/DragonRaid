@@ -42,4 +42,25 @@ class DefaultRaidPartyServiceTest {
         assertTrue(service.disband(memberA));
         assertTrue(service.partyOf(memberA).isEmpty());
     }
+
+    @Test
+    void clearsStaleInvitesOnDisbandAndCreateParty() {
+        DefaultRaidPartyService service = new DefaultRaidPartyService();
+        UUID leaderA = UUID.randomUUID();
+        UUID leaderB = UUID.randomUUID();
+
+        RaidParty partyA = service.createParty(leaderA);
+        assertTrue(service.invite(leaderA, leaderB));
+        assertTrue(service.disband(leaderA));
+        assertFalse(service.acceptInvite(leaderB, partyA.partyId()));
+
+        RaidParty partyA2 = service.createParty(leaderA);
+        assertTrue(service.invite(leaderA, leaderB));
+
+        // Creating a party discards any earlier invites addressed to leaderB
+        RaidParty partyB = service.createParty(leaderB);
+        assertTrue(service.disband(leaderB));
+        assertFalse(partyB.partyId().equals(partyA2.partyId()));
+        assertFalse(service.acceptInvite(leaderB, partyA2.partyId()));
+    }
 }

@@ -18,7 +18,6 @@ import net.sabafly.dragonraid.api.model.ActorModelController;
 import net.sabafly.dragonraid.api.model.ActorModelService;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
-import net.sabafly.dragonraid.model.DefaultActorModelService;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
 import org.bukkit.Bukkit;
@@ -55,7 +54,7 @@ public final class FoliaDragonBossController implements DragonBossController {
     private final Logger logger;
     private final Function<World, @Nullable EnderDragon> dragonFinder;
     private final DragonSpawner dragonSpawner;
-    private final ActorModelService modelService;
+    private final @Nullable ActorModelService modelService;
 
     private volatile ActorModelSpec modelSpec = ActorModelSpec.vanilla(1.0, Map.of());
     private volatile @Nullable ActorModelController modelController;
@@ -133,7 +132,7 @@ public final class FoliaDragonBossController implements DragonBossController {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.dragonFinder = Objects.requireNonNull(dragonFinder, "dragonFinder");
         this.dragonSpawner = Objects.requireNonNull(dragonSpawner, "dragonSpawner");
-        this.modelService = modelService != null ? modelService : new DefaultActorModelService(logger);
+        this.modelService = modelService;
     }
 
     @Override
@@ -285,7 +284,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                 }
             }
             configureAnimatedDragon(dragon, initialAnchor.getWorld());
-            ActorModelController candidateModel = modelService.bindEntity(dragon, this.modelSpec);
+            ActorModelController candidateModel = modelService != null ? modelService.bindEntity(dragon, this.modelSpec) : null;
             ActorModelController prevModel = null;
             boolean validBind;
             synchronized (lock) {
@@ -299,7 +298,9 @@ public final class FoliaDragonBossController implements DragonBossController {
                 }
             }
             if (!validBind) {
-                candidateModel.close();
+                if (candidateModel != null) {
+                    candidateModel.close();
+                }
                 if (wasSummoned) {
                     dragon.remove();
                 }

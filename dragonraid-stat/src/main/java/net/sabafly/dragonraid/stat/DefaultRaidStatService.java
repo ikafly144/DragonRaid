@@ -20,14 +20,33 @@ public final class DefaultRaidStatService implements RaidStatService {
     public void setBaseStats(UUID entityId, Map<String, Double> stats) {
         Objects.requireNonNull(entityId, "entityId");
         Objects.requireNonNull(stats, "stats");
-        baseStatsByEntity.put(entityId, Map.copyOf(stats));
+        baseStatsByEntity.put(entityId, validateStatMap(stats));
+    }
+
+    public void clearBaseStats(UUID entityId) {
+        if (entityId != null) {
+            baseStatsByEntity.remove(entityId);
+        }
     }
 
     @Override
     public void setTemporaryModifiers(UUID entityId, Map<String, Double> modifiers) {
         Objects.requireNonNull(entityId, "entityId");
         Objects.requireNonNull(modifiers, "modifiers");
-        tempModifiersByEntity.put(entityId, Map.copyOf(modifiers));
+        tempModifiersByEntity.put(entityId, validateStatMap(modifiers));
+    }
+
+    private static Map<String, Double> validateStatMap(Map<String, Double> map) {
+        for (Map.Entry<String, Double> entry : map.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) {
+                throw new IllegalArgumentException("Stat key must not be blank");
+            }
+            Double value = entry.getValue();
+            if (value == null || !Double.isFinite(value)) {
+                throw new IllegalArgumentException("Stat value for '" + entry.getKey() + "' must be finite: " + value);
+            }
+        }
+        return Map.copyOf(map);
     }
 
     @Override

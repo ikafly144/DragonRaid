@@ -57,4 +57,32 @@ class DefaultContentFinderServiceTest {
         assertTrue(finder.requestEntry(leader, "end_raid_alpha"));
         assertEquals(2, unlockService.unlockedContents(leader).size() + unlockService.unlockedContents(member).size());
     }
+
+    @Test
+    void failsClosedWhenItemServiceMissingForItemLevelGatedContent() {
+        DefaultContentUnlockService unlockService = new DefaultContentUnlockService();
+        DefaultContentFinderService finder = new DefaultContentFinderService(unlockService);
+        finder.registerContent(new ContentEntrySpec(
+                "ilvl_gated",
+                "content.ilvl_gated",
+                "bp_gated",
+                "",
+                1,
+                4,
+                100
+        ));
+        finder.registerContent(new ContentEntrySpec(
+                "ungated",
+                "content.ungated",
+                "bp_ungated",
+                "",
+                1,
+                4,
+                0
+        ));
+
+        UUID solo = UUID.randomUUID();
+        assertFalse(finder.requestEntry(solo, "ilvl_gated"));
+        assertTrue(finder.requestEntry(solo, "ungated"));
+    }
 }

@@ -54,7 +54,9 @@ import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
 import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
+import net.sabafly.dragonraid.visual.PacketEventsTelegraphService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
+import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import java.nio.file.Path;
 import java.util.logging.Level;
 import org.bukkit.entity.Player;
@@ -75,6 +77,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private RaidRegionService regionService;
     private TemporaryBlockTracker temporaryBlockTracker;
     private SoulMarkerService soulMarkerService;
+    private SpatialTelegraphService telegraphService;
     private RaidHudService hudService;
     private DragonBossController bossController;
     private RaidInstanceManager instanceManager;
@@ -153,6 +156,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
             this.regionService = new DefaultRaidRegionService(configManager, raidScheduler);
             this.temporaryBlockTracker = new TemporaryBlockTracker();
             this.soulMarkerService = new PacketEventsSoulMarkerService(configManager, messageService, getLogger());
+            this.telegraphService = new PacketEventsTelegraphService(configManager, getLogger());
             this.hudService = new AdventureRaidHudService(messageService, raidScheduler);
             this.bossController = new FoliaDragonBossController(configManager, raidScheduler, getLogger(), actorModelService);
             this.instanceManager = new TheNextLvlRaidInstanceManager(raidScheduler, getLogger());
@@ -187,6 +191,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
             serviceRegistry.register(ContentFinderService.class, contentFinderService);
             serviceRegistry.register(RaidEconomyService.class, economyService);
             serviceRegistry.register(RaidStatService.class, statService);
+            serviceRegistry.register(SpatialTelegraphService.class, telegraphService);
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
 
             getServer().getPluginManager().registerEvents(rewardService, this);
@@ -328,6 +333,10 @@ public final class DragonRaidPlugin extends JavaPlugin {
 
     public RaidServiceRegistry serviceRegistry() {
         return serviceRegistry;
+    }
+
+    public SpatialTelegraphService telegraphService() {
+        return telegraphService;
     }
 
     private void logBetterModelStatus() {

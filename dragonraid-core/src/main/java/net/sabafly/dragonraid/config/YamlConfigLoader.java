@@ -35,7 +35,6 @@ final class YamlConfigLoader {
 
     static final TypeSerializerCollection SERIALIZERS = TypeSerializerCollection.defaults().childBuilder()
             .register(RegionConfig.class, new RegionConfigSerializer())
-            .register(PluginConfig.AltarSettings.class, new AltarSettingsSerializer())
             .register(PluginConfig.class, new PluginConfigSerializer())
             .register(RewardsConfig.class, new RewardsConfigSerializer())
             .build();
@@ -558,53 +557,6 @@ final class YamlConfigLoader {
         }
     }
 
-    private static final class AltarSettingsSerializer implements TypeSerializer<PluginConfig.AltarSettings> {
-
-        @Override
-        public PluginConfig.AltarSettings deserialize(Type type, ConfigurationNode node) {
-            String fileName = activeFileName(ConfigManager.CONFIG_FILE);
-            if (node.virtual() || !node.isMap()) {
-                throw new ConfigException(fileName, ConfigValidation.fullPath(node), "Missing altar section");
-            }
-            RegionConfig.Point3D location = readPoint3D(
-                    ConfigValidation.requireNode(node, fileName, "location"), fileName);
-            double interactRadius = ConfigValidation.requirePositive(
-                    ConfigValidation.requireDouble(node, fileName, "interact-radius"),
-                    fileName,
-                    ConfigValidation.fullPath(node.node("interact-radius")));
-            boolean unlockHard = ConfigValidation.requireBoolean(node, fileName, "unlock-hard-after-normal-clear");
-
-            ConfigurationNode costsNode = ConfigValidation.requireNode(node, fileName, "summon-costs");
-            List<PluginConfig.ItemCost> normalCosts = readItemCosts(costsNode, fileName, "normal");
-            List<PluginConfig.ItemCost> hardCosts = readItemCosts(costsNode, fileName, "hard");
-            return new PluginConfig.AltarSettings(location, interactRadius, unlockHard, normalCosts, hardCosts);
-        }
-
-        private List<PluginConfig.ItemCost> readItemCosts(
-                ConfigurationNode costsNode, String fileName, String key) {
-            List<? extends ConfigurationNode> items = ConfigValidation.requireList(costsNode, fileName, key);
-            List<PluginConfig.ItemCost> parsed = new ArrayList<>(items.size());
-            for (ConfigurationNode item : items) {
-                if (!item.isMap()) {
-                    throw new ConfigException(fileName, ConfigValidation.fullPath(item), "Item cost entry must be a map");
-                }
-                String material = ConfigValidation.requireString(item, fileName, "material");
-                int amount = ConfigValidation.requirePositive(
-                        ConfigValidation.requireInt(item, fileName, "amount"),
-                        fileName,
-                        ConfigValidation.fullPath(item.node("amount")));
-                parsed.add(new PluginConfig.ItemCost(material, amount));
-            }
-            return List.copyOf(parsed);
-        }
-
-        @Override
-        public void serialize(Type type, PluginConfig.@Nullable AltarSettings obj, ConfigurationNode node)
-                throws SerializationException {
-            throw new SerializationException(node, type, "AltarSettings serialization is not supported");
-        }
-    }
-
     private static final class PluginConfigSerializer implements TypeSerializer<PluginConfig> {
 
         @Override
@@ -658,7 +610,6 @@ final class YamlConfigLoader {
             ConfigurationNode world = ConfigValidation.requireNode(root, fileName, "world");
             return new PluginConfig.WorldSettings(
                     ConfigValidation.requireString(world, fileName, "end-world-name"),
-                    ConfigValidation.requireBoolean(world, fileName, "replace-first-dragon"),
                     ConfigValidation.requireBoolean(world, fileName, "preserve-vanilla-progression"));
         }
 
@@ -743,20 +694,13 @@ final class YamlConfigLoader {
                     minPlayers, maxPlayers, enforceMax, hpAlpha, objectHpAlpha, gimmick, solo);
         }
 
-        private PluginConfig.EncounterSettings readEncounter(ConfigurationNode root, String fileName)
-                throws SerializationException {
+        private PluginConfig.EncounterSettings readEncounter(ConfigurationNode root, String fileName) {
             ConfigurationNode enc = ConfigValidation.requireNode(root, fileName, "encounter");
             int pullCountdown = ConfigValidation.requireNonNegative(
                     ConfigValidation.requireInt(enc, fileName, "pull-countdown-seconds"),
                     fileName, "encounter.pull-countdown-seconds");
-            boolean autoStart = ConfigValidation.requireBoolean(enc, fileName, "auto-start-on-arena-enter");
-            boolean altarGuiOnly = ConfigValidation.requireBoolean(enc, fileName, "altar-gui-only");
             boolean lockLate = ConfigValidation.requireBoolean(enc, fileName, "lock-late-joiners-to-safe-zone");
-            PluginConfig.AltarSettings altar = enc.node("altar").get(PluginConfig.AltarSettings.class);
-            if (altar == null) {
-                throw new ConfigException(fileName, "encounter.altar", "Missing altar section");
-            }
-            return new PluginConfig.EncounterSettings(pullCountdown, autoStart, altarGuiOnly, lockLate, altar);
+            return new PluginConfig.EncounterSettings(pullCountdown, lockLate);
         }
 
         private PluginConfig.ReviveSettings readRevive(ConfigurationNode root, String fileName) {

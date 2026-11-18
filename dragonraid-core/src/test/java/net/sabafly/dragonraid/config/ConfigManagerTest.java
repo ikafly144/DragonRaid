@@ -373,4 +373,20 @@ class ConfigManagerTest {
         assertEquals("config.yml", ex.fileName());
         assertTrue(ex.path().contains("spawn-point"));
     }
+
+    @Test
+    void reload_ignoresLegacyAltarAndAutoStartKeysGracefully(@TempDir Path tempDir) throws IOException {
+        ConfigManager manager = newManager(tempDir);
+        manager.initialize();
+
+        Path configFile = tempDir.resolve("config.yml");
+        String withLegacyKeys = Files.readString(configFile, StandardCharsets.UTF_8)
+                .replace("end-world-name: world_the_end", "end-world-name: world_the_end\n  replace-first-dragon: true")
+                .replace("pull-countdown-seconds: 8", "pull-countdown-seconds: 8\n  auto-start-on-arena-enter: true\n  altar-gui-only: false\n  altar:\n    interact-radius: 4.0");
+        Files.writeString(configFile, withLegacyKeys, StandardCharsets.UTF_8);
+
+        manager.reload();
+        assertEquals(8, manager.pluginConfig().encounter().pullCountdownSeconds());
+        assertEquals("world_the_end", manager.pluginConfig().world().endWorldName());
+    }
 }

@@ -23,7 +23,9 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
     @Override
     public void registerCurrency(CurrencyDefinition definition) {
         Objects.requireNonNull(definition, "definition");
-        currencies.put(definition.currencyId(), definition);
+        synchronized (lock) {
+            currencies.put(definition.currencyId(), definition);
+        }
     }
 
     @Override
@@ -54,18 +56,24 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
         if (amount <= 0L) {
             return false;
         }
-        CurrencyDefinition definition = currencies.get(currencyId);
-        if (definition == null) {
-            return false;
-        }
         LedgerKey key = new LedgerKey(playerId, currencyId);
         synchronized (lock) {
+            CurrencyDefinition definition = currencies.get(currencyId);
+            if (definition == null) {
+                return false;
+            }
             long current = balances.getOrDefault(key, 0L);
-            if (definition.maxBalance() > 0L && current + amount > definition.maxBalance()) {
+            if (amount > Long.MAX_VALUE - current) {
+                return false;
+            }
+            if (definition.maxBalance() > 0L && amount > definition.maxBalance() - current) {
                 return false;
             }
             long earned = weeklyEarned.getOrDefault(key, 0L);
-            if (definition.weeklyCap() > 0L && earned + amount > definition.weeklyCap()) {
+            if (amount > Long.MAX_VALUE - earned) {
+                return false;
+            }
+            if (definition.weeklyCap() > 0L && amount > definition.weeklyCap() - earned) {
                 return false;
             }
             balances.put(key, current + amount);
@@ -78,11 +86,14 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
     public boolean withdraw(UUID playerId, String currencyId, long amount) {
         Objects.requireNonNull(playerId, "playerId");
         Objects.requireNonNull(currencyId, "currencyId");
-        if (amount <= 0L || !currencies.containsKey(currencyId)) {
+        if (amount <= 0L) {
             return false;
         }
         LedgerKey key = new LedgerKey(playerId, currencyId);
         synchronized (lock) {
+            if (!currencies.containsKey(currencyId)) {
+                return false;
+            }
             long current = balances.getOrDefault(key, 0L);
             if (current < amount) {
                 return false;

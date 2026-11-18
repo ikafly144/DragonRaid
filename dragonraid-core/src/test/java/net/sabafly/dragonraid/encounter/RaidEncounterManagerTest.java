@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -85,7 +84,6 @@ class RaidEncounterManagerTest {
     private World endWorld;
     private Map<UUID, Player> onlinePlayers;
     private AtomicLong nowMillis;
-    private AtomicBoolean livingDragonPresent;
     private List<Runnable> capturedGlobalTimers;
     private List<Runnable> capturedDelayedTasks;
 
@@ -109,7 +107,6 @@ class RaidEncounterManagerTest {
 
         onlinePlayers = new ConcurrentHashMap<>();
         nowMillis = new AtomicLong(100_000L);
-        livingDragonPresent = new AtomicBoolean(true);
         capturedGlobalTimers = new ArrayList<>();
         capturedDelayedTasks = new ArrayList<>();
 
@@ -195,8 +192,7 @@ class RaidEncounterManagerTest {
                 () -> endWorld,
                 () -> onlinePlayers.values(),
                 id -> onlinePlayers.get(id),
-                nowMillis::get,
-                w -> livingDragonPresent.get());
+                nowMillis::get);
     }
 
     private static EncounterBlueprint sampleBlueprint(String id, EncounterDifficulty difficulty) {
@@ -274,14 +270,117 @@ class RaidEncounterManagerTest {
                 () -> endWorld,
                 () -> onlinePlayers.values(),
                 id -> onlinePlayers.get(id),
-                nowMillis::get,
-                w -> livingDragonPresent.get());
+                nowMillis::get);
 
         Player alice = addPlayer("Alice", new Location(endWorld, 100.5, 50.0, 0.5));
         assertTrue(customMgr.startEncounter(bp, List.of(alice)));
         assertEquals(RaidState.ACTIVE, customMgr.state());
         assertTrue(customMgr.isParticipant(alice.getUniqueId()));
         assertEquals(1, gimmickCalls.get());
+    }
+
+    @Test
+    void startEncounter_deduplicatesPlayersAndReturnsFalseWhileActive() {
+        EncounterBlueprint bp = sampleBlueprint("dedup_bp", EncounterDifficulty.NORMAL);
+        Player alice = addPlayer("Alice", new Location(endWorld, 100.5, 50.0, 0.5));
+
+        assertTrue(manager.startEncounter(bp, List.of(alice, alice)));
+        assertEquals(1, manager.activeScaling().orElseThrow().partySize());
+        assertFalse(manager.startEncounter(bp, List.of(alice)));
+    }
+
+    @Test
+    void scriptContextDamageAndKnockback_ignoreStaleGenerationAfterReset() {
+        List<Runnable> queuedEntityTasks = new ArrayList<>();
+        RaidScheduler queuedScheduler = mock(RaidScheduler.class);
+        lenient().when(queuedScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+        lenient().when(queuedScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+        lenient().when(queuedScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            capturedGlobalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(queuedScheduler.runGlobalLater(any(), anyLong())).thenReturn(mock(TaskHandle.class));
+
+        gimmickActionRegistry.register(new GimmickAction() {
+            @Override
+            public String id() {
+                return "DEFERRED_STRIKE";
+            }
+
+            @Override
+            public void execute(RaidScriptContext context, Map<String, Object> params) {
+                for (Player target : context.aliveParticipants()) {
+                    context.damagePlayer(target, 10.0, "test_strike");
+                    context.knockbackPlayer(target, new org.bukkit.util.Vector(1.0, 0.5, 0.0));
+                }
+            }
+        });
+        EncounterBlueprint bp = new EncounterBlueprintBuilder("stale_script_bp")
+                .difficulty(EncounterDifficulty.NORMAL)
+                .displayNameKey("boss.normal-name")
+                .primaryBoss("boss_alpha")
+                .enemy("boss_alpha", e -> e
+                        .displayNameKey("boss.normal-name")
+                        .stats(1200.0, 0.65, false, true, true))
+                .phase("phase-1", p -> p
+                        .displayNameKey("phase.p1.name")
+                        .hpRange(1.0, 0.0)
+                        .onEnter("DEFERRED_STRIKE")
+                        .loop(10.0))
+                .build();
+
+        DragonBossController mockBoss = mock(DragonBossController.class);
+        lenient().when(mockBoss.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(mockBoss.hpRatio()).thenReturn(1.0);
+        lenient().when(mockBoss.cleanup(anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
+
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                queuedScheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                null,
+                null,
+                mockBoss,
+                null,
+                blueprintRegistry,
+                gimmickActionRegistry,
+                null,
+                Logger.getLogger("StaleScriptContextTest"),
+                () -> endWorld,
+                () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id),
+                nowMillis::get);
+
+        Player alice = addPlayer("Alice", new Location(endWorld, 100.5, 50.0, 0.5));
+        lenient().when(alice.getVelocity()).thenReturn(new org.bukkit.util.Vector());
+        assertTrue(mgr.startEncounter(bp, List.of(alice)));
+
+        // Drain initial capture tasks so only post-reset/new tasks or queued script tasks remain carefully separated
+        List<Runnable> staleAndSetupTasks = new ArrayList<>(queuedEntityTasks);
+        queuedEntityTasks.clear();
+
+        // Reset encounter and immediately start a fresh generation BEFORE stale script tasks execute
+        mgr.adminReset(alice);
+        queuedEntityTasks.clear();
+        assertTrue(mgr.startEncounter(sampleBlueprint("fresh_bp", EncounterDifficulty.NORMAL), List.of(alice)));
+        queuedEntityTasks.clear();
+
+        // Now flush all queued tasks from the reset first encounter
+        for (Runnable task : staleAndSetupTasks) {
+            task.run();
+        }
+
+        verify(alice, never()).damage(anyDouble());
+        verify(alice, never()).setVelocity(any());
     }
 
     @Test

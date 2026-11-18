@@ -16,8 +16,6 @@ database:
 
 world:
   end-world-name: world_the_end
-  # Replace vanilla first-clear Ender Dragon encounter with DragonRaid Normal
-  replace-first-dragon: true
   # Preserve vanilla End Gateway, Dragon Egg, and Exit Portal progression
   preserve-vanilla-progression: true
 
@@ -85,24 +83,7 @@ scaling:
 
 encounter:
   pull-countdown-seconds: 8
-  auto-start-on-arena-enter: true
-  # If true, disables /dr start and /dr ready triggers; players must use the Altar GUI
-  altar-gui-only: false
   lock-late-joiners-to-safe-zone: true
-  altar:
-    location:
-      x: 0.0
-      y: 65.0
-      z: 0.0
-    interact-radius: 4.0
-    unlock-hard-after-normal-clear: true
-    summon-costs:
-      normal:
-        - material: END_CRYSTAL
-          amount: 4
-      hard:
-        - material: END_CRYSTAL
-          amount: 4
 
 revive:
   channel-seconds: 2.5

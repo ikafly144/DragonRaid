@@ -1,6 +1,5 @@
 dependencies {
     api(project(":dragonraid-api"))
-    implementation(project(":dragonraid-model"))
 
     compileOnly(libs.folia.api)
     compileOnly(libs.packetevents.spigot)
