@@ -2455,7 +2455,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 public void onInstantAction(
                         BossConfig.TimelineStep step,
                         @Nullable BossConfig.AbilitySettings ability) {
-                    gimmickExecutor.executeInstantAction(step, ability, endWorld, scaled, onlinePlayersInWorld(endWorld));
+                    List<Player> viewers = onlinePlayersInWorld(endWorld);
+                    gimmickExecutor.executeInstantAction(
+                            step,
+                            ability,
+                            endWorld,
+                            aliveOnlineParticipants(),
+                            viewers,
+                            scaled,
+                            bossController
+                    );
                 }
             });
             this.activeTimeline = timeline;

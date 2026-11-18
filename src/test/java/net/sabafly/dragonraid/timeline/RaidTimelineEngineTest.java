@@ -8,25 +8,41 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import net.sabafly.dragonraid.api.script.GimmickAction;
+import net.sabafly.dragonraid.api.script.RaidScriptContext;
+import net.sabafly.dragonraid.boss.DragonBossController;
 import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.config.ConfigManager;
+import net.sabafly.dragonraid.gimmick.NormalGimmickExecutor;
+import net.sabafly.dragonraid.gimmick.RaidCrystalManager;
+import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.scaling.RaidScalingCalculator;
+import net.sabafly.dragonraid.scaling.ScaledEncounterParameters;
+import net.sabafly.dragonraid.scheduler.RaidScheduler;
+import net.sabafly.dragonraid.script.DefaultGimmickActionRegistry;
+import net.sabafly.dragonraid.visual.SpatialTelegraphService;
+import org.bukkit.World;
 import org.jetbrains.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 class RaidTimelineEngineTest {
 
     @TempDir
     Path tempDir;
 
+    private ConfigManager configManager;
     private BossConfig normalBoss;
     private List<String> events;
     private RaidTimelineEngine engine;
 
     @BeforeEach
     void setUp() {
-        ConfigManager configManager = new ConfigManager(
+        configManager = new ConfigManager(
                 tempDir,
                 name -> RaidTimelineEngineTest.class.getClassLoader().getResourceAsStream(name));
         configManager.initialize();
@@ -208,6 +224,33 @@ class RaidTimelineEngineTest {
                 ))
         );
 
+        DefaultGimmickActionRegistry actionRegistry = new DefaultGimmickActionRegistry();
+        AtomicInteger customEnterExecutions = new AtomicInteger();
+        actionRegistry.register(new GimmickAction() {
+            @Override
+            public String id() {
+                return "CUSTOM_ENTER_BUFF";
+            }
+
+            @Override
+            public void execute(RaidScriptContext context, Map<String, Object> params) {
+                customEnterExecutions.incrementAndGet();
+            }
+        });
+        RaidCrystalManager mockCrystalManager = Mockito.mock(RaidCrystalManager.class);
+        NormalGimmickExecutor gimmickExecutor = new NormalGimmickExecutor(
+                configManager,
+                new MessageService(configManager),
+                Mockito.mock(RaidScheduler.class),
+                Mockito.mock(SpatialTelegraphService.class),
+                mockCrystalManager,
+                actionRegistry
+        );
+        World mockWorld = Mockito.mock(World.class);
+        DragonBossController mockBossController = Mockito.mock(DragonBossController.class);
+        ScaledEncounterParameters scaled = RaidScalingCalculator.calculate(
+                configManager.pluginConfig().scaling(), customBoss, 1);
+
         List<String> enterEvents = new ArrayList<>();
         RaidTimelineEngine enterEngine = new RaidTimelineEngine(customBoss, new TimelineListener() {
             @Override
@@ -234,6 +277,8 @@ class RaidTimelineEngineTest {
             @Override
             public void onInstantAction(BossConfig.TimelineStep step, @Nullable BossConfig.AbilitySettings ability) {
                 enterEvents.add("INSTANT:" + step.action());
+                gimmickExecutor.executeInstantAction(
+                        step, ability, mockWorld, List.of(), List.of(), scaled, mockBossController);
             }
         });
 
@@ -242,5 +287,8 @@ class RaidTimelineEngineTest {
                 List.of("PHASE:phase-enter", "INSTANT:SPAWN_CRYSTALS", "INSTANT:CUSTOM_ENTER_BUFF"),
                 enterEvents
         );
+        Mockito.verify(mockCrystalManager).spawnWave(
+                Mockito.eq(mockWorld), Mockito.anyInt(), Mockito.anyDouble(), Mockito.anyDouble());
+        assertEquals(1, customEnterExecutions.get());
     }
 }

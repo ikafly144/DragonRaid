@@ -185,7 +185,7 @@ public final class FoliaDragonBossController implements DragonBossController {
 
         EnderDragon existing = findEligibleDragon(endWorld);
         if (existing != null) {
-            return bindEntity(existing, false, validMaxHp, true, anchor, bindGeneration);
+            return bindEntity(existing, false, validMaxHp, true, anchor, bindGeneration, true);
         }
 
         CompletableFuture<Void> readyFuture = new CompletableFuture<>();
@@ -196,7 +196,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             }
             EnderDragon rechecked = findEligibleDragon(endWorld);
             if (rechecked != null) {
-                bindEntity(rechecked, false, validMaxHp, true, anchor, bindGeneration)
+                bindEntity(rechecked, false, validMaxHp, true, anchor, bindGeneration, true)
                         .whenComplete((ignored, err) -> {
                             if (err != null) {
                                 readyFuture.completeExceptionally(err);
@@ -216,7 +216,7 @@ public final class FoliaDragonBossController implements DragonBossController {
                     readyFuture.complete(null);
                     return;
                 }
-                bindEntity(spawned, true, validMaxHp, true, anchor, bindGeneration)
+                bindEntity(spawned, true, validMaxHp, true, anchor, bindGeneration, true)
                         .whenComplete((ignored, err) -> {
                             if (err != null) {
                                 readyFuture.completeExceptionally(err);
@@ -254,7 +254,7 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.activeCombat = false;
         }
         Location anchor = arenaAnchor(endWorld, LOW_ORBIT_Y_OFFSET);
-        bindEntity(existing, false, 0.0, false, anchor, holdGeneration);
+        bindEntity(existing, false, 0.0, false, anchor, holdGeneration, false);
     }
 
     private CompletableFuture<Void> bindEntity(
@@ -263,7 +263,8 @@ public final class FoliaDragonBossController implements DragonBossController {
             double targetMaxHp,
             boolean applyHealth,
             Location initialAnchor,
-            long expectedGeneration) {
+            long expectedGeneration,
+            boolean expectCombat) {
         synchronized (lock) {
             if (generation.get() != expectedGeneration) {
                 if (wasSummoned) {
@@ -312,10 +313,11 @@ public final class FoliaDragonBossController implements DragonBossController {
             synchronized (lock) {
                 validBind = this.activeDragon == dragon
                         && generation.get() == expectedGeneration
-                        && this.activeCombat;
+                        && this.activeCombat == expectCombat;
                 if (validBind) {
                     prevModel = this.modelController;
                     this.modelController = candidateModel;
+                    syncModelPosture(this.modelController, effectivePostureLocked());
                 }
             }
             if (!validBind) {
@@ -601,8 +603,6 @@ public final class FoliaDragonBossController implements DragonBossController {
     @Override
     public void setPosture(DragonPosture posture) {
         Objects.requireNonNull(posture, "posture");
-        ActorModelController modelToSync;
-        DragonPosture effectiveToSync = null;
         synchronized (lock) {
             if (posture != DragonPosture.DIVING && posture != DragonPosture.ASCENDING_CHARGE) {
                 this.diveWindupRemainingSeconds = 0.0;
@@ -620,17 +620,13 @@ public final class FoliaDragonBossController implements DragonBossController {
             if (posture != DragonPosture.STAGGERED) {
                 this.preStaggerPosture = null;
             }
-            modelToSync = this.modelController;
-            effectiveToSync = effectivePostureLocked();
+            syncModelPosture(this.modelController, effectivePostureLocked());
         }
-        syncModelPosture(modelToSync, effectiveToSync);
     }
 
     @Override
     public void beginDive(Location diveTargetLocation, double windupSeconds) {
         Objects.requireNonNull(diveTargetLocation, "diveTargetLocation");
-        ActorModelController modelToSync = null;
-        DragonPosture effectiveToSync = null;
         synchronized (lock) {
             this.diveTargetLocation = diveTargetLocation.clone();
             this.diveWindupRemainingSeconds = Math.max(0.0, windupSeconds);
@@ -641,11 +637,9 @@ public final class FoliaDragonBossController implements DragonBossController {
                 this.preStaggerPosture = next;
             } else {
                 this.targetPosture = next;
-                modelToSync = this.modelController;
-                effectiveToSync = effectivePostureLocked();
+                syncModelPosture(this.modelController, effectivePostureLocked());
             }
         }
-        syncModelPosture(modelToSync, effectiveToSync);
     }
 
     @Override
@@ -668,8 +662,6 @@ public final class FoliaDragonBossController implements DragonBossController {
         if (seconds <= 0.0) {
             return;
         }
-        ActorModelController modelToSync;
-        DragonPosture effectiveToSync;
         synchronized (lock) {
             if (staggerRemainingSeconds <= 0.0 && targetPosture != DragonPosture.STAGGERED) {
                 this.preStaggerPosture = targetPosture;
@@ -677,10 +669,8 @@ public final class FoliaDragonBossController implements DragonBossController {
             this.staggerRemainingSeconds = Math.max(this.staggerRemainingSeconds, seconds);
             this.targetPosture = DragonPosture.STAGGERED;
             this.diveWindupRemainingSeconds = 0.0;
-            modelToSync = this.modelController;
-            effectiveToSync = effectivePostureLocked();
+            syncModelPosture(this.modelController, effectivePostureLocked());
         }
-        syncModelPosture(modelToSync, effectiveToSync);
     }
 
     @Override
@@ -693,8 +683,6 @@ public final class FoliaDragonBossController implements DragonBossController {
         if (deltaSeconds <= 0.0) {
             return;
         }
-        ActorModelController modelToSync = null;
-        DragonPosture changedPosture = null;
         synchronized (lock) {
             DragonPosture before = effectivePostureLocked();
             if (staggerRemainingSeconds > 1e-6) {
@@ -714,11 +702,9 @@ public final class FoliaDragonBossController implements DragonBossController {
             }
             DragonPosture after = effectivePostureLocked();
             if (after != before) {
-                modelToSync = this.modelController;
-                changedPosture = after;
+                syncModelPosture(this.modelController, after);
             }
         }
-        syncModelPosture(modelToSync, changedPosture);
     }
 
     private DragonPosture effectivePostureLocked() {

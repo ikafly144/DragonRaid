@@ -346,8 +346,10 @@ class FoliaDragonBossControllerTest {
     void postureTransitionsAndCleanupSyncAndCloseBoundModelController() {
         EnderDragon dragon = mockDragon(new Location(endWorld, 0.0, 74.0, 0.0), 1200.0);
         ActorModelService modelService = mock(ActorModelService.class);
+        ActorModelController idleModelController = mock(ActorModelController.class);
         ActorModelController modelController = mock(ActorModelController.class);
-        lenient().when(modelService.bindEntity(eq(dragon), any())).thenReturn(modelController);
+        lenient().when(modelService.bindEntity(eq(dragon), any()))
+                .thenReturn(idleModelController, modelController);
 
         FoliaDragonBossController controller = new FoliaDragonBossController(
                 configManager,
@@ -358,9 +360,15 @@ class FoliaDragonBossControllerTest {
                 modelService
         );
 
+        controller.holdFirstClearIdle(endWorld);
+        assertEquals(idleModelController, controller.activeModelController());
+        verify(idleModelController).setPosture(DragonPosture.LOW_ORBIT);
+
         controller.bindOrSpawn(endWorld, 1200.0).join();
-        verify(modelService).bindEntity(eq(dragon), any());
+        verify(idleModelController).close();
+        verify(modelService, org.mockito.Mockito.times(2)).bindEntity(eq(dragon), any());
         assertEquals(modelController, controller.activeModelController());
+        verify(modelController).setPosture(DragonPosture.LOW_ORBIT);
 
         controller.setPosture(DragonPosture.HIGH_HOVER);
         verify(modelController, atLeastOnce()).setPosture(DragonPosture.HIGH_HOVER);
@@ -377,7 +385,7 @@ class FoliaDragonBossControllerTest {
 
         // Stagger expiry syncs model back out of STAGGERED during tick
         controller.tick(0.60);
-        verify(modelController, org.mockito.Mockito.times(2)).setPosture(DragonPosture.LOW_ORBIT);
+        verify(modelController, org.mockito.Mockito.times(3)).setPosture(DragonPosture.LOW_ORBIT);
 
         controller.cleanup(false).join();
         assertNull(controller.activeModelController());

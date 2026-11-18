@@ -105,6 +105,7 @@ public final class NormalGimmickExecutor {
     private final Map<UUID, Boolean> lastBlockingState = new ConcurrentHashMap<>();
     private final List<ActiveFollowUpEffect> followUpEffects = new ArrayList<>();
     private final Set<Integer> liveVirtualEntityIds = ConcurrentHashMap.newKeySet();
+    private final Set<MechanicResolutionTracker> pendingTrackers = ConcurrentHashMap.newKeySet();
     private final AtomicInteger towerRotationIndex = new AtomicInteger(0);
     private final AtomicInteger mechanicGeneration = new AtomicInteger(0);
     private final AtomicInteger sessionGeneration = new AtomicInteger(0);
@@ -296,6 +297,10 @@ public final class NormalGimmickExecutor {
         if (cancelled != null && cancelled.resolutionTracker != null) {
             cancelled.resolutionTracker.cancel();
         }
+        for (MechanicResolutionTracker tracker : pendingTrackers) {
+            tracker.cancel();
+        }
+        pendingTrackers.clear();
         synchronized (followUpEffects) {
             for (ActiveFollowUpEffect eff : this.followUpEffects) {
                 if (eff.resolutionTracker != null) {
@@ -347,7 +352,8 @@ public final class NormalGimmickExecutor {
     }
 
     /**
-     * Executes an instant timeline action (e.g. {@code SPAWN_CRYSTALS} / {@code SPAWN_TETHERED_CRYSTALS}).
+     * Executes an instant timeline action (e.g. {@code SPAWN_CRYSTALS} / {@code SPAWN_TETHERED_CRYSTALS}
+     * or a registered {@link GimmickAction}).
      */
     public void executeInstantAction(
             BossConfig.TimelineStep step,
@@ -355,8 +361,25 @@ public final class NormalGimmickExecutor {
             World endWorld,
             ScaledEncounterParameters scaled,
             Collection<? extends Player> viewers) {
+        List<Player> participantSnapshot = viewers == null ? List.of() : List.copyOf(viewers);
+        executeInstantAction(step, ability, endWorld, participantSnapshot, viewers, scaled, null);
+    }
+
+    /**
+     * Executes an instant timeline action with full encounter participant and boss context.
+     */
+    public void executeInstantAction(
+            BossConfig.TimelineStep step,
+            @Nullable BossConfig.AbilitySettings ability,
+            World endWorld,
+            List<Player> aliveParticipants,
+            Collection<? extends Player> viewers,
+            ScaledEncounterParameters scaled,
+            @Nullable DragonBossController bossController) {
         Objects.requireNonNull(step, "step");
         Objects.requireNonNull(endWorld, "endWorld");
+        Objects.requireNonNull(aliveParticipants, "aliveParticipants");
+        Objects.requireNonNull(viewers, "viewers");
         Objects.requireNonNull(scaled, "scaled");
 
         String act = step.action().toUpperCase(Locale.ROOT);
@@ -364,6 +387,13 @@ public final class NormalGimmickExecutor {
             double regen = ability != null ? ability.getDouble("boss-regen-per-second", 4.0) : 4.0;
             crystalManager.spawnWave(endWorld, scaled.crystalCount(), scaled.scaledCrystalHp(), regen);
             playWarningSound(viewers, "minecraft:block.beacon.activate", 1.2f);
+            return;
+        }
+        Optional<GimmickAction> customAction = actionRegistry.get(act);
+        if (customAction.isPresent()) {
+            RaidScriptContext scriptContext = buildScriptContext(endWorld, aliveParticipants, bossController);
+            Map<String, Object> params = ability != null ? ability.parameters() : Map.of();
+            customAction.get().execute(scriptContext, params);
         }
     }
 
@@ -388,6 +418,10 @@ public final class NormalGimmickExecutor {
 
         rememberViewers(viewers);
         cleanupActiveVirtualEntities(viewers);
+        ActiveMechanic previous = this.activeMechanic;
+        if (previous != null && previous.resolutionTracker != null) {
+            previous.resolutionTracker.cancel();
+        }
         this.mechanicGeneration.incrementAndGet();
         String action = step.action().toUpperCase(Locale.ROOT);
         double castSec = ability != null ? ability.castSeconds() : 3.5;
@@ -1000,6 +1034,10 @@ public final class NormalGimmickExecutor {
             }
             destroyMechanicVirtualEntities(current, viewers);
         }
+        for (MechanicResolutionTracker tracker : pendingTrackers) {
+            tracker.cancel();
+        }
+        pendingTrackers.clear();
     }
 
     /**
@@ -1393,25 +1431,29 @@ public final class NormalGimmickExecutor {
                 tracker.retain();
             }
             AtomicBoolean finished = new AtomicBoolean(false);
+            Runnable release = () -> {
+                if (finished.compareAndSet(false, true) && tracker != null) {
+                    tracker.release();
+                }
+            };
             TaskHandle handle = scheduler.runAtEntity(p, () -> {
                 try {
-                    if (p.isOnline()
-                            && mechanicGeneration.get() == expectedMechGen
+                    if (mechanicGeneration.get() == expectedMechGen
                             && sessionGeneration.get() == expectedSessionGen) {
-                        p.setVelocity(kb);
-                        damageApplier.accept(p, damage * mult);
-                        recordConfirmedMechanicHit(p.getUniqueId(), "KNOCKBACK_COMBO", tracker);
+                        if (p.isOnline()) {
+                            p.setVelocity(kb);
+                            damageApplier.accept(p, damage * mult);
+                            recordConfirmedMechanicHit(p.getUniqueId(), "KNOCKBACK_COMBO", tracker);
+                        }
+                    } else if (tracker != null) {
+                        tracker.cancel();
                     }
                 } finally {
-                    if (finished.compareAndSet(false, true) && tracker != null) {
-                        tracker.release();
-                    }
+                    release.run();
                 }
-            });
-            if ((handle == null || handle.isCancelled())
-                    && finished.compareAndSet(false, true)
-                    && tracker != null) {
-                tracker.release();
+            }, release);
+            if (handle == null || handle.isCancelled()) {
+                release.run();
             }
         }
         // Follow-up center bamboo eruption 1.4s after knockback
@@ -1862,12 +1904,13 @@ public final class NormalGimmickExecutor {
             }
             occlusionChecker.isOccludedAsync(bossLocation, playerEye).whenComplete((occluded, ex) -> {
                 try {
-                    if (ex == null
-                            && mechanicGeneration.get() == expectedMechGen
-                            && sessionGeneration.get() == expectedSessionGen
-                            && !Boolean.TRUE.equals(occluded)
-                            && player.isOnline()) {
-                        applyMechanicDamageOnEntityThread(player, damage, expectedMechGen, expectedSessionGen, tracker);
+                    if (mechanicGeneration.get() == expectedMechGen
+                            && sessionGeneration.get() == expectedSessionGen) {
+                        if (ex == null && !Boolean.TRUE.equals(occluded) && player.isOnline()) {
+                            applyMechanicDamageOnEntityThread(player, damage, expectedMechGen, expectedSessionGen, tracker);
+                        }
+                    } else if (tracker != null) {
+                        tracker.cancel();
                     }
                 } finally {
                     if (tracker != null) {
@@ -2296,24 +2339,28 @@ public final class NormalGimmickExecutor {
             tracker.retain();
         }
         AtomicBoolean finished = new AtomicBoolean(false);
+        Runnable release = () -> {
+            if (finished.compareAndSet(false, true) && tracker != null) {
+                tracker.release();
+            }
+        };
         TaskHandle handle = scheduler.runAtEntity(player, () -> {
             try {
-                if (player.isOnline()
-                        && mechanicGeneration.get() == expectedMechGen
+                if (mechanicGeneration.get() == expectedMechGen
                         && sessionGeneration.get() == expectedSessionGen) {
-                    damageApplier.accept(player, amount);
-                    recordConfirmedMechanicHit(player.getUniqueId(), mechName, tracker);
+                    if (player.isOnline()) {
+                        damageApplier.accept(player, amount);
+                        recordConfirmedMechanicHit(player.getUniqueId(), mechName, tracker);
+                    }
+                } else if (tracker != null) {
+                    tracker.cancel();
                 }
             } finally {
-                if (finished.compareAndSet(false, true) && tracker != null) {
-                    tracker.release();
-                }
+                release.run();
             }
-        });
-        if ((handle == null || handle.isCancelled())
-                && finished.compareAndSet(false, true)
-                && tracker != null) {
-            tracker.release();
+        }, release);
+        if (handle == null || handle.isCancelled()) {
+            release.run();
         }
     }
 
@@ -2346,10 +2393,10 @@ public final class NormalGimmickExecutor {
     private RaidScriptContext buildScriptContext(
             World world,
             List<Player> aliveParticipants,
-            DragonBossController bossController) {
+            @Nullable DragonBossController bossController) {
         List<Player> participantSnapshot = List.copyOf(aliveParticipants);
         Location center = arenaCenter(world);
-        Location bossLoc = bossController.bossLocation();
+        Location bossLoc = bossController != null ? bossController.bossLocation() : null;
         final int capturedSessionGen = sessionGeneration.get();
         return new RaidScriptContext() {
             @Override
@@ -2397,7 +2444,7 @@ public final class NormalGimmickExecutor {
 
             @Override
             public @Nullable ActorModelController primaryBossModel() {
-                return bossController.activeModelController();
+                return bossController != null ? bossController.activeModelController() : null;
             }
 
             @Override
@@ -2448,6 +2495,11 @@ public final class NormalGimmickExecutor {
             tracker.retain();
         }
         AtomicBoolean finished = new AtomicBoolean(false);
+        Runnable release = () -> {
+            if (finished.compareAndSet(false, true) && tracker != null) {
+                tracker.release();
+            }
+        };
         TaskHandle handle = scheduler.runAtEntity(player, () -> {
             try {
                 if (player.isOnline() && sessionGeneration.get() == expectedSessionGen) {
@@ -2455,15 +2507,11 @@ public final class NormalGimmickExecutor {
                     recordConfirmedMechanicHit(player.getUniqueId(), mechanicId, tracker);
                 }
             } finally {
-                if (finished.compareAndSet(false, true) && tracker != null) {
-                    tracker.release();
-                }
+                release.run();
             }
-        });
-        if ((handle == null || handle.isCancelled())
-                && finished.compareAndSet(false, true)
-                && tracker != null) {
-            tracker.release();
+        }, release);
+        if (handle == null || handle.isCancelled()) {
+            release.run();
         }
     }
 
@@ -2507,6 +2555,7 @@ public final class NormalGimmickExecutor {
             this.mechanicType = mechanicType;
             this.eligiblePlayerIds = List.copyOf(eligiblePlayerIds);
             this.expectedSessionGen = expectedSessionGen;
+            pendingTrackers.add(this);
         }
 
         void setEligiblePlayerIds(List<UUID> eligiblePlayerIds) {
@@ -2519,6 +2568,7 @@ public final class NormalGimmickExecutor {
 
         void cancel() {
             cancelled.set(true);
+            pendingTrackers.remove(this);
         }
 
         void recordHit(@Nullable UUID playerId) {
@@ -2528,22 +2578,23 @@ public final class NormalGimmickExecutor {
         }
 
         void release() {
-            if (pendingTasks.decrementAndGet() == 0
-                    && !cancelled.get()
-                    && sessionGeneration.get() == expectedSessionGen) {
-                Set<UUID> hits = Set.copyOf(hitPlayerIds);
-                List<UUID> eligible = this.eligiblePlayerIds;
-                boolean perfect = hits.isEmpty() && !eligible.isEmpty();
-                dispatchResolvedEvent(new RaidMechanicResolvedEvent(
-                        mechanicId,
-                        BuiltInEncounters.ENEMY_ANCIENT_DRAGON,
-                        hits,
-                        perfect,
-                        Map.of(
-                                "mechanicType", mechanicType,
-                                "eligiblePlayers", eligible
-                        )
-                ));
+            if (pendingTasks.decrementAndGet() == 0) {
+                pendingTrackers.remove(this);
+                if (!cancelled.get() && sessionGeneration.get() == expectedSessionGen) {
+                    Set<UUID> hits = Set.copyOf(hitPlayerIds);
+                    List<UUID> eligible = this.eligiblePlayerIds;
+                    boolean perfect = hits.isEmpty() && !eligible.isEmpty();
+                    dispatchResolvedEvent(new RaidMechanicResolvedEvent(
+                            mechanicId,
+                            BuiltInEncounters.ENEMY_ANCIENT_DRAGON,
+                            hits,
+                            perfect,
+                            Map.of(
+                                    "mechanicType", mechanicType,
+                                    "eligiblePlayers", eligible
+                            )
+                    ));
+                }
             }
         }
     }

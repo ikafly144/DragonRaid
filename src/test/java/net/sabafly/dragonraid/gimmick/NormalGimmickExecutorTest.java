@@ -86,6 +86,10 @@ class NormalGimmickExecutorTest {
             inv.<Runnable>getArgument(1).run();
             return TaskHandle.retired();
         });
+        lenient().when(scheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
 
         telegraphService = mock(SpatialTelegraphService.class);
         crystalManager = new RaidCrystalManager(
@@ -304,6 +308,10 @@ class NormalGimmickExecutorTest {
             queuedEntityTasks.add(inv.getArgument(1));
             return TaskHandle.retired();
         });
+        lenient().when(deferredScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
 
         NormalGimmickExecutor deferredExecutor = new NormalGimmickExecutor(
                 configManager,
@@ -482,6 +490,26 @@ class NormalGimmickExecutorTest {
         assertEquals("LOS_BREATH", event.mechanicId());
         assertTrue(event.hitPlayerIds().contains(exposed.getUniqueId()));
         assertFalse(event.perfectResolve());
+
+        // Cancelling after completeCast while async LoS check is pending must suppress resolved event
+        resolvedRef.set(null);
+        java.util.concurrent.CompletableFuture<Boolean> cancelledAsyncLos = new java.util.concurrent.CompletableFuture<>();
+        NormalGimmickExecutor cancelAsyncExecutor = new NormalGimmickExecutor(
+                configManager,
+                new MessageService(configManager),
+                scheduler,
+                telegraphService,
+                crystalManager,
+                nowMillis::get,
+                (player, amount) -> damageTaken.merge(player.getUniqueId(), amount, Double::sum),
+                (b, e) -> cancelledAsyncLos
+        );
+        cancelAsyncExecutor.setResolvedEventSink(resolvedRef::set);
+        cancelAsyncExecutor.startCast(step, ability, endWorld, List.of(exposed), List.of(exposed), scaled, bossController);
+        cancelAsyncExecutor.completeCast(step, ability, List.of(exposed), List.of(exposed), scaled, bossController, timelineEngine);
+        cancelAsyncExecutor.cancelActiveMechanic(List.of(exposed));
+        cancelledAsyncLos.complete(false);
+        org.junit.jupiter.api.Assertions.assertNull(resolvedRef.get());
     }
 
     @Test
@@ -493,6 +521,10 @@ class NormalGimmickExecutorTest {
             return TaskHandle.retired();
         });
         lenient().when(deferredScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            queuedEntityTasks.add(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(deferredScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
             queuedEntityTasks.add(inv.getArgument(1));
             return mock(TaskHandle.class);
         });
@@ -573,5 +605,10 @@ class NormalGimmickExecutorTest {
 
         assertFalse(damageTaken.containsKey(participant.getUniqueId()));
         org.mockito.Mockito.verify(participant, org.mockito.Mockito.never()).setVelocity(any());
+
+        capturedCtx.set(null);
+        scriptExecutor.executeInstantAction(
+                customStep, null, endWorld, List.of(participant), List.of(participant), scaled, bossController);
+        org.junit.jupiter.api.Assertions.assertNotNull(capturedCtx.get());
     }
 }
