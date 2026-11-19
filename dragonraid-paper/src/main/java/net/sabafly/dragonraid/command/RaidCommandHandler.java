@@ -84,6 +84,62 @@ public interface RaidCommandHandler {
     }
 
     /**
+     * Sub-actions for {@code /dr admin unlock <action> ...}.
+     */
+    enum UnlockAction {
+        GRANT("grant"),
+        REVOKE("revoke"),
+        LIST("list");
+
+        private final String cliName;
+
+        UnlockAction(String cliName) {
+            this.cliName = cliName;
+        }
+
+        public String cliName() {
+            return cliName;
+        }
+    }
+
+    /**
+     * Sub-actions for {@code /dr admin achievement <action> ...}.
+     */
+    enum AchievementAction {
+        GRANT("grant"),
+        LIST("list");
+
+        private final String cliName;
+
+        AchievementAction(String cliName) {
+            this.cliName = cliName;
+        }
+
+        public String cliName() {
+            return cliName;
+        }
+    }
+
+    /**
+     * Sub-actions for {@code /dr admin reward <action> ...}.
+     */
+    enum RewardAction {
+        LIST("list"),
+        SIMULATE("simulate"),
+        GRANT("grant");
+
+        private final String cliName;
+
+        RewardAction(String cliName) {
+            this.cliName = cliName;
+        }
+
+        public String cliName() {
+            return cliName;
+        }
+    }
+
+    /**
      * Opens the DragonRaid reward exchange shop GUI for the player.
      *
      * @param player the executing player
@@ -182,11 +238,44 @@ public interface RaidCommandHandler {
     );
 
     /**
-     * Reloads DragonRaid YAML configuration and language files.
+     * Reloads DragonRaid YAML configuration, language files, and Content Packs.
      *
      * @param sender the command sender
      */
     void adminReload(CommandSender sender);
+
+    default void adminPacks(CommandSender sender) {
+        showHelp(sender);
+    }
+
+    default void adminUnlock(
+            CommandSender sender,
+            UnlockAction action,
+            String targetPlayerName,
+            @Nullable String contentId) {
+        showHelp(sender);
+    }
+
+    default void adminAchievement(
+            CommandSender sender,
+            AchievementAction action,
+            String targetPlayerName,
+            @Nullable String achievementId) {
+        showHelp(sender);
+    }
+
+    default void adminProgressionStatus(CommandSender sender) {
+        showHelp(sender);
+    }
+
+    default void adminReward(
+            CommandSender sender,
+            RewardAction action,
+            @Nullable String tableId,
+            @Nullable String targetPlayerName,
+            @Nullable Long seed) {
+        showHelp(sender);
+    }
 
     /**
      * Sends command usage summary when {@code /dr} is invoked without subcommands.
@@ -195,7 +284,7 @@ public interface RaidCommandHandler {
      */
     default void showHelp(CommandSender sender) {
         sender.sendMessage(Component.text(
-            "DragonRaid commands: /dr shop, /dr stats [player], /dr ready, /dr start, /dr admin <region|start|reset|points|reload>"
+            "DragonRaid commands: /dr shop, /dr stats [player], /dr admin <region|start|reset|points|reload|packs|unlock|achievement|progression|reward>"
         ));
     }
 

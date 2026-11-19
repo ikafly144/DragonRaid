@@ -1,6 +1,8 @@
 package net.sabafly.dragonraid.api.finder;
 
+import java.util.List;
 import java.util.Objects;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Content Finder registration metadata for an encounter or instanced duty.
@@ -12,7 +14,8 @@ public record ContentEntrySpec(
         String requiredUnlockKey,
         int minPlayers,
         int maxPlayers,
-        int minAverageItemLevel
+        int minAverageItemLevel,
+        List<String> clearRewards
 ) {
 
     public ContentEntrySpec {
@@ -28,5 +31,28 @@ public record ContentEntrySpec(
         if (minAverageItemLevel < 0) {
             throw new IllegalArgumentException("minAverageItemLevel must be >= 0");
         }
+        clearRewards = normalizeIdList(clearRewards);
+    }
+
+    public ContentEntrySpec(
+            String contentId,
+            String displayNameKey,
+            String blueprintId,
+            String requiredUnlockKey,
+            int minPlayers,
+            int maxPlayers,
+            int minAverageItemLevel) {
+        this(contentId, displayNameKey, blueprintId, requiredUnlockKey, minPlayers, maxPlayers, minAverageItemLevel, List.of());
+    }
+
+    private static List<String> normalizeIdList(@Nullable List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        return values.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
     }
 }

@@ -4,16 +4,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import net.sabafly.dragonraid.api.progression.PlayerProgressionRepository;
 
 /**
  * Asynchronous repository contract for DragonRaid player statistics, virtual points,
- * and named reward currencies.
+ * named reward currencies, and player progression state.
  *
  * <p>All methods return {@link CompletableFuture} instances executed on the repository's
  * configured async executor so callers can safely bridge results back to Folia region/entity
  * schedulers.
  */
-public interface PlayerDataRepository extends AutoCloseable {
+public interface PlayerDataRepository extends PlayerProgressionRepository, AutoCloseable {
 
     /**
      * Finds stored statistics for the given player UUID.

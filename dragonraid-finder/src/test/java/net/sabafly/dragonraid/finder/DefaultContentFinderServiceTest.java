@@ -3,16 +3,22 @@ package net.sabafly.dragonraid.finder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.item.RaidItemService;
 import net.sabafly.dragonraid.api.party.RaidParty;
 import net.sabafly.dragonraid.api.party.RaidPartyService;
+import net.sabafly.dragonraid.api.progression.PlayerProgressionRepository;
 import org.junit.jupiter.api.Test;
 
 class DefaultContentFinderServiceTest {
@@ -84,5 +90,44 @@ class DefaultContentFinderServiceTest {
         UUID solo = UUID.randomUUID();
         assertFalse(finder.requestEntry(solo, "ilvl_gated"));
         assertTrue(finder.requestEntry(solo, "ungated"));
+    }
+
+    @Test
+    void persistsUnlocksViaRepositoryAndReplacesPackContentsCleanly() {
+        PlayerProgressionRepository repo = mock(PlayerProgressionRepository.class);
+        UUID alice = UUID.randomUUID();
+        when(repo.loadUnlockedContents(alice)).thenReturn(CompletableFuture.completedFuture(Set.of("pack_normal")));
+        when(repo.grantContentUnlock(eq(alice), eq("Alice"), eq("pack_hard"), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        when(repo.revokeContentUnlock(alice, "pack_normal"))
+                .thenReturn(CompletableFuture.completedFuture(true));
+
+        DefaultContentUnlockService unlockService = new DefaultContentUnlockService(repo);
+        unlockService.loadPlayer(alice).join();
+        assertTrue(unlockService.isUnlocked(alice, "pack_normal"));
+
+        assertTrue(unlockService.unlock(alice, "Alice", "pack_hard"));
+        assertFalse(unlockService.unlock(alice, "Alice", "pack_hard"));
+        verify(repo).grantContentUnlock(eq(alice), eq("Alice"), eq("pack_hard"), anyLong());
+
+        assertTrue(unlockService.revoke(alice, "pack_normal"));
+        assertFalse(unlockService.isUnlocked(alice, "pack_normal"));
+        verify(repo).revokeContentUnlock(alice, "pack_normal");
+
+        DefaultContentFinderService finder = new DefaultContentFinderService(unlockService);
+        finder.registerContent(new ContentEntrySpec("static_trial", "t", "bp_static", "", 1, 4, 0));
+        finder.replacePackContents(List.of(
+                new ContentEntrySpec("pack_v1", "p1", "bp1", "pack_hard", 1, 8, 0)
+        ));
+        assertTrue(finder.getContent("static_trial").isPresent());
+        assertTrue(finder.getContent("pack_v1").isPresent());
+
+        // Hot-reload replaces only pack entries while keeping static registrations intact
+        finder.replacePackContents(List.of(
+                new ContentEntrySpec("pack_v2", "p2", "bp2", "pack_hard", 1, 8, 0)
+        ));
+        assertTrue(finder.getContent("static_trial").isPresent());
+        assertTrue(finder.getContent("pack_v1").isEmpty());
+        assertTrue(finder.getContent("pack_v2").isPresent());
     }
 }

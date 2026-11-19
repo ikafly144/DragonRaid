@@ -12,14 +12,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -397,5 +401,86 @@ class SqlitePlayerDataRepositoryTest {
 
         assertThrows(CancellationException.class, () -> first.get(2, TimeUnit.SECONDS));
         assertThrows(CancellationException.class, () -> second.get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void persistsAchievementsUnlocksRewardsClearsAndConcurrentServerFirst() throws Exception {
+        Path dbFile = tempDir.resolve("progression.db");
+        SqlitePlayerDataRepository repo = openRepository("progression.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // Achievements
+        assertTrue(repo.grantAchievement(alice, "Alice", "touch_end_portal", 1000L).join());
+        assertFalse(repo.grantAchievement(alice, "Alice", "touch_end_portal", 2000L).join());
+        assertTrue(repo.hasAchievement(alice, "touch_end_portal").join());
+        assertEquals(Set.of("touch_end_portal"), repo.loadAchievements(alice).join());
+
+        // Content unlocks + revoke
+        assertTrue(repo.grantContentUnlock(alice, "Alice", "ender_dragon_normal", 1000L).join());
+        assertFalse(repo.grantContentUnlock(alice, "Alice", "ender_dragon_normal", 1500L).join());
+        assertTrue(repo.hasContentUnlock(alice, "ender_dragon_normal").join());
+        assertEquals(Set.of("ender_dragon_normal"), repo.loadUnlockedContents(alice).join());
+        assertTrue(repo.revokeContentUnlock(alice, "ender_dragon_normal").join());
+        assertFalse(repo.hasContentUnlock(alice, "ender_dragon_normal").join());
+        assertTrue(repo.grantContentUnlock(alice, "Alice", "ender_dragon_hard", 3000L).join());
+
+        // Claimed rewards
+        assertTrue(repo.tryClaimReward(alice, "Alice", "unlock_normal_on_portal", 1000L).join());
+        assertFalse(repo.tryClaimReward(alice, "Alice", "unlock_normal_on_portal", 2000L).join());
+        assertTrue(repo.tryClaimReward(alice, "Alice", "sf_bonus", 2500L).join());
+        assertTrue(repo.hasClaimedReward(alice, "unlock_normal_on_portal").join());
+        assertEquals(Set.of("unlock_normal_on_portal", "sf_bonus"), repo.loadClaimedRewards(alice).join());
+
+        // Per-encounter clears
+        assertTrue(repo.recordEncounterClear(alice, "Alice", "ender_dragon_normal", 200_000L, 1000L).join());
+        assertFalse(repo.recordEncounterClear(alice, "Alice", "ender_dragon_normal", 150_000L, 2000L).join());
+        assertTrue(repo.hasClearedEncounter(alice, "ender_dragon_normal").join());
+        assertEquals(Set.of("ender_dragon_normal"), repo.loadClearedEncounters(alice).join());
+
+        // Concurrent server-first atomicity
+        int threads = 8;
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger wins = new AtomicInteger(0);
+        ExecutorService racePool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                UUID winner = (i % 2 == 0) ? alice : bob;
+                futures.add(racePool.submit((Callable<Void>) () -> {
+                    ready.countDown();
+                    start.await(2, TimeUnit.SECONDS);
+                    if (repo.tryClaimServerFirst("encounter:ender_dragon_normal", List.of(winner), 5000L).join()) {
+                        wins.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            assertTrue(ready.await(2, TimeUnit.SECONDS));
+            start.countDown();
+            for (Future<?> f : futures) {
+                f.get(5, TimeUnit.SECONDS);
+            }
+            assertEquals(1, wins.get());
+        } finally {
+            racePool.shutdownNow();
+            racePool.awaitTermination(2, TimeUnit.SECONDS);
+        }
+
+        repo.close();
+        repository = null;
+
+        // Reopen DB and verify persistence
+        try (SqlitePlayerDataRepository reopened = new SqlitePlayerDataRepository(dbFile, 2, executor)) {
+            assertTrue(reopened.hasAchievement(alice, "touch_end_portal").join());
+            assertTrue(reopened.hasContentUnlock(alice, "ender_dragon_hard").join());
+            assertFalse(reopened.hasContentUnlock(alice, "ender_dragon_normal").join());
+            assertTrue(reopened.hasClaimedReward(alice, "unlock_normal_on_portal").join());
+            assertEquals(Set.of("unlock_normal_on_portal", "sf_bonus"), reopened.loadClaimedRewards(alice).join());
+            assertTrue(reopened.hasClearedEncounter(alice, "ender_dragon_normal").join());
+            assertTrue(reopened.isServerFirstAchieved("encounter:ender_dragon_normal").join());
+            assertTrue(reopened.loadAllServerMilestones().join().contains("encounter:ender_dragon_normal"));
+        }
     }
 }

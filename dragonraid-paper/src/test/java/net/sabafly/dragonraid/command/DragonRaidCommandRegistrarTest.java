@@ -13,9 +13,12 @@ import static org.mockito.Mockito.when;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.suggestion.Suggestions;
+import net.sabafly.dragonraid.command.RaidCommandHandler.AchievementAction;
 import net.sabafly.dragonraid.command.RaidCommandHandler.Difficulty;
 import net.sabafly.dragonraid.command.RaidCommandHandler.PointsAction;
 import net.sabafly.dragonraid.command.RaidCommandHandler.RegionAction;
+import net.sabafly.dragonraid.command.RaidCommandHandler.RewardAction;
+import net.sabafly.dragonraid.command.RaidCommandHandler.UnlockAction;
 import net.sabafly.dragonraid.permission.RaidPermissions;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
@@ -45,7 +48,10 @@ class DragonRaidCommandRegistrarTest {
         registrar = new DragonRaidCommandRegistrar(
             handler,
             () -> List.of("Steve", "Alex", "ikafly144"),
-            () -> List.of("dragon_token", "abyssal_scale", "celestial_fragment")
+            () -> List.of("dragon_token", "abyssal_scale", "celestial_fragment"),
+            () -> List.of("ender_dragon_normal", "ender_dragon_hard"),
+            () -> List.of("touch_end_portal", "server_first_normal"),
+            () -> List.of("unlock_normal_on_portal", "clear_normal_rewards")
         );
         dispatcher = new CommandDispatcher<>();
         registrar.registerInto(dispatcher);
@@ -279,5 +285,57 @@ class DragonRaidCommandRegistrarTest {
             .getCompletionSuggestions(dispatcher.parse("dr admin points add Steve dra", source))
             .get();
         assertTrue(currencySuggestions.getList().stream().anyMatch(s -> s.getText().equals("dragon_token")));
+
+        Suggestions contentSuggestions = dispatcher
+            .getCompletionSuggestions(dispatcher.parse("dr admin unlock grant Steve ender", source))
+            .get();
+        assertTrue(contentSuggestions.getList().stream().anyMatch(s -> s.getText().equals("ender_dragon_normal")));
+
+        Suggestions achSuggestions = dispatcher
+            .getCompletionSuggestions(dispatcher.parse("dr admin achievement grant Steve touch", source))
+            .get();
+        assertTrue(achSuggestions.getList().stream().anyMatch(s -> s.getText().equals("touch_end_portal")));
+
+        Suggestions rewardSuggestions = dispatcher
+            .getCompletionSuggestions(dispatcher.parse("dr admin reward simulate clear", source))
+            .get();
+        assertTrue(rewardSuggestions.getList().stream().anyMatch(s -> s.getText().equals("clear_normal_rewards")));
+    }
+
+    @Test
+    void adminM2ProgressionAndPackCommandsRouteAndEnforcePermissions() throws Exception {
+        Player admin = playerWithAllPermissions("Admin");
+        CommandSourceStack source = sourceOf(admin);
+
+        dispatcher.execute("dr admin packs", source);
+        dispatcher.execute("dr admin unlock grant Steve ender_dragon_normal", source);
+        dispatcher.execute("dr admin unlock revoke Steve ender_dragon_normal", source);
+        dispatcher.execute("dr admin unlock list Steve", source);
+        dispatcher.execute("dr admin achievement grant Steve touch_end_portal", source);
+        dispatcher.execute("dr admin achievement list Steve", source);
+        dispatcher.execute("dr admin progression status", source);
+        dispatcher.execute("dr admin reward list", source);
+        dispatcher.execute("dr admin reward simulate clear_normal_rewards Steve", source);
+        dispatcher.execute("dr admin reward simulate clear_normal_rewards Steve 42", source);
+        dispatcher.execute("dr admin reward grant clear_normal_rewards Steve", source);
+
+        verify(handler).adminPacks(admin);
+        verify(handler).adminUnlock(admin, UnlockAction.GRANT, "Steve", "ender_dragon_normal");
+        verify(handler).adminUnlock(admin, UnlockAction.REVOKE, "Steve", "ender_dragon_normal");
+        verify(handler).adminUnlock(admin, UnlockAction.LIST, "Steve", null);
+        verify(handler).adminAchievement(admin, AchievementAction.GRANT, "Steve", "touch_end_portal");
+        verify(handler).adminAchievement(admin, AchievementAction.LIST, "Steve", null);
+        verify(handler).adminProgressionStatus(admin);
+        verify(handler).adminReward(admin, RewardAction.LIST, null, null, null);
+        verify(handler).adminReward(admin, RewardAction.SIMULATE, "clear_normal_rewards", "Steve", null);
+        verify(handler).adminReward(admin, RewardAction.SIMULATE, "clear_normal_rewards", "Steve", 42L);
+        verify(handler).adminReward(admin, RewardAction.GRANT, "clear_normal_rewards", "Steve", null);
+
+        Player nonAdmin = playerWithPermissions("Steve", RaidPermissions.USE);
+        assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin packs", sourceOf(nonAdmin)));
+        assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin unlock list Steve", sourceOf(nonAdmin)));
+        assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin achievement list Steve", sourceOf(nonAdmin)));
+        assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin progression status", sourceOf(nonAdmin)));
+        assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin reward list", sourceOf(nonAdmin)));
     }
 }

@@ -3,15 +3,26 @@ package net.sabafly.dragonraid;
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.PacketEventsAPI;
 import net.sabafly.dragonraid.achievement.DefaultRaidAchievementService;
-import net.sabafly.dragonraid.achievement.RaidAchievementService;
+import net.sabafly.dragonraid.api.achievement.AchievementDefinition;
+import net.sabafly.dragonraid.api.achievement.RaidAchievementService;
 import net.sabafly.dragonraid.api.economy.RaidEconomyService;
+import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.finder.ContentFinderService;
 import net.sabafly.dragonraid.api.finder.ContentUnlockService;
 import net.sabafly.dragonraid.api.item.RaidItemService;
 import net.sabafly.dragonraid.api.model.ActorModelService;
+import net.sabafly.dragonraid.api.pack.ContentPackLoader;
 import net.sabafly.dragonraid.api.party.RaidPartyService;
+import net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy;
+import net.sabafly.dragonraid.api.progression.VanillaProgressionService;
+import net.sabafly.dragonraid.api.reward.ContentUnlockNotifier;
+import net.sabafly.dragonraid.api.reward.RaidRewardService;
+import net.sabafly.dragonraid.api.reward.RewardCurrencySink;
+import net.sabafly.dragonraid.api.reward.RewardItemDelivery;
+import net.sabafly.dragonraid.api.reward.RewardTable;
 import net.sabafly.dragonraid.api.script.EncounterBlueprintRegistry;
 import net.sabafly.dragonraid.api.script.GimmickActionRegistry;
+import net.sabafly.dragonraid.api.script.ScriptHookRegistry;
 import net.sabafly.dragonraid.api.service.RaidServiceRegistry;
 import net.sabafly.dragonraid.api.stat.RaidStatService;
 import net.sabafly.dragonraid.boss.DragonBossController;
@@ -37,22 +48,33 @@ import net.sabafly.dragonraid.item.DefaultRaidItemService;
 import net.sabafly.dragonraid.model.DefaultActorModelService;
 import net.sabafly.dragonraid.party.DefaultRaidPartyService;
 import net.sabafly.dragonraid.permission.RaidPermissions;
+import net.sabafly.dragonraid.progression.DefaultVanillaEndProgressionPolicy;
+import net.sabafly.dragonraid.progression.FoliaVanillaProgressionService;
+import net.sabafly.dragonraid.progression.PlayerProgressionJoinListener;
+import net.sabafly.dragonraid.progression.VanillaEndPortalListener;
 import net.sabafly.dragonraid.protection.ArenaProtectionListener;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.DefaultRaidRegionService;
 import net.sabafly.dragonraid.region.RaidRegionService;
 import net.sabafly.dragonraid.reward.DefaultRaidRewardService;
-import net.sabafly.dragonraid.reward.RaidRewardService;
+import net.sabafly.dragonraid.reward.DefaultRewardApplier;
+import net.sabafly.dragonraid.reward.FoliaRewardItemDelivery;
+import net.sabafly.dragonraid.reward.PureRewardTableEvaluator;
+import net.sabafly.dragonraid.reward.RewardDispatchListener;
 import net.sabafly.dragonraid.scheduler.FoliaRaidScheduler;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.script.DefaultEncounterBlueprintRegistry;
 import net.sabafly.dragonraid.script.DefaultGimmickActionRegistry;
+import net.sabafly.dragonraid.script.DefaultScriptHookRegistry;
+import net.sabafly.dragonraid.script.pack.DefaultContentPackLoader;
 import net.sabafly.dragonraid.stat.DefaultRaidStatService;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
+import net.sabafly.dragonraid.storage.PointTransactionResult;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository;
 import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
+import net.sabafly.dragonraid.visual.PacketEventsContentUnlockNotifier;
 import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
 import net.sabafly.dragonraid.visual.PacketEventsTelegraphService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
@@ -86,7 +108,9 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private ActorModelService actorModelService;
     private EncounterBlueprintRegistry blueprintRegistry;
     private GimmickActionRegistry gimmickActionRegistry;
+    private ScriptHookRegistry scriptHookRegistry;
     private DefaultRaidRewardService rewardService;
+    private RewardDispatchListener rewardDispatchListener;
     private DefaultRaidAchievementService achievementService;
     private RaidPartyService partyService;
     private RaidItemService itemService;
@@ -94,6 +118,11 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private ContentFinderService contentFinderService;
     private RaidEconomyService economyService;
     private RaidStatService statService;
+    private VanillaProgressionService vanillaProgressionService;
+    private DefaultVanillaEndProgressionPolicy vanillaEndProgressionPolicy;
+    private ContentUnlockNotifier contentUnlockNotifier;
+    private RewardItemDelivery rewardItemDelivery;
+    private ContentPackLoader contentPackLoader;
 
     @Override
     public void onEnable() {
@@ -144,14 +173,88 @@ public final class DragonRaidPlugin extends JavaPlugin {
             this.actorModelService = new DefaultActorModelService(getLogger());
             this.blueprintRegistry = new DefaultEncounterBlueprintRegistry();
             this.gimmickActionRegistry = new DefaultGimmickActionRegistry();
-            this.rewardService = new DefaultRaidRewardService();
-            this.achievementService = new DefaultRaidAchievementService();
+            this.scriptHookRegistry = new DefaultScriptHookRegistry();
             this.partyService = new DefaultRaidPartyService();
             this.itemService = new DefaultRaidItemService();
-            this.contentUnlockService = new DefaultContentUnlockService();
+            this.contentUnlockService = new DefaultContentUnlockService(playerDataRepository, System::currentTimeMillis, getLogger());
             this.contentFinderService = new DefaultContentFinderService(contentUnlockService, partyService, itemService);
             this.economyService = new DefaultRaidEconomyService();
             this.statService = new DefaultRaidStatService();
+            this.vanillaProgressionService = new FoliaVanillaProgressionService(
+                configManager,
+                raidScheduler,
+                getServer()::getWorld,
+                getLogger()
+            );
+            this.contentUnlockNotifier = new PacketEventsContentUnlockNotifier(
+                messageService,
+                raidScheduler,
+                getServer()::getPlayer,
+                getLogger()
+            );
+            this.rewardItemDelivery = new FoliaRewardItemDelivery(
+                raidScheduler,
+                getServer()::getPlayer,
+                itemService,
+                getLogger()
+            );
+            RewardCurrencySink currencySink = (playerId, playerName, currencyId, amount) -> {
+                if (economyService.getCurrency(currencyId).isPresent()) {
+                    economyService.deposit(playerId, currencyId, amount);
+                }
+                return playerDataRepository.addCurrency(playerId, playerName, currencyId, amount)
+                        .thenApply(PointTransactionResult::success);
+            };
+            this.achievementService = new DefaultRaidAchievementService(
+                playerDataRepository,
+                scriptHookRegistry,
+                serviceRegistry,
+                event -> getServer().getPluginManager().callEvent(event),
+                System::currentTimeMillis,
+                getLogger()
+            );
+            DefaultRewardApplier rewardApplier = new DefaultRewardApplier(
+                contentUnlockService,
+                contentFinderService,
+                contentUnlockNotifier,
+                currencySink,
+                rewardItemDelivery,
+                scriptHookRegistry,
+                playerDataRepository,
+                serviceRegistry,
+                System::currentTimeMillis,
+                getLogger()
+            );
+            this.rewardService = new DefaultRaidRewardService(
+                new PureRewardTableEvaluator(scriptHookRegistry, serviceRegistry),
+                rewardApplier
+            );
+            this.rewardDispatchListener = new RewardDispatchListener(
+                rewardService,
+                contentFinderService,
+                achievementService,
+                contentUnlockService,
+                playerDataRepository,
+                System::currentTimeMillis,
+                getLogger()
+            );
+            this.vanillaEndProgressionPolicy = new DefaultVanillaEndProgressionPolicy(
+                playerDataRepository,
+                contentUnlockService,
+                achievementService,
+                vanillaProgressionService,
+                scriptHookRegistry,
+                serviceRegistry,
+                getLogger()
+            );
+            this.contentPackLoader = new DefaultContentPackLoader(
+                getDataPath().resolve("contents"),
+                contentFinderService,
+                achievementService,
+                rewardService,
+                vanillaEndProgressionPolicy,
+                getLogger()
+            );
 
             this.regionService = new DefaultRaidRegionService(configManager, raidScheduler);
             this.temporaryBlockTracker = new TemporaryBlockTracker();
@@ -183,6 +286,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
             serviceRegistry.register(ActorModelService.class, actorModelService);
             serviceRegistry.register(EncounterBlueprintRegistry.class, blueprintRegistry);
             serviceRegistry.register(GimmickActionRegistry.class, gimmickActionRegistry);
+            serviceRegistry.register(ScriptHookRegistry.class, scriptHookRegistry);
             serviceRegistry.register(RaidRewardService.class, rewardService);
             serviceRegistry.register(RaidAchievementService.class, achievementService);
             serviceRegistry.register(RaidPartyService.class, partyService);
@@ -191,11 +295,43 @@ public final class DragonRaidPlugin extends JavaPlugin {
             serviceRegistry.register(ContentFinderService.class, contentFinderService);
             serviceRegistry.register(RaidEconomyService.class, economyService);
             serviceRegistry.register(RaidStatService.class, statService);
+            serviceRegistry.register(VanillaProgressionService.class, vanillaProgressionService);
+            serviceRegistry.register(VanillaEndProgressionPolicy.class, vanillaEndProgressionPolicy);
+            serviceRegistry.register(ContentUnlockNotifier.class, contentUnlockNotifier);
+            serviceRegistry.register(RewardItemDelivery.class, rewardItemDelivery);
+            serviceRegistry.register(ContentPackLoader.class, contentPackLoader);
             serviceRegistry.register(SpatialTelegraphService.class, telegraphService);
+
+            vanillaEndProgressionPolicy.loadServerMilestones().join();
+            try {
+                contentPackLoader.reload();
+            } catch (RuntimeException ex) {
+                getLogger().log(Level.SEVERE, "Failed to load Content Packs during startup", ex);
+            }
+
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
 
-            getServer().getPluginManager().registerEvents(rewardService, this);
+            VanillaEndPortalListener endPortalListener = new VanillaEndPortalListener(
+                achievementService,
+                vanillaEndProgressionPolicy,
+                instanceManager,
+                messageService,
+                getLogger()
+            );
+            PlayerProgressionJoinListener progressionJoinListener = new PlayerProgressionJoinListener(
+                playerDataRepository,
+                achievementService,
+                contentUnlockService,
+                vanillaEndProgressionPolicy,
+                endPortalListener,
+                getLogger()
+            );
+
+            getServer().getPluginManager().registerEvents(rewardDispatchListener, this);
             getServer().getPluginManager().registerEvents(achievementService, this);
+            getServer().getPluginManager().registerEvents(vanillaEndProgressionPolicy, this);
+            getServer().getPluginManager().registerEvents(endPortalListener, this);
+            getServer().getPluginManager().registerEvents(progressionJoinListener, this);
             getServer().getPluginManager().registerEvents(
                 new ArenaProtectionListener(
                     configManager,
@@ -217,12 +353,22 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 raidScheduler,
                 playerDataRepository,
                 getLogger(),
-                encounterManager
+                name -> java.util.Optional.ofNullable(getServer().getPlayerExact(name)),
+                encounterManager,
+                contentPackLoader,
+                contentUnlockService,
+                achievementService,
+                vanillaEndProgressionPolicy,
+                vanillaProgressionService,
+                rewardService
             );
             new DragonRaidCommandRegistrar(
                 commandHandler,
                 () -> getServer().getOnlinePlayers().stream().map(Player::getName).toList(),
-                () -> configManager.rewardsConfig().currencies().keySet()
+                () -> configManager.rewardsConfig().currencies().keySet(),
+                () -> contentFinderService.allContents().stream().map(ContentEntrySpec::contentId).toList(),
+                () -> achievementService.definitions().stream().map(AchievementDefinition::id).toList(),
+                () -> rewardService.tables().stream().map(RewardTable::id).toList()
             ).register(this);
 
             logPacketEventsStatus();

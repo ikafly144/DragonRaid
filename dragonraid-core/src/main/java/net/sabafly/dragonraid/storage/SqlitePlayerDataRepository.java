@@ -7,16 +7,21 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * SQLite-backed {@link PlayerDataRepository} using HikariCP, WAL mode, parameterized SQL,
@@ -421,9 +426,339 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                         FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
                     )
                     """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_achievements (
+                        uuid TEXT NOT NULL,
+                        achievement_id TEXT NOT NULL,
+                        unlocked_at INTEGER NOT NULL,
+                        PRIMARY KEY (uuid, achievement_id),
+                        FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_content_unlocks (
+                        uuid TEXT NOT NULL,
+                        content_id TEXT NOT NULL,
+                        unlocked_at INTEGER NOT NULL,
+                        PRIMARY KEY (uuid, content_id),
+                        FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_claimed_rewards (
+                        uuid TEXT NOT NULL,
+                        reward_id TEXT NOT NULL,
+                        claimed_at INTEGER NOT NULL,
+                        PRIMARY KEY (uuid, reward_id),
+                        FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_encounter_clears (
+                        uuid TEXT NOT NULL,
+                        encounter_id TEXT NOT NULL,
+                        clear_count INTEGER NOT NULL DEFAULT 0 CHECK (clear_count >= 0),
+                        best_time_ms INTEGER CHECK (best_time_ms IS NULL OR best_time_ms >= 0),
+                        first_cleared_at INTEGER NOT NULL,
+                        last_cleared_at INTEGER NOT NULL,
+                        PRIMARY KEY (uuid, encounter_id),
+                        FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS server_milestones (
+                        milestone_key TEXT PRIMARY KEY,
+                        achieved_at INTEGER NOT NULL,
+                        participants_json TEXT NOT NULL
+                    )
+                    """);
             }
             return null;
         });
+    }
+
+    @Override
+    public CompletableFuture<Set<String>> loadAchievements(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        return supplyAsync(() -> withReadConnection(conn -> queryStringSet(
+                conn,
+                "SELECT achievement_id FROM player_achievements WHERE uuid = ?",
+                uuid
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> grantAchievement(
+            UUID uuid,
+            @Nullable String lastKnownName,
+            String achievementId,
+            long unlockedAtEpochMillis) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(achievementId, "achievementId");
+        String normalizedName = normalizeName(lastKnownName);
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            ensurePlayerExists(conn, uuid, normalizedName);
+            return insertPlayerFlag(
+                    conn,
+                    "INSERT OR IGNORE INTO player_achievements (uuid, achievement_id, unlocked_at) VALUES (?, ?, ?)",
+                    uuid,
+                    normalizedId,
+                    unlockedAtEpochMillis
+            );
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> hasAchievement(UUID uuid, String achievementId) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(achievementId, "achievementId");
+        return supplyAsync(() -> withReadConnection(conn -> existsPlayerFlag(
+                conn,
+                "SELECT 1 FROM player_achievements WHERE uuid = ? AND achievement_id = ?",
+                uuid,
+                normalizedId
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Set<String>> loadUnlockedContents(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        return supplyAsync(() -> withReadConnection(conn -> queryStringSet(
+                conn,
+                "SELECT content_id FROM player_content_unlocks WHERE uuid = ?",
+                uuid
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> grantContentUnlock(
+            UUID uuid,
+            @Nullable String lastKnownName,
+            String contentId,
+            long unlockedAtEpochMillis) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(contentId, "contentId");
+        String normalizedName = normalizeName(lastKnownName);
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            ensurePlayerExists(conn, uuid, normalizedName);
+            return insertPlayerFlag(
+                    conn,
+                    "INSERT OR IGNORE INTO player_content_unlocks (uuid, content_id, unlocked_at) VALUES (?, ?, ?)",
+                    uuid,
+                    normalizedId,
+                    unlockedAtEpochMillis
+            );
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> revokeContentUnlock(UUID uuid, String contentId) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(contentId, "contentId");
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            String sql = "DELETE FROM player_content_unlocks WHERE uuid = ? AND content_id = ?";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, normalizedId);
+                return ps.executeUpdate() > 0;
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> hasContentUnlock(UUID uuid, String contentId) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(contentId, "contentId");
+        return supplyAsync(() -> withReadConnection(conn -> existsPlayerFlag(
+                conn,
+                "SELECT 1 FROM player_content_unlocks WHERE uuid = ? AND content_id = ?",
+                uuid,
+                normalizedId
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> tryClaimReward(
+            UUID uuid,
+            @Nullable String lastKnownName,
+            String rewardId,
+            long claimedAtEpochMillis) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(rewardId, "rewardId");
+        String normalizedName = normalizeName(lastKnownName);
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            ensurePlayerExists(conn, uuid, normalizedName);
+            return insertPlayerFlag(
+                    conn,
+                    "INSERT OR IGNORE INTO player_claimed_rewards (uuid, reward_id, claimed_at) VALUES (?, ?, ?)",
+                    uuid,
+                    normalizedId,
+                    claimedAtEpochMillis
+            );
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> hasClaimedReward(UUID uuid, String rewardId) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedId = requireNonBlankId(rewardId, "rewardId");
+        return supplyAsync(() -> withReadConnection(conn -> existsPlayerFlag(
+                conn,
+                "SELECT 1 FROM player_claimed_rewards WHERE uuid = ? AND reward_id = ?",
+                uuid,
+                normalizedId
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Set<String>> loadClaimedRewards(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        return supplyAsync(() -> withReadConnection(conn -> queryStringSet(
+                conn,
+                "SELECT reward_id FROM player_claimed_rewards WHERE uuid = ?",
+                uuid
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> tryClaimServerFirst(
+            String milestoneKey,
+            Collection<UUID> participantIds,
+            long achievedAtEpochMillis) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        String participantsJson = encodeUuidJsonArray(participantIds);
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            String sql = """
+                INSERT OR IGNORE INTO server_milestones (milestone_key, achieved_at, participants_json)
+                VALUES (?, ?, ?)
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, normalizedKey);
+                ps.setLong(2, achievedAtEpochMillis);
+                ps.setString(3, participantsJson);
+                return ps.executeUpdate() > 0;
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> isServerFirstAchieved(String milestoneKey) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            String sql = "SELECT 1 FROM server_milestones WHERE milestone_key = ?";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, normalizedKey);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Set<String>> loadAllServerMilestones() {
+        return supplyAsync(() -> withReadConnection(conn -> {
+            String sql = "SELECT milestone_key FROM server_milestones";
+            Set<String> milestones = new LinkedHashSet<>();
+            try (PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    milestones.add(rs.getString(1));
+                }
+            }
+            return Collections.unmodifiableSet(milestones);
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> recordEncounterClear(
+            UUID uuid,
+            @Nullable String lastKnownName,
+            String encounterId,
+            long clearTimeMs,
+            long clearedAtEpochMillis) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedEncounterId = requireNonBlankId(encounterId, "encounterId");
+        String normalizedName = normalizeName(lastKnownName);
+        Long sanitizedClearTime = clearTimeMs >= 0L ? clearTimeMs : null;
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            ensurePlayerExists(conn, uuid, normalizedName);
+            boolean exists = existsPlayerFlag(
+                    conn,
+                    "SELECT 1 FROM player_encounter_clears WHERE uuid = ? AND encounter_id = ?",
+                    uuid,
+                    normalizedEncounterId
+            );
+            if (!exists) {
+                String insertSql = """
+                    INSERT INTO player_encounter_clears (
+                        uuid, encounter_id, clear_count, best_time_ms, first_cleared_at, last_cleared_at
+                    ) VALUES (?, ?, 1, ?, ?, ?)
+                    """;
+                try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
+                    ps.setString(1, uuid.toString());
+                    ps.setString(2, normalizedEncounterId);
+                    if (sanitizedClearTime != null) {
+                        ps.setLong(3, sanitizedClearTime);
+                    } else {
+                        ps.setNull(3, Types.INTEGER);
+                    }
+                    ps.setLong(4, clearedAtEpochMillis);
+                    ps.setLong(5, clearedAtEpochMillis);
+                    ps.executeUpdate();
+                }
+                return true;
+            }
+            String updateSql = """
+                UPDATE player_encounter_clears
+                SET clear_count = clear_count + 1,
+                    best_time_ms = CASE
+                        WHEN ? IS NULL THEN best_time_ms
+                        WHEN best_time_ms IS NULL THEN ?
+                        ELSE MIN(best_time_ms, ?)
+                    END,
+                    last_cleared_at = ?
+                WHERE uuid = ? AND encounter_id = ?
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(updateSql)) {
+                if (sanitizedClearTime != null) {
+                    ps.setLong(1, sanitizedClearTime);
+                    ps.setLong(2, sanitizedClearTime);
+                    ps.setLong(3, sanitizedClearTime);
+                } else {
+                    ps.setNull(1, Types.INTEGER);
+                    ps.setNull(2, Types.INTEGER);
+                    ps.setNull(3, Types.INTEGER);
+                }
+                ps.setLong(4, clearedAtEpochMillis);
+                ps.setString(5, uuid.toString());
+                ps.setString(6, normalizedEncounterId);
+                ps.executeUpdate();
+            }
+            return false;
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> hasClearedEncounter(UUID uuid, String encounterId) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        String normalizedEncounterId = requireNonBlankId(encounterId, "encounterId");
+        return supplyAsync(() -> withReadConnection(conn -> existsPlayerFlag(
+                conn,
+                "SELECT 1 FROM player_encounter_clears WHERE uuid = ? AND encounter_id = ?",
+                uuid,
+                normalizedEncounterId
+        )));
+    }
+
+    @Override
+    public CompletableFuture<Set<String>> loadClearedEncounters(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid must not be null");
+        return supplyAsync(() -> withReadConnection(conn -> queryStringSet(
+                conn,
+                "SELECT encounter_id FROM player_encounter_clears WHERE uuid = ?",
+                uuid
+        )));
     }
 
     private CompletableFuture<PlayerRaidStats> incrementCounter(
@@ -610,6 +945,66 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
             throw new IllegalArgumentException("currencyId must not be null or blank");
         }
         return currencyId.trim();
+    }
+
+    private static String requireNonBlankId(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(fieldName + " must not be null or blank");
+        }
+        return value.trim();
+    }
+
+    private Set<String> queryStringSet(Connection conn, String sql, UUID uuid) throws SQLException {
+        Set<String> result = new LinkedHashSet<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(rs.getString(1));
+                }
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    private boolean insertPlayerFlag(Connection conn, String sql, UUID uuid, String flagId, long timestamp)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, flagId);
+            ps.setLong(3, timestamp);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    private boolean existsPlayerFlag(Connection conn, String sql, UUID uuid, String flagId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, flagId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private static String encodeUuidJsonArray(@Nullable Collection<UUID> participantIds) {
+        if (participantIds == null || participantIds.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (UUID id : participantIds) {
+            if (id == null) {
+                continue;
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append('"').append(id).append('"');
+        }
+        sb.append(']');
+        return sb.toString();
     }
 
     private enum CounterColumn {

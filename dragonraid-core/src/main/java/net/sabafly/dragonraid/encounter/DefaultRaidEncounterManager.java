@@ -76,7 +76,6 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
-import org.bukkit.boss.DragonBattle;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.EnderDragon;
 import org.bukkit.entity.Entity;
@@ -145,6 +144,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private final Map<UUID, PlayerSnapshot> snapshots = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastRightClickMillis = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastFeedbackMillis = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> participantPriorClearCache = new ConcurrentHashMap<>();
 
     private volatile @Nullable TaskHandle countdownTask;
     private volatile @Nullable TaskHandle monitorTask;
@@ -740,6 +740,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             activationGen = encounterGeneration.incrementAndGet();
             participants.clear();
+            participantPriorClearCache.clear();
             this.activeDifficulty = difficulty;
             this.activeBossConfig = bossConfig;
             this.activeBlueprint = blueprint;
@@ -760,6 +761,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 participant.setOnline(true);
                 participants.put(memberId, participant);
                 this.combatMetricsTracker.ensureParticipant(memberId, member.getName());
+                if (playerDataRepository != null) {
+                    playerDataRepository.hasClearedEncounter(memberId, blueprint.id())
+                            .thenAccept(cleared -> {
+                                if (encounterGeneration.get() == activationGen) {
+                                    participantPriorClearCache.put(memberId, Boolean.TRUE.equals(cleared));
+                                }
+                            });
+                }
                 scheduler.runAtEntity(member, () -> {
                     if (staleCleanup != null) {
                         staleCleanup.applyTo(member);
@@ -1397,6 +1406,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         World endWorld = dragon.getWorld();
         List<Player> viewers = onlinePlayersInWorld(endWorld);
         soulMarkerService.removeAllMarkers(viewers);
+        boolean firstClear = playerDataRepository != null && !participants.isEmpty() && participants.keySet().stream()
+                .anyMatch(id -> !Boolean.TRUE.equals(participantPriorClearCache.get(id)));
         prepareVictoryCleanup(dragon, endWorld, viewers, difficulty, durationMs);
 
         // On victory, restore participant flags where they stand so they can collect drops/egg.
@@ -1404,7 +1415,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
                 combatMetricsTracker.snapshot();
         restoreAndResetParticipants(null);
-        emitEncounterCompleted(EncounterOutcome.VICTORY, durationMs, partySizeSnapshot, metricsSnapshot);
+        emitEncounterCompleted(EncounterOutcome.VICTORY, durationMs, partySizeSnapshot, metricsSnapshot, firstClear);
 
         for (Player viewer : viewers) {
             scheduler.runAtEntity(viewer, () -> {
@@ -1759,6 +1770,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             long durationMs,
             int partySizeSnapshot,
             Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot) {
+        emitEncounterCompleted(outcome, durationMs, partySizeSnapshot, metricsSnapshot, false);
+    }
+
+    private void emitEncounterCompleted(
+            EncounterOutcome outcome,
+            long durationMs,
+            int partySizeSnapshot,
+            Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot,
+            boolean firstClear) {
         EncounterBlueprint blueprint = this.activeBlueprint;
         BossConfig.Difficulty diff = this.activeDifficulty;
         if (blueprint == null && diff == null) {
@@ -1773,7 +1793,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 encDiff,
                 outcome,
                 durationMs,
-                false,
+                firstClear,
                 partySizeSnapshot,
                 metricsSnapshot
         );
@@ -2485,6 +2505,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             long durationMs) {
         if (playerDataRepository != null) {
             Difficulty storageDifficulty = difficulty == BossConfig.Difficulty.HARD ? Difficulty.HARD : Difficulty.NORMAL;
+            EncounterBlueprint blueprint = this.activeBlueprint;
+            String encounterId = blueprint != null ? blueprint.id()
+                    : (difficulty == BossConfig.Difficulty.HARD ? "dragon_hard" : "dragon_normal");
+            long clearedAt = clockMillis.getAsLong();
             for (RaidParticipant participant : participants.values()) {
                 playerDataRepository.recordClear(
                         participant.playerId(),
@@ -2494,6 +2518,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 ).exceptionally(ex -> {
                     logger.log(Level.WARNING, "Failed to record raid clear for " + participant.name(), ex);
                     return null;
+                });
+                playerDataRepository.recordEncounterClear(
+                        participant.playerId(),
+                        participant.name(),
+                        encounterId,
+                        durationMs,
+                        clearedAt
+                ).exceptionally(ex -> {
+                    logger.log(Level.WARNING, "Failed to record encounter clear for " + participant.name(), ex);
+                    return false;
                 });
             }
         }
@@ -2507,25 +2541,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
         if (bossController != null) {
             bossController.prepareForVanillaDefeat();
-        }
-        if (configManager.pluginConfig().world().preserveVanillaProgression() && dragon.getDragonBattle() == null) {
-            World mainEnd = endWorldSupplier.get();
-            World progressionWorld = mainEnd != null ? mainEnd : endWorld;
-            DragonBattle battle = progressionWorld.getEnderDragonBattle();
-            if (battle != null) {
-                Location portalAnchor = battle.getEndPortalLocation() != null
-                        ? battle.getEndPortalLocation()
-                        : new Location(progressionWorld, 0.0, 64.0, 0.0);
-                scheduler.runAtRegion(portalAnchor, () -> {
-                    if (battle.getEndPortalLocation() == null) {
-                        battle.generateEndPortal(true);
-                    }
-                    battle.spawnNewGateway();
-                    if (!battle.hasBeenPreviouslyKilled()) {
-                        battle.setPreviouslyKilled(true);
-                    }
-                });
-            }
         }
     }
 

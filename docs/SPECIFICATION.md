@@ -80,7 +80,7 @@ flowchart TD
 | `dragonraid-party` | パーティ管理（結成・招待・リーダー委譲・キック）、パーティチャット（`/pc`・チャンネル切替）、PacketEvents 右サイドバー FF14 風パーティリスト HUD |
 | `dragonraid-finder` | FF14 風コンテンツファインダー GUI、ソロ／事前結成パーティ申請（野良オートマッチングなし）、解放条件＆最低平均 `iLvl` チェック、突入確認（レディチェック／「シャキーン！」）→ インスタンス突入 |
 | `dragonraid-achievement` | データドリブン実績・条件トリガーエンジン（`END_PORTAL_TOUCH`、`ENCOUNTER_CLEAR`、`SERVER_FIRST`、`NO_DEATH`、スクリプト条件） |
-| `dragonraid-reward` | イベント駆動リワード付与ディスパッチャ（`content-unlock`・仮想通貨・装備ドロップ・アイテム付与・完了時スクリプト呼び出し） |
+| `dragonraid-reward` | Loot Table 型純粋報酬評価エンジン＆副作用アプライヤ（`RewardTable` / `RewardContext` → `RewardBundle` → `RewardApplier`、クロス・パック `inject-into` 拡張、解放・仮想通貨・アイテム・スクリプト付与） |
 | `dragonraid-economy` | 複数仮想通貨台帳（アラガントームストーン風週獲得上限・所持上限対応・SQLite 永続化）およびデータドリブン交換ショップ GUI 基盤 |
 | `dragonraid-item` | カスタム装備・アイテム基盤（アイテムレベル `iLvl`・装備部位・固有アクティブ/パッシブスキル・カスタムエンチャント/レリック・PDC 識別） |
 | `dragonraid-stat` | プレイヤー＆エネミーのカスタムステータス／属性集計、時限バフ/デバフスタック、与ダメ/被ダメ/回復補正エンジン |
@@ -94,10 +94,10 @@ flowchart TD
 サーバー管理者は `plugins/DragonRaid/contents/<pack-id>/` 配下にコンテンツ一式を配置する。
 
 - `pack.yml`（パック ID・有効/無効フラグ・メタ情報）
-- `contents/`（コンテンツファインダーへ登録するコンテンツ定義：表示名、推奨/最大人数、必要 `min-iLvl`、必要アンロックキー、タイムライン/スクリプト参照、インスタンス設定）
+- `contents/`（コンテンツファインダーへ登録するコンテンツ定義：表示名、推奨/最大人数、必要 `min-iLvl`、必要アンロックキー、クリア時呼び出し報酬テーブル `clear-rewards`、タイムライン/スクリプト参照、インスタンス設定）
 - `enemies/`（データドリブン `RaidEnemyDefinition` 定義）
-- `achievements/`（アチーブメントトリガー定義：例 `END_PORTAL_TOUCH`, `ENCOUNTER_CLEAR`, `SERVER_FIRST`）
-- `rewards/`（アチーブメント達成・クリア時リワード定義：`unlock-content`, 通貨付与, アイテムドロップ, スクリプトフック）
+- `achievements/`（アチーブメントトリガー定義：`END_PORTAL_TOUCH`, `ENCOUNTER_CLEAR`, `SERVER_FIRST` 等、および達成時呼び出し報酬テーブル `rewards`）
+- `rewards/`（Loot Table 型純粋報酬テーブル `reward-tables`［`pools` / `rolls` / `conditions` / `functions` / `TABLE_REF`］および他パック既存テーブルへ pool を差し込むクロス・パック拡張 `extensions`［`inject-into`］）
 - `items/` & `shops/`（カスタム装備/`iLvl`/ステータス、交換ショップ定義）
 - `scripts/`（`.raid.kts` によるカスタムギミック・タイムライン・バニラ進行連携フック）
 
@@ -117,13 +117,14 @@ sequenceDiagram
     P->>VP: エンドポータルブロックに接触
     VP->>VP: ServerFirst達成/対象コンテンツクリアまでバニラエンド侵入を抑制可
     VP->>ACH: END_PORTAL_TOUCH トリガー発火
-    ACH->>REW: AchievementUnlockedEvent
-    REW->>CF: unlock-content 付与 + 開放演出 (Title / Sound)
+    ACH->>REW: 呼び側指定 RewardTable 評価 (evaluate -> apply)
+    REW->>CF: ContentUnlockGrant 付与 + 開放演出 (Title / Sound / Toast)
     P->>CF: CF GUI からソロ or 事前結成PTで申請 (解放 & iLvl 検証)
     CF-->>P: 突入確認ポップ (シャキーン! + レディチェック)
     P->>CF: 全員承諾
     CF->>INST: 専用インスタンスワールド生成 & 一括転送
     INST->>SCR: スクリプトDSLでタイムライン/ギミック/エネミー実行
+    SCR->>REW: 討伐時 clear-rewards テーブル評価・付与 (RewardContext -> RewardBundle -> Apply)
     SCR->>VP: 討伐時バニラ進行フック (DragonBattle討伐同期・エンドゲートウェイ拡張・侵入解禁)
 ```
 

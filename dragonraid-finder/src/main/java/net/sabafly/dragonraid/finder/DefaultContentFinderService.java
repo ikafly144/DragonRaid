@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.finder;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -15,12 +16,13 @@ import net.sabafly.dragonraid.api.party.RaidParty;
 import net.sabafly.dragonraid.api.party.RaidPartyService;
 
 /**
- * Thread-safe M1 scaffold of {@link ContentFinderService} handling duty registration
- * and solo/party eligibility validation.
+ * Thread-safe {@link ContentFinderService} handling duty registration, Content Pack hot-reload,
+ * and solo/pre-formed party eligibility validation.
  */
 public final class DefaultContentFinderService implements ContentFinderService {
 
-    private final Map<String, ContentEntrySpec> entries = new ConcurrentHashMap<>();
+    private final Map<String, ContentEntrySpec> staticEntries = new ConcurrentHashMap<>();
+    private final Map<String, ContentEntrySpec> packEntries = new ConcurrentHashMap<>();
     private final ContentUnlockService unlockService;
     private final RaidPartyService partyService;
     private final RaidItemService itemService;
@@ -41,7 +43,31 @@ public final class DefaultContentFinderService implements ContentFinderService {
     @Override
     public void registerContent(ContentEntrySpec entry) {
         Objects.requireNonNull(entry, "entry");
-        entries.put(entry.contentId(), entry);
+        staticEntries.put(entry.contentId(), entry);
+    }
+
+    @Override
+    public boolean unregisterContent(String contentId) {
+        if (contentId == null || contentId.isBlank()) {
+            return false;
+        }
+        boolean removedStatic = staticEntries.remove(contentId) != null;
+        boolean removedPack = packEntries.remove(contentId) != null;
+        return removedStatic || removedPack;
+    }
+
+    @Override
+    public void replacePackContents(Collection<ContentEntrySpec> entries) {
+        Map<String, ContentEntrySpec> next = new ConcurrentHashMap<>();
+        if (entries != null) {
+            for (ContentEntrySpec entry : entries) {
+                if (entry != null) {
+                    next.put(entry.contentId(), entry);
+                }
+            }
+        }
+        packEntries.clear();
+        packEntries.putAll(next);
     }
 
     @Override
@@ -49,12 +75,18 @@ public final class DefaultContentFinderService implements ContentFinderService {
         if (contentId == null) {
             return Optional.empty();
         }
-        return Optional.ofNullable(entries.get(contentId));
+        ContentEntrySpec fromPack = packEntries.get(contentId);
+        if (fromPack != null) {
+            return Optional.of(fromPack);
+        }
+        return Optional.ofNullable(staticEntries.get(contentId));
     }
 
     @Override
     public Collection<ContentEntrySpec> allContents() {
-        return List.copyOf(entries.values());
+        Map<String, ContentEntrySpec> merged = new LinkedHashMap<>(staticEntries);
+        merged.putAll(packEntries);
+        return List.copyOf(merged.values());
     }
 
     @Override

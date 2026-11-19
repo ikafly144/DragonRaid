@@ -21,4 +21,16 @@ public interface ContentFinderService {
      * @return {@code true} if eligibility gates pass and ready-check / entry started
      */
     boolean requestEntry(UUID initiatorId, String contentId);
+
+    default boolean unregisterContent(String contentId) {
+        return false;
+    }
+
+    default void replacePackContents(Collection<ContentEntrySpec> packEntries) {
+        if (packEntries != null) {
+            for (ContentEntrySpec entry : packEntries) {
+                registerContent(entry);
+            }
+        }
+    }
 }

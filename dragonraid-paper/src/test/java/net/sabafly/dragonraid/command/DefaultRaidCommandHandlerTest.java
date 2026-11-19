@@ -325,7 +325,7 @@ class DefaultRaidCommandHandlerTest {
         handler.showHelp(english);
         List<String> enMsgs = captureMessages(english);
         assertEquals(1, enMsgs.size());
-        assertTrue(enMsgs.get(0).contains("<region|start|reset|points|reload>"));
+        assertTrue(enMsgs.get(0).contains("<region|start|reset|points|reload|packs|unlock|achievement|progression|reward>"));
 
         Player japanese = mock(Player.class);
         when(japanese.locale()).thenReturn(Locale.JAPAN);
@@ -333,6 +333,7 @@ class DefaultRaidCommandHandlerTest {
         List<String> jaMsgs = captureMessages(japanese);
         assertEquals(1, jaMsgs.size());
         assertTrue(jaMsgs.get(0).contains("コマンド一覧"));
+        assertTrue(jaMsgs.get(0).contains("reward"));
     }
 
     @Test
@@ -393,6 +394,128 @@ class DefaultRaidCommandHandlerTest {
         wired.adminSetArenaRadius(admin, 99.0);
         wired.adminSetArenaBounds(admin, -50, 0, -50, 50, 200, 50);
         assertEquals(arenaBefore, configManager.pluginConfig().regions().arena());
+    }
+
+    @Test
+    void m2AdminCommandsManagePacksUnlocksAchievementsProgressionAndReload() {
+        net.sabafly.dragonraid.api.pack.ContentPackLoader packLoader =
+                mock(net.sabafly.dragonraid.api.pack.ContentPackLoader.class);
+        net.sabafly.dragonraid.api.pack.LoadedContentPack loadedPack =
+                new net.sabafly.dragonraid.api.pack.LoadedContentPack(
+                        new net.sabafly.dragonraid.api.pack.ContentPackManifest("test_pack", "Test Pack", "1.0.0", true, 10, ""),
+                        tempDir.resolve("contents/test_pack"),
+                        List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of()
+                );
+        net.sabafly.dragonraid.api.pack.ContentPackLoadReport report =
+                new net.sabafly.dragonraid.api.pack.ContentPackLoadReport(List.of(loadedPack), List.of(), 1, 2, 3, 1, 1);
+        when(packLoader.reload()).thenReturn(report);
+        when(packLoader.lastReport()).thenReturn(report);
+
+        net.sabafly.dragonraid.finder.DefaultContentUnlockService unlockService =
+                new net.sabafly.dragonraid.finder.DefaultContentUnlockService(repository);
+        net.sabafly.dragonraid.achievement.DefaultRaidAchievementService achService =
+                new net.sabafly.dragonraid.achievement.DefaultRaidAchievementService(
+                        repository, null, null, ev -> {}, System::currentTimeMillis, Logger.getLogger("test"));
+        achService.registerDefinition(new net.sabafly.dragonraid.api.achievement.AchievementDefinition(
+                "ach_1", "t", "d", null, false, java.util.Set.of(), List.of()));
+
+        net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy policy =
+                mock(net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy.class);
+        when(policy.rules()).thenReturn(List.of());
+        net.sabafly.dragonraid.api.progression.VanillaProgressionService vanillaService =
+                mock(net.sabafly.dragonraid.api.progression.VanillaProgressionService.class);
+        when(vanillaService.isVanillaDragonPreviouslyKilled(null))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(true));
+        when(vanillaService.getEndGatewayCount(null))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(2));
+
+        UUID steveId = UUID.randomUUID();
+        Player steve = mock(Player.class);
+        when(steve.getUniqueId()).thenReturn(steveId);
+        when(steve.getName()).thenReturn("Steve");
+        onlinePlayers.put("Steve", steve);
+
+        net.sabafly.dragonraid.api.reward.RewardCurrencySink currencySink = (uid, name, curId, amt) ->
+                repository.addCurrency(uid, name, curId, amt).thenApply(res -> res.success());
+        net.sabafly.dragonraid.reward.DefaultRewardApplier applier =
+                new net.sabafly.dragonraid.reward.DefaultRewardApplier(
+                        unlockService, null, null, currencySink, null, null, repository, null,
+                        System::currentTimeMillis, Logger.getLogger("test"));
+        net.sabafly.dragonraid.reward.DefaultRaidRewardService rewardService =
+                new net.sabafly.dragonraid.reward.DefaultRaidRewardService(
+                        new net.sabafly.dragonraid.reward.PureRewardTableEvaluator(), applier);
+        rewardService.registerTable(new net.sabafly.dragonraid.api.reward.RewardTable(
+                "bonus_table",
+                List.of(net.sabafly.dragonraid.api.reward.RewardPool.allOf(
+                        "one_time",
+                        "bonus_claim",
+                        List.of(),
+                        List.of(
+                                net.sabafly.dragonraid.api.reward.RewardEntrySpec.currency(
+                                        "dragon_token",
+                                        net.sabafly.dragonraid.api.reward.RollRange.between(5, 10),
+                                        1,
+                                        List.of(),
+                                        List.of()
+                                )
+                        )
+                ))
+        ));
+
+        DefaultRaidCommandHandler m2Handler = new DefaultRaidCommandHandler(
+                configManager,
+                messageService,
+                scheduler,
+                repository,
+                Logger.getLogger("M2Test"),
+                name -> Optional.ofNullable(onlinePlayers.get(name)),
+                null,
+                packLoader,
+                unlockService,
+                achService,
+                policy,
+                vanillaService,
+                rewardService
+        );
+
+        CommandSender admin = mock(CommandSender.class);
+        m2Handler.adminReload(admin);
+        verify(packLoader).reload();
+
+        m2Handler.adminPacks(admin);
+        m2Handler.adminUnlock(admin, RaidCommandHandler.UnlockAction.GRANT, "Steve", "raid_normal");
+        assertTrue(unlockService.isUnlocked(steveId, "raid_normal"));
+        m2Handler.adminUnlock(admin, RaidCommandHandler.UnlockAction.LIST, "Steve", null);
+        m2Handler.adminUnlock(admin, RaidCommandHandler.UnlockAction.REVOKE, "Steve", "raid_normal");
+        assertTrue(!unlockService.isUnlocked(steveId, "raid_normal"));
+
+        m2Handler.adminAchievement(admin, RaidCommandHandler.AchievementAction.GRANT, "Steve", "ach_1");
+        assertTrue(achService.hasUnlocked(steveId, "ach_1"));
+        m2Handler.adminAchievement(admin, RaidCommandHandler.AchievementAction.LIST, "Steve", null);
+
+        m2Handler.adminProgressionStatus(admin);
+
+        // Reward list + pure side-effect-free simulate + claim-guarded grant
+        m2Handler.adminReward(admin, RaidCommandHandler.RewardAction.LIST, null, null, null);
+        m2Handler.adminReward(admin, RaidCommandHandler.RewardAction.SIMULATE, "bonus_table", "Steve", 42L);
+        m2Handler.adminReward(admin, RaidCommandHandler.RewardAction.SIMULATE, "bonus_table", "Steve", 42L);
+        assertEquals(0L, repository.getCurrencyBalance(steveId, "dragon_token").join());
+
+        m2Handler.adminReward(admin, RaidCommandHandler.RewardAction.GRANT, "bonus_table", "Steve", null);
+        long grantedBalance = repository.getCurrencyBalance(steveId, "dragon_token").join();
+        assertTrue(grantedBalance >= 5L && grantedBalance <= 10L);
+
+        // Second grant skips claimed pool without mutating balance further
+        m2Handler.adminReward(admin, RaidCommandHandler.RewardAction.GRANT, "bonus_table", "Steve", null);
+        assertEquals(grantedBalance, repository.getCurrencyBalance(steveId, "dragon_token").join());
+
+        List<String> msgs = captureMessages(admin);
+        assertTrue(msgs.stream().anyMatch(m -> m.contains("test_pack")));
+        assertTrue(msgs.stream().anyMatch(m -> m.contains("raid_normal")));
+        assertTrue(msgs.stream().anyMatch(m -> m.contains("ach_1")));
+        assertTrue(msgs.stream().anyMatch(m -> m.contains("bonus_table")));
+        assertTrue(msgs.stream().anyMatch(m -> m.contains("Simulate")));
+        assertTrue(msgs.stream().anyMatch(m -> m.contains("VanillaKilled:true") || m.contains("バニラ撃破済:true")));
     }
 
     private static List<String> captureMessages(CommandSender sender) {
