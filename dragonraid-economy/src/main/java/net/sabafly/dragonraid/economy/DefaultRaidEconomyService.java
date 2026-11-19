@@ -6,12 +6,15 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import net.sabafly.dragonraid.api.economy.CurrencyDefinition;
+import net.sabafly.dragonraid.api.economy.CurrencyLedgerStore;
 import net.sabafly.dragonraid.api.economy.RaidEconomyService;
 
 /**
- * Thread-safe in-memory M1 implementation of {@link RaidEconomyService} enforcing balance and weekly caps.
+ * Thread-safe {@link RaidEconomyService} enforcing balance and weekly caps, optionally
+ * backed by a persistent {@link CurrencyLedgerStore} so economy ledger and SQLite share one truth.
  */
 public final class DefaultRaidEconomyService implements RaidEconomyService {
 
@@ -19,6 +22,15 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
     private final Map<String, CurrencyDefinition> currencies = new ConcurrentHashMap<>();
     private final Map<LedgerKey, Long> balances = new ConcurrentHashMap<>();
     private final Map<LedgerKey, Long> weeklyEarned = new ConcurrentHashMap<>();
+    private final CurrencyLedgerStore ledgerStore;
+
+    public DefaultRaidEconomyService() {
+        this(null);
+    }
+
+    public DefaultRaidEconomyService(CurrencyLedgerStore ledgerStore) {
+        this.ledgerStore = ledgerStore;
+    }
 
     @Override
     public void registerCurrency(CurrencyDefinition definition) {
@@ -46,6 +58,9 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
         if (playerId == null || currencyId == null) {
             return 0L;
         }
+        if (ledgerStore != null) {
+            return ledgerStore.balance(playerId, currencyId);
+        }
         return balances.getOrDefault(new LedgerKey(playerId, currencyId), 0L);
     }
 
@@ -55,6 +70,13 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
         Objects.requireNonNull(currencyId, "currencyId");
         if (amount <= 0L) {
             return false;
+        }
+        if (ledgerStore != null) {
+            CurrencyDefinition definition = currencies.get(currencyId);
+            if (definition == null) {
+                return false;
+            }
+            return ledgerStore.depositWithCaps(playerId, null, definition, amount);
         }
         LedgerKey key = new LedgerKey(playerId, currencyId);
         synchronized (lock) {
@@ -83,11 +105,38 @@ public final class DefaultRaidEconomyService implements RaidEconomyService {
     }
 
     @Override
+    public CompletableFuture<Boolean> depositAsync(
+            UUID playerId,
+            String playerName,
+            String currencyId,
+            long amount) {
+        Objects.requireNonNull(playerId, "playerId");
+        Objects.requireNonNull(currencyId, "currencyId");
+        if (amount <= 0L) {
+            return CompletableFuture.completedFuture(false);
+        }
+        if (ledgerStore != null) {
+            CurrencyDefinition definition = currencies.get(currencyId);
+            if (definition == null) {
+                return CompletableFuture.completedFuture(false);
+            }
+            return ledgerStore.depositWithCapsAsync(playerId, playerName, definition, amount);
+        }
+        return CompletableFuture.completedFuture(deposit(playerId, currencyId, amount));
+    }
+
+    @Override
     public boolean withdraw(UUID playerId, String currencyId, long amount) {
         Objects.requireNonNull(playerId, "playerId");
         Objects.requireNonNull(currencyId, "currencyId");
         if (amount <= 0L) {
             return false;
+        }
+        if (ledgerStore != null) {
+            if (!currencies.containsKey(currencyId)) {
+                return false;
+            }
+            return ledgerStore.withdraw(playerId, currencyId, amount);
         }
         LedgerKey key = new LedgerKey(playerId, currencyId);
         synchronized (lock) {

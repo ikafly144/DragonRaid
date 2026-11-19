@@ -7,12 +7,17 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
+import net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot;
 import org.jetbrains.annotations.Nullable;
 
 /**
  * Data-driven achievement trigger evaluation and tracking SPI.
  */
 public interface RaidAchievementService {
+
+    default void bindCatalogSnapshotSupplier(@Nullable Supplier<ContentPackCatalogSnapshot> supplier) {
+    }
 
     void registerDefinition(AchievementDefinition definition);
 

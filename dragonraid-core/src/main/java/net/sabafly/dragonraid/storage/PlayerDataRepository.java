@@ -105,6 +105,22 @@ public interface PlayerDataRepository extends PlayerProgressionRepository, AutoC
     );
 
     /**
+     * Atomically checks {@code maxBalance} and {@code weeklyCap} (when {@code > 0}) and adds
+     * {@code amount} to the player's SQLite currency balance within a single transaction.
+     */
+    default CompletableFuture<PointTransactionResult> addCurrencyWithCaps(
+        UUID uuid,
+        String lastKnownName,
+        String currencyId,
+        long amount,
+        long maxBalance,
+        long weeklyCap,
+        String weekKey
+    ) {
+        return addCurrency(uuid, lastKnownName, currencyId, amount);
+    }
+
+    /**
      * Atomically deducts from a named currency balance if sufficient funds exist.
      */
     CompletableFuture<PointTransactionResult> trySpendCurrency(UUID uuid, String currencyId, long amount);

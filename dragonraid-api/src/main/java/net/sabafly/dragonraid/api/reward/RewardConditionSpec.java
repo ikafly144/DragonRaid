@@ -1,10 +1,9 @@
 package net.sabafly.dragonraid.api.reward;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import net.sabafly.dragonraid.api.script.EncounterDifficulty;
+import net.sabafly.dragonraid.api.util.ImmutableSnapshots;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -159,15 +158,6 @@ public record RewardConditionSpec(
     }
 
     private static Map<String, Object> immutableCopy(@Nullable Map<String, Object> source) {
-        if (source == null || source.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> copy = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : source.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                copy.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return Collections.unmodifiableMap(copy);
+        return ImmutableSnapshots.copyStringMap(source);
     }
 }

@@ -1,8 +1,6 @@
 package net.sabafly.dragonraid.api.script;
 
 import java.util.Collection;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -10,6 +8,7 @@ import java.util.Optional;
 import java.util.UUID;
 import net.sabafly.dragonraid.api.event.EncounterResultSnapshot;
 import net.sabafly.dragonraid.api.service.RaidServiceRegistry;
+import net.sabafly.dragonraid.api.util.ImmutableSnapshots;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -28,8 +27,8 @@ public record ScriptHookContext(
 
     public ScriptHookContext {
         participantIds = participantIds == null ? List.of() : List.copyOf(participantIds);
-        params = immutableCopy(params);
-        attributes = immutableCopy(attributes);
+        params = ImmutableSnapshots.copyStringMap(params);
+        attributes = ImmutableSnapshots.copyStringMap(attributes);
     }
 
     public ScriptHookContext(
@@ -63,19 +62,6 @@ public record ScriptHookContext(
             return Optional.empty();
         }
         return Optional.ofNullable(attributes.get(key));
-    }
-
-    private static Map<String, Object> immutableCopy(@Nullable Map<String, Object> source) {
-        if (source == null || source.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> copy = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : source.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                copy.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return Collections.unmodifiableMap(copy);
     }
 
     public static ScriptHookContext empty() {

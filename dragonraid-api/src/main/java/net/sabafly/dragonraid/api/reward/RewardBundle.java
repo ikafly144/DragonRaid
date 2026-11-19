@@ -24,7 +24,15 @@ public record RewardBundle(
         rootTableId = rootTableId == null ? "" : rootTableId.trim();
         Objects.requireNonNull(playerId, "playerId");
         grants = grants == null ? List.of() : List.copyOf(grants);
-        claimKeys = claimKeys == null ? extractClaimKeys(grants) : Set.copyOf(claimKeys);
+        Set<String> mergedClaims = new LinkedHashSet<>(extractClaimKeys(grants));
+        if (claimKeys != null) {
+            for (String key : claimKeys) {
+                if (key != null && !key.isBlank()) {
+                    mergedClaims.add(key.trim());
+                }
+            }
+        }
+        claimKeys = Set.copyOf(mergedClaims);
     }
 
     public RewardBundle(String rootTableId, UUID playerId, List<RewardGrant> grants) {

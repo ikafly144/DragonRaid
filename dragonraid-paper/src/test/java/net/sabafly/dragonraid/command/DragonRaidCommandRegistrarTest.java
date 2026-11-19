@@ -338,4 +338,66 @@ class DragonRaidCommandRegistrarTest {
         assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin progression status", sourceOf(nonAdmin)));
         assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("dr admin reward list", sourceOf(nonAdmin)));
     }
+
+    @Test
+    void namespacedColonIds_escapeInSuggestions_andParseWhenQuotedWithoutBreakingPlainOrOmittedArgs()
+            throws Exception {
+        RaidCommandHandler colonHandler = mock(RaidCommandHandler.class);
+        DragonRaidCommandRegistrar colonRegistrar = new DragonRaidCommandRegistrar(
+                colonHandler,
+                () -> List.of("Steve", "Alex"),
+                () -> List.of("dragon_token", "pack:coin"),
+                () -> List.of("ender_dragon_normal", "pack:raid_1"),
+                () -> List.of("touch_end_portal", "pack:ach_1"),
+                () -> List.of("clear_normal_rewards", "pack:clear_1"));
+        CommandDispatcher<CommandSourceStack> colonDispatcher = new CommandDispatcher<>();
+        colonRegistrar.registerInto(colonDispatcher);
+
+        Player admin = playerWithAllPermissions("Admin");
+        CommandSourceStack source = sourceOf(admin);
+
+        // Suggestions escape colon IDs in quotes while leaving plain IDs unquoted
+        List<String> coinTexts = colonDispatcher
+                .getCompletionSuggestions(colonDispatcher.parse("dr admin points add Steve ", source))
+                .get().getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(coinTexts.contains("\"pack:coin\""));
+        assertTrue(coinTexts.contains("dragon_token"));
+
+        List<String> filteredCoinTexts = colonDispatcher
+                .getCompletionSuggestions(colonDispatcher.parse("dr admin points add Steve \"pack", source))
+                .get().getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(filteredCoinTexts.contains("\"pack:coin\""));
+
+        List<String> contentTexts = colonDispatcher
+                .getCompletionSuggestions(colonDispatcher.parse("dr admin unlock grant Steve ", source))
+                .get().getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(contentTexts.contains("\"pack:raid_1\""));
+        assertTrue(contentTexts.contains("ender_dragon_normal"));
+
+        List<String> achTexts = colonDispatcher
+                .getCompletionSuggestions(colonDispatcher.parse("dr admin achievement grant Steve ", source))
+                .get().getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(achTexts.contains("\"pack:ach_1\""));
+
+        List<String> rewardTexts = colonDispatcher
+                .getCompletionSuggestions(colonDispatcher.parse("dr admin reward simulate ", source))
+                .get().getList().stream().map(com.mojang.brigadier.suggestion.Suggestion::getText).toList();
+        assertTrue(rewardTexts.contains("\"pack:clear_1\""));
+        assertTrue(rewardTexts.contains("clear_normal_rewards"));
+
+        // Execution unquotes colon IDs cleanly and keeps omitted-currency points overload working
+        colonDispatcher.execute("dr admin points add Steve 10", source);
+        colonDispatcher.execute("dr admin points add Steve \"pack:coin\" 25", source);
+        colonDispatcher.execute("dr admin unlock grant Steve \"pack:raid_1\"", source);
+        colonDispatcher.execute("dr admin achievement grant Steve \"pack:ach_1\"", source);
+        colonDispatcher.execute("dr admin reward simulate \"pack:clear_1\" Steve 7", source);
+        colonDispatcher.execute("dr admin reward grant \"pack:clear_1\" Steve", source);
+
+        verify(colonHandler).adminPoints(admin, PointsAction.ADD, "Steve", null, 10);
+        verify(colonHandler).adminPoints(admin, PointsAction.ADD, "Steve", "pack:coin", 25);
+        verify(colonHandler).adminUnlock(admin, UnlockAction.GRANT, "Steve", "pack:raid_1");
+        verify(colonHandler).adminAchievement(admin, AchievementAction.GRANT, "Steve", "pack:ach_1");
+        verify(colonHandler).adminReward(admin, RewardAction.SIMULATE, "pack:clear_1", "Steve", 7L);
+        verify(colonHandler).adminReward(admin, RewardAction.GRANT, "pack:clear_1", "Steve", null);
+    }
 }

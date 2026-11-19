@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.api.progression;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -52,6 +53,35 @@ public interface PlayerProgressionRepository {
             Collection<UUID> participantIds,
             long achievedAtEpochMillis
     );
+
+    /**
+     * Atomically claims {@code milestoneKey} along with pending per-participant work items, or
+     * returns any remaining uncompleted participants in {@code participantIds} when resuming after
+     * a partial failure.
+     */
+    default CompletableFuture<Set<UUID>> claimOrResumeServerFirstRecipients(
+            String milestoneKey,
+            Collection<UUID> participantIds,
+            long achievedAtEpochMillis) {
+        return tryClaimServerFirst(milestoneKey, participantIds, achievedAtEpochMillis)
+                .thenApply(claimed -> Boolean.TRUE.equals(claimed) && participantIds != null
+                        ? Set.copyOf(participantIds)
+                        : Set.of());
+    }
+
+    /**
+     * Marks a participant's server-first work item complete for {@code milestoneKey}.
+     */
+    default CompletableFuture<Void> completeServerFirstRecipient(String milestoneKey, UUID participantId) {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Returns the persisted participant UUIDs recorded when {@code milestoneKey} was originally claimed.
+     */
+    default CompletableFuture<List<UUID>> loadServerMilestoneParticipants(String milestoneKey) {
+        return CompletableFuture.completedFuture(List.of());
+    }
 
     CompletableFuture<Boolean> isServerFirstAchieved(String milestoneKey);
 

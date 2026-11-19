@@ -2,10 +2,12 @@ package net.sabafly.dragonraid.finder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -129,5 +131,54 @@ class DefaultContentFinderServiceTest {
         assertTrue(finder.getContent("static_trial").isPresent());
         assertTrue(finder.getContent("pack_v1").isEmpty());
         assertTrue(finder.getContent("pack_v2").isPresent());
+    }
+
+    @Test
+    void doesNotCacheFailedUnlockAndSerializesLoadAgainstRevoke() {
+        PlayerProgressionRepository repo = mock(PlayerProgressionRepository.class);
+        UUID alice = UUID.randomUUID();
+        when(repo.grantContentUnlock(eq(alice), eq("Alice"), eq("raid_hard"), anyLong()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("disk full")))
+                .thenReturn(CompletableFuture.completedFuture(true));
+
+        DefaultContentUnlockService service = new DefaultContentUnlockService(repo);
+        // #26: failed DB persistence leaves cache unpopulated so retry succeeds
+        assertThrows(Exception.class, () -> service.unlockAsync(alice, "Alice", "raid_hard").join());
+        assertFalse(service.isUnlocked(alice, "raid_hard"));
+        assertTrue(service.unlockAsync(alice, "Alice", "raid_hard").join());
+        assertTrue(service.isUnlocked(alice, "raid_hard"));
+        verify(repo, times(2)).grantContentUnlock(eq(alice), eq("Alice"), eq("raid_hard"), anyLong());
+
+        // #27: loadPlayer overlaps revoke -> revoke executes sequentially AFTER loadPlayer finishes
+        CompletableFuture<Set<String>> slowLoad = new CompletableFuture<>();
+        when(repo.loadUnlockedContents(alice)).thenReturn(slowLoad);
+        when(repo.revokeContentUnlock(alice, "raid_hard")).thenReturn(CompletableFuture.completedFuture(true));
+
+        CompletableFuture<Set<String>> loadFuture = service.loadPlayer(alice);
+        CompletableFuture<Boolean> revokeFuture = service.revokeAsync(alice, "raid_hard");
+        slowLoad.complete(Set.of("raid_hard"));
+
+        loadFuture.join();
+        assertTrue(revokeFuture.join());
+        assertFalse(service.isUnlocked(alice, "raid_hard"));
+    }
+
+    @Test
+    void hotReloadingPackContentsNeverExposesStaticFallbackWindow() {
+        DefaultContentUnlockService unlock = new DefaultContentUnlockService();
+        DefaultContentFinderService finder = new DefaultContentFinderService(unlock);
+        finder.registerContent(new ContentEntrySpec("raid", "t", "bp", "", 1, 8, 0));
+        finder.replacePackContents(List.of(
+                new ContentEntrySpec("raid", "t", "bp", "unlock_req", 1, 8, 0)
+        ));
+        UUID player = UUID.randomUUID();
+        assertFalse(finder.requestEntry(player, "raid"));
+
+        // Repeated reloads with the same ID atomically swap without an ungated gap
+        finder.replacePackContents(List.of(
+                new ContentEntrySpec("raid", "t2", "bp", "unlock_req", 1, 8, 0)
+        ));
+        assertFalse(finder.requestEntry(player, "raid"));
+        assertEquals("t2", finder.getContent("raid").orElseThrow().displayNameKey());
     }
 }

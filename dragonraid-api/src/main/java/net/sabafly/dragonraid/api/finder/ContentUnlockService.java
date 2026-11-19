@@ -24,6 +24,14 @@ public interface ContentUnlockService {
         return false;
     }
 
+    default CompletableFuture<Boolean> unlockAsync(UUID playerId, @Nullable String playerName, String contentId) {
+        return CompletableFuture.completedFuture(unlock(playerId, playerName, contentId));
+    }
+
+    default CompletableFuture<Boolean> revokeAsync(UUID playerId, String contentId) {
+        return CompletableFuture.completedFuture(revoke(playerId, contentId));
+    }
+
     default CompletableFuture<Set<String>> loadPlayer(UUID playerId) {
         return CompletableFuture.completedFuture(unlockedContents(playerId));
     }

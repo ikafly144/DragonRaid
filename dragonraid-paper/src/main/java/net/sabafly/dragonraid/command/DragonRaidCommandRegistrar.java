@@ -351,8 +351,8 @@ public final class DragonRaidCommandRegistrar {
                         handler.adminPoints(ctx.getSource().getSender(), action, target, null, amount);
                         return Command.SINGLE_SUCCESS;
                     }))
-                .then(Commands.argument("currency", StringArgumentType.word())
-                    .suggests((ctx, builder) -> suggestMatching(currencySupplier.get(), builder))
+                .then(Commands.argument("currency", StringArgumentType.string())
+                    .suggests((ctx, builder) -> suggestMatchingEscaped(currencySupplier.get(), builder))
                     .then(Commands.argument("amount", IntegerArgumentType.integer(minAmount))
                         .executes(ctx -> {
                             String target = StringArgumentType.getString(ctx, "player");
@@ -400,8 +400,8 @@ public final class DragonRaidCommandRegistrar {
         return Commands.literal(action.cliName())
             .then(Commands.argument("player", StringArgumentType.word())
                 .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
-                .then(Commands.argument("contentId", StringArgumentType.word())
-                    .suggests((ctx, builder) -> suggestMatching(contentIdSupplier.get(), builder))
+                .then(Commands.argument("contentId", StringArgumentType.string())
+                    .suggests((ctx, builder) -> suggestMatchingEscaped(contentIdSupplier.get(), builder))
                     .executes(ctx -> {
                         String target = StringArgumentType.getString(ctx, "player");
                         String contentId = StringArgumentType.getString(ctx, "contentId");
@@ -416,8 +416,8 @@ public final class DragonRaidCommandRegistrar {
             .then(Commands.literal(AchievementAction.GRANT.cliName())
                 .then(Commands.argument("player", StringArgumentType.word())
                     .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
-                    .then(Commands.argument("achievementId", StringArgumentType.word())
-                        .suggests((ctx, builder) -> suggestMatching(achievementIdSupplier.get(), builder))
+                    .then(Commands.argument("achievementId", StringArgumentType.string())
+                        .suggests((ctx, builder) -> suggestMatchingEscaped(achievementIdSupplier.get(), builder))
                         .executes(ctx -> {
                             String target = StringArgumentType.getString(ctx, "player");
                             String achievementId = StringArgumentType.getString(ctx, "achievementId");
@@ -486,8 +486,8 @@ public final class DragonRaidCommandRegistrar {
                 }));
         }
         return Commands.literal(action.cliName())
-            .then(Commands.argument("tableId", StringArgumentType.word())
-                .suggests((ctx, builder) -> suggestMatching(rewardTableIdSupplier.get(), builder))
+            .then(Commands.argument("tableId", StringArgumentType.string())
+                .suggests((ctx, builder) -> suggestMatchingEscaped(rewardTableIdSupplier.get(), builder))
                 .then(playerNode));
     }
 
@@ -513,6 +513,26 @@ public final class DragonRaidCommandRegistrar {
         for (String candidate : candidates) {
             if (candidate.toLowerCase(Locale.ROOT).startsWith(remaining)) {
                 builder.suggest(candidate);
+            }
+        }
+        return builder.buildFuture();
+    }
+
+    private static CompletableFuture<Suggestions> suggestMatchingEscaped(
+        Collection<String> candidates,
+        SuggestionsBuilder builder
+    ) {
+        String rawRemaining = builder.getRemaining();
+        String remainingLower = rawRemaining.toLowerCase(Locale.ROOT);
+        String unquotedLower = (!rawRemaining.isEmpty()
+                && (rawRemaining.charAt(0) == '"' || rawRemaining.charAt(0) == '\''))
+                ? remainingLower.substring(1)
+                : remainingLower;
+        for (String candidate : candidates) {
+            String escaped = StringArgumentType.escapeIfRequired(candidate);
+            if (candidate.toLowerCase(Locale.ROOT).startsWith(unquotedLower)
+                    || escaped.toLowerCase(Locale.ROOT).startsWith(remainingLower)) {
+                builder.suggest(escaped);
             }
         }
         return builder.buildFuture();

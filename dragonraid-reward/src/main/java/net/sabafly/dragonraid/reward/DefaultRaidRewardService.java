@@ -1,10 +1,14 @@
 package net.sabafly.dragonraid.reward;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -25,6 +29,8 @@ import net.sabafly.dragonraid.api.reward.RewardApplyResult;
 import net.sabafly.dragonraid.api.reward.RewardBundle;
 import net.sabafly.dragonraid.api.reward.RewardContext;
 import net.sabafly.dragonraid.api.reward.RewardCurrencySink;
+import net.sabafly.dragonraid.api.reward.RewardEntrySpec;
+import net.sabafly.dragonraid.api.reward.RewardEntryType;
 import net.sabafly.dragonraid.api.reward.RewardItemDelivery;
 import net.sabafly.dragonraid.api.reward.RewardPool;
 import net.sabafly.dragonraid.api.reward.RewardTable;
@@ -89,38 +95,52 @@ public final class DefaultRaidRewardService implements RaidRewardService {
     @Override
     public synchronized void registerTable(RewardTable table) {
         Objects.requireNonNull(table, "table");
+        Map<String, RewardTable> candidateStatic = new LinkedHashMap<>(staticTables);
+        candidateStatic.put(table.id(), table);
+        Map<String, RewardTable> nextEffective = mergeAndValidate(
+                candidateStatic, packTables, staticExtensions, packExtensions);
         staticTables.put(table.id(), table);
-        rebuildEffectiveTables();
+        this.effectiveTables = nextEffective;
     }
 
     @Override
     public synchronized void registerExtension(RewardTableExtension extension) {
         Objects.requireNonNull(extension, "extension");
+        Map<String, RewardTableExtension> candidateExt = new LinkedHashMap<>(staticExtensions);
+        candidateExt.put(extension.id(), extension);
+        Map<String, RewardTable> nextEffective = mergeAndValidate(
+                staticTables, packTables, candidateExt, packExtensions);
         staticExtensions.put(extension.id(), extension);
-        rebuildEffectiveTables();
+        this.effectiveTables = nextEffective;
     }
 
     @Override
     public synchronized void replacePackTables(
             Collection<RewardTable> tables,
             Collection<RewardTableExtension> extensions) {
-        packTables.clear();
+        Map<String, RewardTable> candidatePackTables = new LinkedHashMap<>();
         if (tables != null) {
             for (RewardTable table : tables) {
                 if (table != null) {
-                    packTables.put(table.id(), table);
+                    candidatePackTables.put(table.id(), table);
                 }
             }
         }
-        packExtensions.clear();
+        Map<String, RewardTableExtension> candidatePackExtensions = new LinkedHashMap<>();
         if (extensions != null) {
             for (RewardTableExtension extension : extensions) {
                 if (extension != null) {
-                    packExtensions.put(extension.id(), extension);
+                    candidatePackExtensions.put(extension.id(), extension);
                 }
             }
         }
-        rebuildEffectiveTables();
+        Map<String, RewardTable> nextEffective = mergeAndValidate(
+                staticTables, candidatePackTables, staticExtensions, candidatePackExtensions);
+        packTables.clear();
+        packTables.putAll(candidatePackTables);
+        packExtensions.clear();
+        packExtensions.putAll(candidatePackExtensions);
+        this.effectiveTables = nextEffective;
     }
 
     @Override
@@ -149,15 +169,48 @@ public final class DefaultRaidRewardService implements RaidRewardService {
     }
 
     @Override
+    public Collection<RewardTable> staticTables() {
+        return List.copyOf(staticTables.values());
+    }
+
+    @Override
+    public Collection<RewardTableExtension> staticExtensions() {
+        return List.copyOf(staticExtensions.values());
+    }
+
+    @Override
+    public Map<String, RewardTable> effectiveTablesSnapshot() {
+        return this.effectiveTables;
+    }
+
+    @Override
     public RewardBundle evaluate(String tableId, RewardContext context, RandomGenerator random) {
-        Map<String, RewardTable> snapshot = effectiveTables;
-        return evaluator.evaluate(id -> Optional.ofNullable(snapshot.get(id)), tableId, context, random);
+        return evaluate(effectiveTables, tableId, context, random);
+    }
+
+    @Override
+    public RewardBundle evaluate(
+            Map<String, RewardTable> tableSnapshot,
+            String tableId,
+            RewardContext context,
+            RandomGenerator random) {
+        Objects.requireNonNull(tableSnapshot, "tableSnapshot");
+        return evaluator.evaluate(id -> Optional.ofNullable(tableSnapshot.get(id)), tableId, context, random);
     }
 
     @Override
     public RewardBundle evaluateAll(Collection<String> tableIds, RewardContext context, RandomGenerator random) {
-        Map<String, RewardTable> snapshot = effectiveTables;
-        return evaluator.evaluateAll(id -> Optional.ofNullable(snapshot.get(id)), tableIds, context, random);
+        return evaluateAll(effectiveTables, tableIds, context, random);
+    }
+
+    @Override
+    public RewardBundle evaluateAll(
+            Map<String, RewardTable> tableSnapshot,
+            Collection<String> tableIds,
+            RewardContext context,
+            RandomGenerator random) {
+        Objects.requireNonNull(tableSnapshot, "tableSnapshot");
+        return evaluator.evaluateAll(id -> Optional.ofNullable(tableSnapshot.get(id)), tableIds, context, random);
     }
 
     @Override
@@ -179,16 +232,29 @@ public final class DefaultRaidRewardService implements RaidRewardService {
             Collection<String> tableIds,
             RewardContext context,
             RandomGenerator random) {
-        RewardBundle bundle = evaluateAll(tableIds, context, random);
+        return evaluateAndApplyAll(effectiveTables, tableIds, context, random);
+    }
+
+    @Override
+    public CompletableFuture<RewardApplyResult> evaluateAndApplyAll(
+            Map<String, RewardTable> tableSnapshot,
+            Collection<String> tableIds,
+            RewardContext context,
+            RandomGenerator random) {
+        RewardBundle bundle = evaluateAll(tableSnapshot, tableIds, context, random);
         return apply(bundle, context);
     }
 
-    private void rebuildEffectiveTables() {
-        Map<String, RewardTable> base = new LinkedHashMap<>(staticTables);
-        base.putAll(packTables);
+    private static Map<String, RewardTable> mergeAndValidate(
+            Map<String, RewardTable> statics,
+            Map<String, RewardTable> packs,
+            Map<String, RewardTableExtension> staticExts,
+            Map<String, RewardTableExtension> packExts) {
+        Map<String, RewardTable> base = new LinkedHashMap<>(statics);
+        base.putAll(packs);
 
-        Map<String, RewardTableExtension> mergedExtensions = new LinkedHashMap<>(staticExtensions);
-        mergedExtensions.putAll(packExtensions);
+        Map<String, RewardTableExtension> mergedExtensions = new LinkedHashMap<>(staticExts);
+        mergedExtensions.putAll(packExts);
 
         List<RewardTableExtension> sortedExtensions = mergedExtensions.values().stream()
                 .sorted(Comparator.comparingInt(RewardTableExtension::priority)
@@ -213,6 +279,51 @@ public final class DefaultRaidRewardService implements RaidRewardService {
             List<RewardPool> pools = poolsByTable.get(entry.getKey());
             rebuilt.put(entry.getKey(), new RewardTable(orig.id(), orig.packId(), pools));
         }
-        this.effectiveTables = Collections.unmodifiableMap(rebuilt);
+
+        validateNoTableCycles(rebuilt);
+        return Collections.unmodifiableMap(rebuilt);
+    }
+
+    private static void validateNoTableCycles(Map<String, RewardTable> effective) {
+        Map<String, Set<String>> edges = new LinkedHashMap<>();
+        for (RewardTable table : effective.values()) {
+            Set<String> targets = new LinkedHashSet<>();
+            for (RewardPool pool : table.pools()) {
+                for (RewardEntrySpec entry : pool.entries()) {
+                    if (entry.type() == RewardEntryType.TABLE_REF) {
+                        targets.add(entry.target());
+                    }
+                }
+            }
+            edges.put(table.id(), targets);
+        }
+        Map<String, Integer> visitState = new HashMap<>();
+        Deque<String> stack = new ArrayDeque<>();
+        for (String tableId : edges.keySet()) {
+            if (visitState.getOrDefault(tableId, 0) == 0) {
+                dfsDetectCycle(tableId, edges, visitState, stack);
+            }
+        }
+    }
+
+    private static void dfsDetectCycle(
+            String current,
+            Map<String, Set<String>> edges,
+            Map<String, Integer> visitState,
+            Deque<String> stack) {
+        visitState.put(current, 1);
+        stack.addLast(current);
+        for (String next : edges.getOrDefault(current, Set.of())) {
+            int state = visitState.getOrDefault(next, 0);
+            if (state == 1) {
+                throw new IllegalStateException(
+                        "Circular reward table reference detected: " + String.join(" -> ", stack) + " -> " + next);
+            }
+            if (state == 0 && edges.containsKey(next)) {
+                dfsDetectCycle(next, edges, visitState, stack);
+            }
+        }
+        stack.removeLast();
+        visitState.put(current, 2);
     }
 }

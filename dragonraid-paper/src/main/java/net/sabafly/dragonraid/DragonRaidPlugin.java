@@ -11,6 +11,7 @@ import net.sabafly.dragonraid.api.finder.ContentFinderService;
 import net.sabafly.dragonraid.api.finder.ContentUnlockService;
 import net.sabafly.dragonraid.api.item.RaidItemService;
 import net.sabafly.dragonraid.api.model.ActorModelService;
+import net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot;
 import net.sabafly.dragonraid.api.pack.ContentPackLoader;
 import net.sabafly.dragonraid.api.party.RaidPartyService;
 import net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy;
@@ -71,6 +72,7 @@ import net.sabafly.dragonraid.stat.DefaultRaidStatService;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.PointTransactionResult;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository;
+import net.sabafly.dragonraid.storage.SqliteCurrencyLedgerStore;
 import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
@@ -178,7 +180,9 @@ public final class DragonRaidPlugin extends JavaPlugin {
             this.itemService = new DefaultRaidItemService();
             this.contentUnlockService = new DefaultContentUnlockService(playerDataRepository, System::currentTimeMillis, getLogger());
             this.contentFinderService = new DefaultContentFinderService(contentUnlockService, partyService, itemService);
-            this.economyService = new DefaultRaidEconomyService();
+            this.economyService = new DefaultRaidEconomyService(
+                    new SqliteCurrencyLedgerStore(playerDataRepository, System::currentTimeMillis)
+            );
             this.statService = new DefaultRaidStatService();
             this.vanillaProgressionService = new FoliaVanillaProgressionService(
                 configManager,
@@ -200,7 +204,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
             );
             RewardCurrencySink currencySink = (playerId, playerName, currencyId, amount) -> {
                 if (economyService.getCurrency(currencyId).isPresent()) {
-                    economyService.deposit(playerId, currencyId, amount);
+                    return economyService.depositAsync(playerId, playerName, currencyId, amount);
                 }
                 return playerDataRepository.addCurrency(playerId, playerName, currencyId, amount)
                         .thenApply(PointTransactionResult::success);
@@ -212,6 +216,9 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 event -> getServer().getPluginManager().callEvent(event),
                 System::currentTimeMillis,
                 getLogger()
+            );
+            this.achievementService.setCatalogSnapshotSupplier(
+                () -> this.contentPackLoader != null ? this.contentPackLoader.catalogSnapshot() : ContentPackCatalogSnapshot.empty()
             );
             DefaultRewardApplier rewardApplier = new DefaultRewardApplier(
                 contentUnlockService,
@@ -236,7 +243,8 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 contentUnlockService,
                 playerDataRepository,
                 System::currentTimeMillis,
-                getLogger()
+                getLogger(),
+                () -> this.contentPackLoader != null ? this.contentPackLoader.catalogSnapshot() : ContentPackCatalogSnapshot.empty()
             );
             this.vanillaEndProgressionPolicy = new DefaultVanillaEndProgressionPolicy(
                 playerDataRepository,
@@ -280,6 +288,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 instanceManager,
                 getLogger()
             );
+            this.encounterManager.setVanillaEndProgressionPolicy(vanillaEndProgressionPolicy);
 
             serviceRegistry.register(RaidScheduler.class, raidScheduler);
             serviceRegistry.register(RaidInstanceManager.class, instanceManager);
@@ -306,7 +315,8 @@ public final class DragonRaidPlugin extends JavaPlugin {
             try {
                 contentPackLoader.reload();
             } catch (RuntimeException ex) {
-                getLogger().log(Level.SEVERE, "Failed to load Content Packs during startup", ex);
+                vanillaEndProgressionPolicy.markPackLoadFailed(ex.getMessage());
+                getLogger().log(Level.SEVERE, "Failed to load Content Packs during startup; vanilla End entry fails closed until reload succeeds", ex);
             }
 
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
@@ -403,6 +413,13 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 sqliteDatabase.close();
             } catch (Exception ex) {
                 getLogger().log(Level.WARNING, "Failed to close SQLite database during shutdown", ex);
+            }
+        }
+        if (vanillaProgressionService instanceof FoliaVanillaProgressionService foliaVanillaProgression) {
+            try {
+                foliaVanillaProgression.cancelPendingTasks();
+            } catch (RuntimeException ex) {
+                getLogger().log(Level.WARNING, "Failed to cancel pending vanilla progression tasks during shutdown", ex);
             }
         }
         if (raidScheduler != null) {

@@ -483,4 +483,106 @@ class SqlitePlayerDataRepositoryTest {
             assertTrue(reopened.loadAllServerMilestones().join().contains("encounter:ender_dragon_normal"));
         }
     }
+
+    @Test
+    void addCurrencyWithCaps_enforcesMaxBalanceAndWeeklyCapAtomically() {
+        SqlitePlayerDataRepository repo = openRepository("currency_caps.db");
+        UUID alice = UUID.randomUUID();
+
+        PointTransactionResult first = repo.addCurrencyWithCaps(alice, "Alice", "coin", 60L, 100L, 80L, "2026-W47").join();
+        assertTrue(first.success());
+        assertEquals(60L, first.newBalance());
+
+        // Exceeding weekly cap rejects without modifying balance
+        PointTransactionResult overWeekly = repo.addCurrencyWithCaps(alice, "Alice", "coin", 30L, 100L, 80L, "2026-W47").join();
+        assertFalse(overWeekly.success());
+        assertEquals(FailureReason.BALANCE_OVERFLOW, overWeekly.failureReason());
+        assertEquals(60L, repo.getCurrencyBalance(alice, "coin").join());
+
+        // Reaching exact weekly cap succeeds
+        PointTransactionResult exactWeekly = repo.addCurrencyWithCaps(alice, "Alice", "coin", 20L, 100L, 80L, "2026-W47").join();
+        assertTrue(exactWeekly.success());
+        assertEquals(80L, exactWeekly.newBalance());
+
+        // New week resets weekly quota, but maxBalance=100 still blocks +30 (80+30 > 100)
+        PointTransactionResult overMax = repo.addCurrencyWithCaps(alice, "Alice", "coin", 30L, 100L, 80L, "2026-W48").join();
+        assertFalse(overMax.success());
+        assertEquals(FailureReason.BALANCE_OVERFLOW, overMax.failureReason());
+        assertEquals(80L, repo.getCurrencyBalance(alice, "coin").join());
+
+        PointTransactionResult exactMax = repo.addCurrencyWithCaps(alice, "Alice", "coin", 20L, 100L, 80L, "2026-W48").join();
+        assertTrue(exactMax.success());
+        assertEquals(100L, exactMax.newBalance());
+    }
+
+    @Test
+    void legacyClearMigration_populatesClearsOnceAndSkipsOnSubsequentOpens() throws Exception {
+        Path dbFile = tempDir.resolve("legacy_migration.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // Construct a pre-M2 SQLite database with normal_clears/hard_clears populated
+        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate("""
+                    CREATE TABLE player_stats (
+                        uuid TEXT PRIMARY KEY,
+                        last_known_name TEXT,
+                        virtual_points INTEGER NOT NULL DEFAULT 0,
+                        total_earned_points INTEGER NOT NULL DEFAULT 0,
+                        normal_clears INTEGER NOT NULL DEFAULT 0,
+                        hard_clears INTEGER NOT NULL DEFAULT 0,
+                        best_normal_time_ms INTEGER,
+                        best_hard_time_ms INTEGER,
+                        total_deaths INTEGER NOT NULL DEFAULT 0,
+                        total_revives INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                    )
+                    """);
+            stmt.executeUpdate("INSERT INTO player_stats (uuid, last_known_name, normal_clears, hard_clears) VALUES ('"
+                    + alice + "', 'Alice', 2, 1)");
+            stmt.executeUpdate("INSERT INTO player_stats (uuid, last_known_name, normal_clears, hard_clears) VALUES ('"
+                    + bob + "', 'Bob', 1, 0)");
+        }
+
+        try (SqlitePlayerDataRepository repo = new SqlitePlayerDataRepository(dbFile, 2, Runnable::run)) {
+            assertEquals(java.util.Set.of("dragon_normal", "dragon_hard"), repo.loadClearedEncounters(alice).join());
+            assertEquals(java.util.Set.of("dragon_normal"), repo.loadClearedEncounters(bob).join());
+        }
+
+        // Remove migrated clear rows directly; reopening must NOT re-run m2_migrate_legacy_encounter_clears_v1
+        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate("DELETE FROM player_encounter_clears WHERE uuid = '" + bob + "'");
+        }
+
+        try (SqlitePlayerDataRepository reopened = new SqlitePlayerDataRepository(dbFile, 2, Runnable::run)) {
+            assertTrue(reopened.loadClearedEncounters(bob).join().isEmpty());
+            assertEquals(java.util.Set.of("dragon_normal", "dragon_hard"), reopened.loadClearedEncounters(alice).join());
+        }
+    }
+
+    @Test
+    void serverFirstPendingRecipients_resumesIncompleteAndPreventsDuplicates() {
+        SqlitePlayerDataRepository repo = openRepository("sf_pending.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+        UUID charlie = UUID.randomUUID();
+
+        java.util.Set<UUID> initial = repo.claimOrResumeServerFirstRecipients(
+                "ach:server_first_normal", List.of(alice, bob), 1000L).join();
+        assertEquals(java.util.Set.of(alice, bob), initial);
+        assertEquals(List.of(alice, bob), repo.loadServerMilestoneParticipants("ach:server_first_normal").join());
+
+        // Mark Alice completed; Bob remains pending
+        repo.completeServerFirstRecipient("ach:server_first_normal", alice).join();
+        java.util.Set<UUID> resumed = repo.claimOrResumeServerFirstRecipients(
+                "ach:server_first_normal", List.of(alice, bob), 2000L).join();
+        assertEquals(java.util.Set.of(bob), resumed);
+
+        // Mark Bob completed; subsequent claims (or unrelated party) yield nothing
+        repo.completeServerFirstRecipient("ach:server_first_normal", bob).join();
+        assertTrue(repo.claimOrResumeServerFirstRecipients(
+                "ach:server_first_normal", List.of(alice, bob, charlie), 3000L).join().isEmpty());
+    }
 }

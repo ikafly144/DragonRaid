@@ -255,4 +255,5 @@ progression:
   end-locked-unlock-required: "<prefix><red>You must unlock '<target>' before entering the vanilla End.</red>"
   end-locked-achievement-required: "<prefix><red>You must earn achievement '<target>' before entering the vanilla End.</red>"
   end-locked-clear-required: "<prefix><red>You must clear '<target>' before entering the vanilla End.</red>"
+  end-locked-pack-error: "<prefix><red>The vanilla End is temporarily sealed because Content Packs failed to load. Please contact an administrator.</red>"
   end-locked-generic: "<prefix><red>Direct entry into the vanilla End is currently restricted.</red>"

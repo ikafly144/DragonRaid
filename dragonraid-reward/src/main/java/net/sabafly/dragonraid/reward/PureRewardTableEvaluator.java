@@ -27,6 +27,7 @@ import net.sabafly.dragonraid.api.reward.VanillaItemGrant;
 import net.sabafly.dragonraid.api.script.ScriptHookContext;
 import net.sabafly.dragonraid.api.script.ScriptHookRegistry;
 import net.sabafly.dragonraid.api.service.RaidServiceRegistry;
+import net.sabafly.dragonraid.api.service.ReadOnlyRaidServiceRegistry;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -120,8 +121,18 @@ public final class PureRewardTableEvaluator {
                     continue;
                 }
                 int baseRolls = pool.rolls().roll(random);
-                int luckBonus = (int) Math.floor(pool.bonusRollsPerLuck() * context.luck());
-                int totalRolls = Math.max(0, baseRolls + luckBonus);
+                double bonusRolls = Math.floor(pool.bonusRollsPerLuck() * context.luck());
+                double rawTotalRolls = baseRolls + bonusRolls;
+                if (!Double.isFinite(rawTotalRolls)) {
+                    throw new IllegalArgumentException(
+                            "Effective roll count must be finite for pool " + pool.id());
+                }
+                if (rawTotalRolls > RewardPool.MAX_EFFECTIVE_ROLLS) {
+                    throw new IllegalArgumentException(
+                            "Effective roll count (" + rawTotalRolls + ") exceeds maximum "
+                                    + RewardPool.MAX_EFFECTIVE_ROLLS + " for pool " + pool.id());
+                }
+                int totalRolls = rawTotalRolls <= 0.0 ? 0 : (int) rawTotalRolls;
 
                 for (int rollIndex = 0; rollIndex < totalRolls; rollIndex++) {
                     List<RewardEntrySpec> eligible = filterEligibleEntries(pool.entries(), context, random);
@@ -384,7 +395,7 @@ public final class PureRewardTableEvaluator {
                         ? List.copyOf(context.encounterSnapshot().participantMetrics().keySet())
                         : List.of(context.playerId());
                 ScriptHookContext hookCtx = new ScriptHookContext(
-                        serviceRegistry,
+                        ReadOnlyRaidServiceRegistry.wrap(serviceRegistry),
                         context.playerId(),
                         context.playerName(),
                         participantIds,

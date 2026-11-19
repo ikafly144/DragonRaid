@@ -130,6 +130,10 @@ sequenceDiagram
 
 - **バニラエンド進行 SPI（`VanillaEndProgressionPolicy` / `VanillaProgressionService`）**:
   - サーバー側スクリプト／コンテンツパック定義から、「誰かが Server First で指定レイドをクリアするまでバニラエンド到達不可」「Normal 討伐時にバニラエンド本島の `DragonBattle` を撃破済み状態に同期し、既存のエンドゲートウェイ／帰還ポータル解放やゲートウェイ拡張を実行する」といった制御をプラグイン本体改修なしに記述できる。
+  - パックの初回ロードに失敗した場合、正常な再読み込みが完了するまでバニラエンド進入ゲートは **fail-closed（進入拒否）** 状態を維持する（正常ロードの結果ルールが空である場合とは明確に区別する）。
+  - `clear-hooks` の `server-first-only` 実行履歴は配列位置ではなく安定したフック `id`（未指定時は決定論的ダイジェスト）をキーとしてサブステップ単位で永続化され、部分失敗からの再開や順序変更に耐える。既存データベースから移行した旧位置キーについても同一位置の既完了フックを安定キーへ互換移行する。
+  - **遭遇別初回クリア履歴（`player_encounter_clears`）**: SQLite 初期化マイグレーション `m2_migrate_legacy_encounter_clears_v1` により、既存の `player_stats`（`normal_clears > 0` / `hard_clears > 0`）をそれぞれ `dragon_normal` / `dragon_hard` として `player_encounter_clears` へ 1 回限り冪等移行する。新規に追加したコンテンツパック固有の遭遇 ID に対する `FIRST_CLEAR` 判定は、M2 導入（`player_encounter_clears` 有効化）以降の討伐から個別に記録される。
+  - **名前空間付き ID とコマンド補完**: コンテンツ／実績／報酬テーブル／通貨の各 ID には `:` を含む名前空間形式を許容し、コマンド上では Brigadier 引用符文字列引数と自動エスケープタブ補完（`StringArgumentType.escapeIfRequired`）で選択・実行できる。
 
 ---
 

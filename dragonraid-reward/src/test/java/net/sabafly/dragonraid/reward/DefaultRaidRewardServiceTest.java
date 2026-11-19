@@ -11,6 +11,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,6 +42,7 @@ import net.sabafly.dragonraid.api.reward.RewardContext;
 import net.sabafly.dragonraid.api.reward.RewardCurrencySink;
 import net.sabafly.dragonraid.api.reward.RewardEntrySpec;
 import net.sabafly.dragonraid.api.reward.RewardFunctionSpec;
+import net.sabafly.dragonraid.api.reward.RewardGrant;
 import net.sabafly.dragonraid.api.reward.RewardItemDelivery;
 import net.sabafly.dragonraid.api.reward.RewardMetricType;
 import net.sabafly.dragonraid.api.reward.RewardPool;
@@ -48,8 +51,11 @@ import net.sabafly.dragonraid.api.reward.RewardRoundingMode;
 import net.sabafly.dragonraid.api.reward.RewardTable;
 import net.sabafly.dragonraid.api.reward.RewardTableExtension;
 import net.sabafly.dragonraid.api.reward.RollRange;
+import net.sabafly.dragonraid.api.reward.ScriptHookGrant;
+import net.sabafly.dragonraid.api.reward.VanillaItemGrant;
 import net.sabafly.dragonraid.api.script.EncounterDifficulty;
 import net.sabafly.dragonraid.api.script.ScriptHookRegistry;
+import net.sabafly.dragonraid.api.service.RaidServiceRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -253,25 +259,35 @@ class DefaultRaidRewardServiceTest {
         assertEquals(2L, bundle.totalCurrencies().get("coin_b"));
         assertEquals(Set.of("one_time_sf"), bundle.claimKeys());
 
-        // If claimKey already in context.claimedKeys(), core pool is purely skipped while extension pools still fire
+        // #42: Keep all non-claimKey inputs identical so the core pool skip isolates claimedKeys
         RewardContext alreadyClaimedCtx = RewardContext.builder(alice)
                 .difficulty(EncounterDifficulty.HARD)
+                .firstClear(false)
                 .serverFirst(true)
+                .partySize(3)
+                .durationMillis(60_000L)
+                .participantMetrics(metrics)
+                .unlockedAchievements(Set.of("ach_1"))
+                .unlockedContents(Set.of("content_1"))
                 .claimedKeys(Set.of("one_time_sf"))
+                .attributes(Map.of("phase_perfect", "true", "combo", 6))
                 .build();
         RewardBundle skippedBundle = service.evaluate("main_loot", alreadyClaimedCtx, new Random(7L));
         assertFalse(skippedBundle.totalCurrencies().containsKey("dragon_token"));
         assertEquals(1L, skippedBundle.totalCurrencies().get("coin_a"));
 
-        // Cycle detection in evaluator
+        // Cycle detection in service registration and direct evaluator (#3)
         RewardTable cycA = new RewardTable("cyc_a", List.of(
                 RewardPool.allOf("p1", null, List.of(), List.of(RewardEntrySpec.tableRef("cyc_b", 1, 0.0, List.of(), List.of())))
         ));
         RewardTable cycB = new RewardTable("cyc_b", List.of(
                 RewardPool.allOf("p2", null, List.of(), List.of(RewardEntrySpec.tableRef("cyc_a", 1, 0.0, List.of(), List.of())))
         ));
-        service.replacePackTables(List.of(cycA, cycB), List.of());
-        assertThrows(IllegalStateException.class, () -> service.evaluate("cyc_a", ctx, new Random(1L)));
+        assertThrows(IllegalStateException.class, () -> service.replacePackTables(List.of(cycA, cycB), List.of()));
+        assertTrue(service.getTable("main_loot").isPresent());
+        assertThrows(IllegalStateException.class, () -> new PureRewardTableEvaluator()
+                .evaluate(id -> Optional.ofNullable(Map.of("cyc_a", cycA, "cyc_b", cycB).get(id)),
+                        "cyc_a", ctx, new Random(1L)));
     }
 
     @Test
@@ -286,14 +302,21 @@ class DefaultRaidRewardServiceTest {
 
         UUID alice = UUID.randomUUID();
         Set<String> dbClaimed = ConcurrentHashMap.newKeySet();
+        when(repo.loadClaimedRewards(alice))
+                .thenAnswer(inv -> CompletableFuture.completedFuture(Set.copyOf(dbClaimed)));
         when(repo.tryClaimReward(eq(alice), eq("Alice"), any(), any(Long.class))).thenAnswer(inv -> {
             String key = inv.getArgument(2);
             return CompletableFuture.completedFuture(dbClaimed.add(key));
         });
         when(finderService.getContent("dragon_normal"))
                 .thenReturn(Optional.of(new ContentEntrySpec("dragon_normal", "content.dragon_normal", "bp", "dragon_normal", 1, 8, 0)));
-        when(unlockService.unlock(alice, "Alice", "dragon_normal")).thenReturn(true, false);
+        when(unlockService.unlockAsync(alice, "Alice", "dragon_normal"))
+                .thenReturn(CompletableFuture.completedFuture(true), CompletableFuture.completedFuture(false));
         when(currencySink.grantCurrency(eq(alice), eq("Alice"), eq("dragon_token"), any(Long.class)))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        when(itemDelivery.deliverVanillaItem(alice, "DIAMOND", 3))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        when(itemDelivery.deliverCustomItem(alice, "dragonscale_shield", 1))
                 .thenReturn(CompletableFuture.completedFuture(true));
         AtomicInteger hooks = new AtomicInteger();
         when(scriptHooks.executeAction(eq("bonus_hook"), any())).thenAnswer(inv -> {
@@ -358,5 +381,145 @@ class DefaultRaidRewardServiceTest {
         verify(itemDelivery, times(2)).deliverVanillaItem(alice, "DIAMOND", 3);
         verify(itemDelivery, times(1)).deliverCustomItem(alice, "dragonscale_shield", 1);
         assertEquals(2, hooks.get());
+    }
+
+    @Test
+    void bundleMergesExplicitAndGrantClaimKeysAndSnapshotsDeepFreezeNestedCollections() {
+        UUID alice = UUID.randomUUID();
+        RewardBundle bundle = new RewardBundle(
+                "tbl",
+                alice,
+                List.of(new CustomItemGrant("pack:sword", 1, "k_grant")),
+                Set.of("k_extra")
+        );
+        assertEquals(Set.of("k_grant", "k_extra"), bundle.claimKeys());
+
+        RewardBundle withEmptyExplicit = new RewardBundle(
+                "tbl",
+                alice,
+                List.of(new CustomItemGrant("pack:sword", 1, "k_only")),
+                Set.of()
+        );
+        assertEquals(Set.of("k_only"), withEmptyExplicit.claimKeys());
+
+        // #29 & #30: deep snapshot prevents post-construction mutation of nested maps/lists
+        List<String> mutableFlags = new ArrayList<>(List.of("alpha"));
+        Map<String, Object> mutableNestedMap = new HashMap<>();
+        mutableNestedMap.put("list", mutableFlags);
+        RewardContext ctx = RewardContext.builder(alice)
+                .attributes(Map.of("nested", mutableNestedMap))
+                .build();
+        mutableFlags.add("mutated");
+        mutableNestedMap.put("injected", 99);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> frozenNested = (Map<String, Object>) ctx.attributes().get("nested");
+        assertEquals(List.of("alpha"), frozenNested.get("list"));
+        assertFalse(frozenNested.containsKey("injected"));
+        assertThrows(UnsupportedOperationException.class, () -> frozenNested.put("x", "y"));
+
+        List<String> hookTags = new ArrayList<>(List.of("v1"));
+        ScriptHookGrant hookGrant = new ScriptHookGrant("h1", Map.of("tags", hookTags), null);
+        hookTags.add("v2");
+        assertEquals(List.of("v1"), hookGrant.params().get("tags"));
+    }
+
+    @Test
+    void rejectsPlayerMismatchCountsOnlySuccessfulGrantsResumesPartialClaimsAndProtectsSimulation() {
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        ContentUnlockService unlockService = mock(ContentUnlockService.class);
+        RewardCurrencySink currencySink = mock(RewardCurrencySink.class);
+        RewardItemDelivery itemDelivery = mock(RewardItemDelivery.class);
+        ScriptHookRegistry scriptHooks = mock(ScriptHookRegistry.class);
+        PlayerProgressionRepository repo = mock(PlayerProgressionRepository.class);
+        RaidServiceRegistry mutableRegistry = mock(RaidServiceRegistry.class);
+        when(mutableRegistry.get(ContentUnlockService.class)).thenReturn(Optional.of(unlockService));
+
+        Set<String> dbClaimed = ConcurrentHashMap.newKeySet();
+        when(repo.loadClaimedRewards(alice))
+                .thenAnswer(inv -> CompletableFuture.completedFuture(Set.copyOf(dbClaimed)));
+        when(repo.tryClaimReward(eq(alice), eq("Alice"), any(), any(Long.class))).thenAnswer(inv -> {
+            String key = inv.getArgument(2);
+            return CompletableFuture.completedFuture(dbClaimed.add(key));
+        });
+
+        // #21: Mismatched bundle vs context playerId rejected before side effects
+        RewardBundle aliceBundle = new RewardBundle("tbl", alice, List.of(new CurrencyGrant("dragon_token", 10, "k")));
+        RewardContext bobCtx = RewardContext.builder(bob).playerName("Bob").build();
+        DefaultRewardApplier applier = new DefaultRewardApplier(
+                unlockService, null, null, currencySink, itemDelivery, scriptHooks,
+                repo, mutableRegistry, () -> 100L, Logger.getLogger("test"));
+        assertThrows(Exception.class, () -> applier.apply(aliceBundle, bobCtx).join());
+        verify(repo, times(0)).tryClaimReward(any(), any(), any(), any(Long.class));
+
+        // #19, #20, #24, #38, #22: combo one-shot where currency succeeds while item/script fail -> only failed retryable
+        when(currencySink.grantCurrency(alice, "Alice", "dragon_token", 25L))
+                .thenReturn(CompletableFuture.completedFuture(true))
+                .thenReturn(CompletableFuture.completedFuture(false));
+        when(itemDelivery.deliverVanillaItem(alice, "DIAMOND", 2))
+                .thenReturn(CompletableFuture.completedFuture(false))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        when(scriptHooks.executeAction(eq("missing_action"), any()))
+                .thenReturn(false)
+                .thenReturn(true);
+
+        RewardBundle partialBundle = new RewardBundle("combo", alice, List.of(
+                new CurrencyGrant("dragon_token", 25L, "one_shot_combo"),
+                new VanillaItemGrant("DIAMOND", 2, "one_shot_combo"),
+                new ScriptHookGrant("missing_action", Map.of(), "one_shot_combo")
+        ));
+        RewardContext aliceCtx = RewardContext.builder(alice).playerName("Alice").build();
+
+        RewardApplyResult attempt1 = applier.apply(partialBundle, aliceCtx).join();
+        assertEquals(1, attempt1.appliedGrants().size());
+        assertEquals(2, attempt1.failedGrants().size());
+        assertTrue(attempt1.newlyClaimedKeys().isEmpty());
+        assertFalse(dbClaimed.contains("one_shot_combo"));
+
+        // Retry: currency was already sub-claimed -> NOT invoked again; diamond & script succeed and finalize claim
+        RewardApplyResult attempt2 = applier.apply(partialBundle, aliceCtx).join();
+        assertEquals(2, attempt2.appliedGrants().size());
+        assertTrue(attempt2.failedGrants().isEmpty());
+        assertEquals(Set.of("one_shot_combo"), attempt2.newlyClaimedKeys());
+        verify(currencySink, times(1)).grantCurrency(alice, "Alice", "dragon_token", 25L);
+        verify(itemDelivery, times(2)).deliverVanillaItem(alice, "DIAMOND", 2);
+        verify(scriptHooks, times(2)).executeAction(eq("missing_action"), any());
+
+        // Attempt 3: parent claimKey now skipped completely
+        RewardApplyResult attempt3 = applier.apply(partialBundle, aliceCtx).join();
+        assertTrue(attempt3.appliedGrants().isEmpty());
+        assertEquals(Set.of("one_shot_combo"), attempt3.skippedClaimKeys());
+
+        // #23: CUSTOM_SCRIPT condition during pure evaluation receives ReadOnlyRaidServiceRegistry
+        when(scriptHooks.evaluateCondition(eq("check_ro"), any())).thenAnswer(inv -> {
+            net.sabafly.dragonraid.api.script.ScriptHookContext hookCtx = inv.getArgument(1);
+            ContentUnlockService roUnlock = hookCtx.services().get(ContentUnlockService.class).orElseThrow();
+            assertThrows(UnsupportedOperationException.class, () -> roUnlock.unlock(alice, "hacked"));
+            return true;
+        });
+        PureRewardTableEvaluator evaluator = new PureRewardTableEvaluator(scriptHooks, mutableRegistry);
+        RewardTable roTable = new RewardTable("ro_tbl", List.of(
+                RewardPool.allOf("p", null,
+                        List.of(RewardConditionSpec.customScript("check_ro", Map.of())),
+                        List.of(RewardEntrySpec.currency("dragon_token", RollRange.exact(1), 1, List.of(), List.of())))
+        ));
+        assertEquals(1L, evaluator.evaluate(id -> Optional.of(roTable), "ro_tbl", aliceCtx, new Random(1L))
+                .totalCurrencies().get("dragon_token"));
+
+        // #39: Roll overflow rejected; negative luck modifier safely clamps to 0
+        RewardTable overflowTable = new RewardTable("overflow_tbl", List.of(
+                new RewardPool("p", RewardPoolMode.ALL, RollRange.exact(1), Integer.MAX_VALUE, null,
+                        List.of(), List.of(RewardEntrySpec.currency("gold", RollRange.exact(1), 1, List.of(), List.of())), List.of())
+        ));
+        RewardContext luckyCtx = RewardContext.builder(alice).luck(1.0).build();
+        assertThrows(IllegalArgumentException.class, () -> evaluator
+                .evaluate(id -> Optional.of(overflowTable), "overflow_tbl", luckyCtx, new Random(1L)));
+
+        RewardTable negativeLuckTable = new RewardTable("neg_tbl", List.of(
+                new RewardPool("p", RewardPoolMode.ALL, RollRange.exact(1), -5.0, null,
+                        List.of(), List.of(RewardEntrySpec.currency("gold", RollRange.exact(1), 1, List.of(), List.of())), List.of())
+        ));
+        assertTrue(evaluator.evaluate(id -> Optional.of(negativeLuckTable), "neg_tbl", luckyCtx, new Random(1L)).isEmpty());
     }
 }

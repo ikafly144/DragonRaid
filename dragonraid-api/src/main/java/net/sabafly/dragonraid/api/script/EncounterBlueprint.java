@@ -46,7 +46,10 @@ public record EncounterBlueprint(
         Map<String, Map<String, Object>> frozenParams = new LinkedHashMap<>();
         if (mechanicParams != null) {
             for (Map.Entry<String, Map<String, Object>> entry : mechanicParams.entrySet()) {
-                frozenParams.put(entry.getKey(), entry.getValue() == null ? Map.of() : Map.copyOf(entry.getValue()));
+                frozenParams.put(
+                        entry.getKey(),
+                        net.sabafly.dragonraid.api.util.ImmutableSnapshots.copyStringMap(entry.getValue())
+                );
             }
         }
         mechanicParams = Collections.unmodifiableMap(frozenParams);

@@ -364,6 +364,145 @@ class ContentPackLoaderTest {
         verify(rewardService, org.mockito.Mockito.times(1)).replacePackTables(any(), any());
     }
 
+    @Test
+    void reload_rejectsCircularTableRefWithStaticTable_updatesCatalogSnapshotMonotonically_andTracksPackLoadStatus(
+            @TempDir Path localRoot) throws Exception {
+        net.sabafly.dragonraid.api.finder.ContentFinderService localFinder =
+                mock(net.sabafly.dragonraid.api.finder.ContentFinderService.class);
+        net.sabafly.dragonraid.api.achievement.RaidAchievementService localAch =
+                mock(net.sabafly.dragonraid.api.achievement.RaidAchievementService.class);
+        net.sabafly.dragonraid.api.reward.RaidRewardService localReward =
+                mock(net.sabafly.dragonraid.api.reward.RaidRewardService.class);
+        net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy localPolicy =
+                mock(net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy.class);
+
+        net.sabafly.dragonraid.api.reward.RewardTable staticLoop =
+                new net.sabafly.dragonraid.api.reward.RewardTable(
+                        "static_loop",
+                        List.of(net.sabafly.dragonraid.api.reward.RewardPool.weighted(
+                                "sp",
+                                net.sabafly.dragonraid.api.reward.RollRange.exact(1),
+                                List.of(),
+                                List.of(net.sabafly.dragonraid.api.reward.RewardEntrySpec.tableRef(
+                                        "pack_loop", 1, 0.0, List.of(), List.of())))));
+        org.mockito.Mockito.when(localReward.staticTables()).thenReturn(List.of(staticLoop));
+        org.mockito.Mockito.when(localReward.staticTableIds()).thenReturn(java.util.Set.of("static_loop"));
+        org.mockito.Mockito.when(localReward.staticExtensions()).thenReturn(List.of());
+
+        DefaultContentPackLoader isolated = new DefaultContentPackLoader(
+                localRoot,
+                localFinder,
+                localAch,
+                localReward,
+                localPolicy,
+                java.util.logging.Logger.getLogger("isolated"));
+
+        // #18 initial load failure marks packLoadFailed
+        Path p = localRoot.resolve("p");
+        writePack(p, "id: p\nenabled: [false]\n", null, null, null, null);
+        assertThrows(ContentPackException.class, isolated::reload);
+        verify(localPolicy, org.mockito.Mockito.atLeastOnce()).markPackLoadFailed(any());
+
+        // #3 cycle between static table and pack table rejected before replacePackTables
+        writePack(p, "id: p\nenabled: true\n", null, null, """
+                reward-tables:
+                  - id: pack_loop
+                    pools:
+                      - rolls: 1
+                        entries:
+                          - type: TABLE_REF
+                            target: static_loop
+                """, null);
+        ContentPackException loopEx = assertThrows(ContentPackException.class, isolated::reload);
+        assertTrue(loopEx.getMessage().contains("Circular TABLE_REF"));
+        verify(localReward, org.mockito.Mockito.never()).replacePackTables(any(), any());
+
+        // Clear static loop table before valid v1 -> generation 1 and markPackLoadSucceeded
+        org.mockito.Mockito.when(localReward.staticTables()).thenReturn(List.of());
+        org.mockito.Mockito.when(localReward.staticTableIds()).thenReturn(java.util.Set.of());
+        java.util.concurrent.atomic.AtomicReference<java.util.Map<String, net.sabafly.dragonraid.api.reward.RewardTable>> snapshotRef =
+                new java.util.concurrent.atomic.AtomicReference<>(java.util.Map.of());
+        org.mockito.Mockito.doAnswer(inv -> {
+            @SuppressWarnings("unchecked")
+            java.util.Collection<net.sabafly.dragonraid.api.reward.RewardTable> tbls = inv.getArgument(0);
+            java.util.Map<String, net.sabafly.dragonraid.api.reward.RewardTable> map = new java.util.LinkedHashMap<>();
+            for (var t : tbls) {
+                map.put(t.id(), t);
+            }
+            snapshotRef.set(java.util.Map.copyOf(map));
+            return null;
+        }).when(localReward).replacePackTables(any(), any());
+        org.mockito.Mockito.when(localReward.effectiveTablesSnapshot()).thenAnswer(inv -> snapshotRef.get());
+        writePack(p, "id: p\nenabled: true\n", null, null, """
+                reward-tables:
+                  - id: t1
+                    pools:
+                      - rolls: 1
+                        entries:
+                          - type: EMPTY
+                """, null);
+        isolated.reload();
+        verify(localPolicy, org.mockito.Mockito.atLeastOnce()).markPackLoadSucceeded();
+        net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot snap1 = isolated.catalogSnapshot();
+        assertEquals(1L, snap1.generation());
+        assertTrue(snap1.rewardTables().containsKey("t1"));
+
+        // Reload v2 -> generation 2, previous snapshot remains immutable
+        writePack(p, "id: p\nenabled: true\n", null, null, """
+                reward-tables:
+                  - id: t2
+                    pools:
+                      - rolls: 1
+                        entries:
+                          - type: EMPTY
+                """, null);
+        isolated.reload();
+        net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot snap2 = isolated.catalogSnapshot();
+        assertEquals(2L, snap2.generation());
+        assertTrue(snap2.rewardTables().containsKey("t2"));
+        org.junit.jupiter.api.Assertions.assertFalse(snap1.rewardTables().containsKey("t2"));
+        assertEquals(1L, snap1.generation());
+    }
+
+    @Test
+    void yamlLoader_rejectsNonScalarValuesForScalarFields(@TempDir Path localRoot) throws Exception {
+        // enabled: [false]
+        Path p1 = localRoot.resolve("p1");
+        writePack(p1, "id: p1\nenabled: [false]\n", null, null, null, null);
+        assertThrows(ContentPackException.class, () -> ContentPackYamlLoader.loadPack(p1));
+
+        // priority: [10]
+        Path p2 = localRoot.resolve("p2");
+        writePack(p2, "id: p2\npriority: [10]\n", null, null, null, null);
+        assertThrows(ContentPackException.class, () -> ContentPackYamlLoader.loadPack(p2));
+
+        // difficulty: [HARD]
+        Path p3 = localRoot.resolve("p3");
+        writePack(p3, "id: p3\nenabled: true\n", null, null, null, """
+                rules:
+                  - id: r1
+                    clear-hooks:
+                      - encounter-id: dragon
+                        difficulty: [HARD]
+                        sync-dragon-battle-defeated: true
+                """);
+        assertThrows(ContentPackException.class, () -> ContentPackYamlLoader.loadPack(p3));
+
+        // target: [foo]
+        Path p4 = localRoot.resolve("p4");
+        writePack(p4, "id: p4\nenabled: true\n", null, null, """
+                reward-tables:
+                  - id: t1
+                    pools:
+                      - rolls: 1
+                        entries:
+                          - type: CURRENCY
+                            target: [foo]
+                            amount: 1
+                """, null);
+        assertThrows(ContentPackException.class, () -> ContentPackYamlLoader.loadPack(p4));
+    }
+
     private static void deleteRecursive(Path dir) throws Exception {
         if (!Files.exists(dir)) {
             return;

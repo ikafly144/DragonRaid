@@ -17,10 +17,16 @@ public record RewardPool(
         List<RewardFunctionSpec> functions
 ) {
 
+    public static final int MAX_EFFECTIVE_ROLLS = 10_000;
+
     public RewardPool {
         id = id == null ? "" : id.trim();
         mode = mode == null ? RewardPoolMode.WEIGHTED : mode;
         rolls = rolls == null ? RollRange.exact(1) : rolls;
+        if (rolls.max() > MAX_EFFECTIVE_ROLLS) {
+            throw new IllegalArgumentException(
+                    "rolls.max() must not exceed " + MAX_EFFECTIVE_ROLLS + ": " + rolls.max());
+        }
         if (!Double.isFinite(bonusRollsPerLuck)) {
             throw new IllegalArgumentException("bonusRollsPerLuck must be finite: " + bonusRollsPerLuck);
         }

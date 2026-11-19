@@ -110,6 +110,10 @@ class EndToEndProgressionIntegrationTest {
             inv.getArgument(1, Runnable.class).run();
             return mock(TaskHandle.class);
         }).when(directScheduler).runAtEntity(any(Entity.class), any(Runnable.class));
+        doAnswer(inv -> {
+            inv.getArgument(1, Runnable.class).run();
+            return mock(TaskHandle.class);
+        }).when(directScheduler).runAtEntity(any(Entity.class), any(Runnable.class), any(Runnable.class));
         when(directScheduler.asyncExecutor()).thenReturn(Runnable::run);
 
         World overworld = mock(World.class);
@@ -186,8 +190,19 @@ class EndToEndProgressionIntegrationTest {
             DefaultRaidRewardService rewardService = new DefaultRaidRewardService(
                     new PureRewardTableEvaluator(scriptHooks, registry), applier);
 
+            AtomicReference<DefaultContentPackLoader> packLoaderRef = new AtomicReference<>();
             RewardDispatchListener rewardDispatcher = new RewardDispatchListener(
-                    rewardService, finderService, achievementService, unlockService, repo, clock::get, Logger.getLogger("e2e"));
+                    rewardService,
+                    finderService,
+                    achievementService,
+                    unlockService,
+                    repo,
+                    clock::get,
+                    Logger.getLogger("e2e"),
+                    () -> {
+                        DefaultContentPackLoader l = packLoaderRef.get();
+                        return l != null ? l.catalogSnapshot() : net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot.empty();
+                    });
             dispatcherRef.set(rewardDispatcher);
 
             DefaultVanillaEndProgressionPolicy policy = new DefaultVanillaEndProgressionPolicy(
@@ -203,6 +218,7 @@ class EndToEndProgressionIntegrationTest {
 
             DefaultContentPackLoader packLoader = new DefaultContentPackLoader(
                     contentsRoot, finderService, achievementService, rewardService, policy, Logger.getLogger("e2e"));
+            packLoaderRef.set(packLoader);
             ContentPackLoadReport report = packLoader.reload();
             assertEquals(2, report.loadedPacks().size());
             assertEquals(2, report.totalRewardTables());
@@ -253,7 +269,7 @@ class EndToEndProgressionIntegrationTest {
             assertEquals(3L, repo.getCurrencyBalance(aliceId, "festival_coin").join());
             assertEquals(1, scriptBonusCount.get());
             assertEquals(Set.of("ender_dragon_normal_sf_claim"), firstApply.newlyClaimedKeys());
-            assertTrue(firstApply.appliedGrants().stream().anyMatch(g -> g instanceof CustomItemGrant));
+            assertEquals(1L, repo.getCurrencyBalance(aliceId, "sovereign_crest").join());
             assertTrue(repo.loadClaimedRewards(aliceId).join().contains("ender_dragon_normal_sf_claim"));
             verify(liveVanillaDragon, times(1)).remove();
             verify(dragonBattle, times(1)).generateEndPortal(true);
@@ -276,7 +292,8 @@ class EndToEndProgressionIntegrationTest {
             assertEquals(49L, repo.getCurrencyBalance(aliceId, "dragon_token").join());
             assertEquals(6L, repo.getCurrencyBalance(aliceId, "festival_coin").join());
             assertEquals(2, scriptBonusCount.get());
-            assertFalse(secondApply.appliedGrants().stream().anyMatch(g -> g instanceof CustomItemGrant));
+            assertEquals(1L, repo.getCurrencyBalance(aliceId, "sovereign_crest").join());
+            assertTrue(secondApply.newlyClaimedKeys().isEmpty());
 
             // Pure dry-run evaluation with seed does not mutate currency or execute scripts
             RewardContext dryCtx = RewardContext.forEncounterParticipant(
@@ -431,8 +448,8 @@ class EndToEndProgressionIntegrationTest {
                         conditions:
                           - type: SERVER_FIRST
                         entries:
-                          - type: CUSTOM_ITEM
-                            target: dragon_sovereign_crest
+                          - type: CURRENCY
+                            target: sovereign_crest
                             amount: 1
                 """);
         Files.writeString(dir.resolve("progression/end.yml"), """

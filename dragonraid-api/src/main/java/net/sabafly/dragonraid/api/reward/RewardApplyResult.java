@@ -11,7 +11,8 @@ public record RewardApplyResult(
         RewardBundle evaluated,
         List<RewardGrant> appliedGrants,
         Set<String> newlyClaimedKeys,
-        Set<String> skippedClaimKeys
+        Set<String> skippedClaimKeys,
+        List<RewardGrant> failedGrants
 ) {
 
     public RewardApplyResult {
@@ -19,9 +20,18 @@ public record RewardApplyResult(
         appliedGrants = appliedGrants == null ? List.of() : List.copyOf(appliedGrants);
         newlyClaimedKeys = newlyClaimedKeys == null ? Set.of() : Set.copyOf(newlyClaimedKeys);
         skippedClaimKeys = skippedClaimKeys == null ? Set.of() : Set.copyOf(skippedClaimKeys);
+        failedGrants = failedGrants == null ? List.of() : List.copyOf(failedGrants);
+    }
+
+    public RewardApplyResult(
+            RewardBundle evaluated,
+            List<RewardGrant> appliedGrants,
+            Set<String> newlyClaimedKeys,
+            Set<String> skippedClaimKeys) {
+        this(evaluated, appliedGrants, newlyClaimedKeys, skippedClaimKeys, List.of());
     }
 
     public static RewardApplyResult empty(RewardBundle bundle) {
-        return new RewardApplyResult(bundle, List.of(), Set.of(), Set.of());
+        return new RewardApplyResult(bundle, List.of(), Set.of(), Set.of(), List.of());
     }
 }

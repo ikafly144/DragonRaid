@@ -10,6 +10,7 @@ import net.sabafly.dragonraid.api.achievement.AchievementUnlockedEvent;
 import net.sabafly.dragonraid.api.event.EncounterResultSnapshot;
 import net.sabafly.dragonraid.api.event.ParticipantCombatMetrics;
 import net.sabafly.dragonraid.api.script.EncounterDifficulty;
+import net.sabafly.dragonraid.api.util.ImmutableSnapshots;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -116,16 +117,7 @@ public record RewardContext(
     }
 
     private static Map<String, Object> immutableCopy(@Nullable Map<String, Object> source) {
-        if (source == null || source.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> copy = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : source.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                copy.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return Collections.unmodifiableMap(copy);
+        return ImmutableSnapshots.copyStringMap(source);
     }
 
     public static final class Builder {

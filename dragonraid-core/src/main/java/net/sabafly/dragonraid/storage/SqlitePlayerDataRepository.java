@@ -21,6 +21,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -29,6 +31,9 @@ import org.jetbrains.annotations.Nullable;
  */
 public final class SqlitePlayerDataRepository implements PlayerDataRepository {
 
+    private static final Pattern UUID_PATTERN =
+            Pattern.compile("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+    private static final String LEGACY_CLEAR_MIGRATION_ID = "m2_migrate_legacy_encounter_clears_v1";
     private static final int DEFAULT_POOL_SIZE = 4;
     private static final Duration DEFAULT_CLOSE_DRAIN_TIMEOUT = Duration.ofSeconds(5);
 
@@ -247,19 +252,44 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
         String currencyId,
         long amount
     ) {
+        return addCurrencyWithCaps(uuid, lastKnownName, currencyId, amount, 0L, 0L, "unbounded");
+    }
+
+    @Override
+    public CompletableFuture<PointTransactionResult> addCurrencyWithCaps(
+        UUID uuid,
+        String lastKnownName,
+        String currencyId,
+        long amount,
+        long maxBalance,
+        long weeklyCap,
+        String weekKey
+    ) {
         Objects.requireNonNull(uuid, "uuid must not be null");
         String validCurrency = requireCurrencyId(currencyId);
+        String validWeekKey = requireNonBlankId(weekKey, "weekKey");
+        if (maxBalance < 0L || weeklyCap < 0L) {
+            throw new IllegalArgumentException("maxBalance and weeklyCap must be >= 0");
+        }
         String normalizedName = normalizeName(lastKnownName);
         return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
-            if (amount <= 0) {
-                long current = queryCurrencyBalance(conn, uuid, validCurrency);
+            long current = queryCurrencyBalance(conn, uuid, validCurrency);
+            if (amount <= 0L) {
                 return PointTransactionResult.failed(FailureReason.INVALID_AMOUNT, current);
             }
-            ensurePlayerExists(conn, uuid, normalizedName);
-            long current = queryCurrencyBalance(conn, uuid, validCurrency);
             if (amount > Long.MAX_VALUE - current) {
                 return PointTransactionResult.failed(FailureReason.BALANCE_OVERFLOW, current);
             }
+            if (maxBalance > 0L && amount > maxBalance - current) {
+                return PointTransactionResult.failed(FailureReason.BALANCE_OVERFLOW, current);
+            }
+            if (weeklyCap > 0L) {
+                long weeklyEarned = queryCurrencyWeeklyEarned(conn, uuid, validCurrency, validWeekKey);
+                if (amount > Long.MAX_VALUE - weeklyEarned || amount > weeklyCap - weeklyEarned) {
+                    return PointTransactionResult.failed(FailureReason.BALANCE_OVERFLOW, current);
+                }
+            }
+            ensurePlayerExists(conn, uuid, normalizedName);
             String sql = """
                 INSERT INTO player_currencies (uuid, currency_id, balance, total_earned, updated_at)
                 VALUES (?, ?, ?, ?, unixepoch())
@@ -274,6 +304,21 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                 ps.setLong(3, amount);
                 ps.setLong(4, amount);
                 ps.executeUpdate();
+            }
+            if (weeklyCap > 0L) {
+                String weeklySql = """
+                    INSERT INTO player_currency_weekly (uuid, currency_id, week_key, earned)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(uuid, currency_id, week_key) DO UPDATE SET
+                        earned = player_currency_weekly.earned + excluded.earned
+                    """;
+                try (PreparedStatement ps = conn.prepareStatement(weeklySql)) {
+                    ps.setString(1, uuid.toString());
+                    ps.setString(2, validCurrency);
+                    ps.setString(3, validWeekKey);
+                    ps.setLong(4, amount);
+                    ps.executeUpdate();
+                }
             }
             return PointTransactionResult.succeeded(current, current + amount);
         }));
@@ -472,6 +517,61 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                         participants_json TEXT NOT NULL
                     )
                     """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS server_milestone_pending (
+                        milestone_key TEXT NOT NULL,
+                        uuid TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        PRIMARY KEY (milestone_key, uuid),
+                        FOREIGN KEY (milestone_key) REFERENCES server_milestones (milestone_key) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_currency_weekly (
+                        uuid TEXT NOT NULL,
+                        currency_id TEXT NOT NULL,
+                        week_key TEXT NOT NULL,
+                        earned INTEGER NOT NULL DEFAULT 0 CHECK (earned >= 0),
+                        PRIMARY KEY (uuid, currency_id, week_key),
+                        FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        migration_id TEXT PRIMARY KEY,
+                        applied_at INTEGER NOT NULL
+                    )
+                    """);
+                boolean migratedLegacyClears = false;
+                try (ResultSet rs = stmt.executeQuery(
+                        "SELECT 1 FROM schema_migrations WHERE migration_id = '" + LEGACY_CLEAR_MIGRATION_ID + "'")) {
+                    migratedLegacyClears = rs.next();
+                }
+                if (!migratedLegacyClears) {
+                    stmt.execute("""
+                        INSERT OR IGNORE INTO player_encounter_clears (
+                            uuid, encounter_id, clear_count, best_time_ms, first_cleared_at, last_cleared_at
+                        )
+                        SELECT uuid, 'dragon_normal', normal_clears, best_normal_time_ms,
+                               COALESCE(updated_at, 0) * 1000, COALESCE(updated_at, 0) * 1000
+                        FROM player_stats
+                        WHERE normal_clears > 0
+                        """);
+                    stmt.execute("""
+                        INSERT OR IGNORE INTO player_encounter_clears (
+                            uuid, encounter_id, clear_count, best_time_ms, first_cleared_at, last_cleared_at
+                        )
+                        SELECT uuid, 'dragon_hard', hard_clears, best_hard_time_ms,
+                               COALESCE(updated_at, 0) * 1000, COALESCE(updated_at, 0) * 1000
+                        FROM player_stats
+                        WHERE hard_clears > 0
+                        """);
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?, unixepoch())")) {
+                        ins.setString(1, LEGACY_CLEAR_MIGRATION_ID);
+                        ins.executeUpdate();
+                    }
+                }
             }
             return null;
         });
@@ -637,6 +737,96 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                 ps.setLong(2, achievedAtEpochMillis);
                 ps.setString(3, participantsJson);
                 return ps.executeUpdate() > 0;
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Set<UUID>> claimOrResumeServerFirstRecipients(
+            String milestoneKey,
+            Collection<UUID> participantIds,
+            long achievedAtEpochMillis) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        Set<UUID> requested = new LinkedHashSet<>();
+        if (participantIds != null) {
+            for (UUID id : participantIds) {
+                if (id != null) {
+                    requested.add(id);
+                }
+            }
+        }
+        String participantsJson = encodeUuidJsonArray(requested);
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            boolean freshlyClaimed;
+            try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT OR IGNORE INTO server_milestones (milestone_key, achieved_at, participants_json)
+                VALUES (?, ?, ?)
+                """)) {
+                ps.setString(1, normalizedKey);
+                ps.setLong(2, achievedAtEpochMillis);
+                ps.setString(3, participantsJson);
+                freshlyClaimed = ps.executeUpdate() > 0;
+            }
+            if (freshlyClaimed) {
+                try (PreparedStatement ins = conn.prepareStatement("""
+                    INSERT OR IGNORE INTO server_milestone_pending (milestone_key, uuid, created_at)
+                    VALUES (?, ?, ?)
+                    """)) {
+                    for (UUID id : requested) {
+                        ins.setString(1, normalizedKey);
+                        ins.setString(2, id.toString());
+                        ins.setLong(3, achievedAtEpochMillis);
+                        ins.addBatch();
+                    }
+                    ins.executeBatch();
+                }
+                return Collections.unmodifiableSet(requested);
+            }
+            Set<UUID> pending = new LinkedHashSet<>();
+            try (PreparedStatement sel = conn.prepareStatement(
+                    "SELECT uuid FROM server_milestone_pending WHERE milestone_key = ?")) {
+                sel.setString(1, normalizedKey);
+                try (ResultSet rs = sel.executeQuery()) {
+                    while (rs.next()) {
+                        UUID id = UUID.fromString(rs.getString(1));
+                        if (requested.contains(id)) {
+                            pending.add(id);
+                        }
+                    }
+                }
+            }
+            return Collections.unmodifiableSet(pending);
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Void> completeServerFirstRecipient(String milestoneKey, UUID participantId) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        Objects.requireNonNull(participantId, "participantId must not be null");
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "DELETE FROM server_milestone_pending WHERE milestone_key = ? AND uuid = ?")) {
+                ps.setString(1, normalizedKey);
+                ps.setString(2, participantId.toString());
+                ps.executeUpdate();
+            }
+            return null;
+        }));
+    }
+
+    @Override
+    public CompletableFuture<List<UUID>> loadServerMilestoneParticipants(String milestoneKey) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT participants_json FROM server_milestones WHERE milestone_key = ?")) {
+                ps.setString(1, normalizedKey);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        return List.of();
+                    }
+                    return parseUuidJsonArray(rs.getString(1));
+                }
             }
         }));
     }
@@ -893,6 +1083,22 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
         }
     }
 
+    private long queryCurrencyWeeklyEarned(
+            Connection conn,
+            UUID uuid,
+            String currencyId,
+            String weekKey) throws SQLException {
+        String sql = "SELECT earned FROM player_currency_weekly WHERE uuid = ? AND currency_id = ? AND week_key = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, currencyId);
+            ps.setString(3, weekKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong("earned") : 0L;
+            }
+        }
+    }
+
     private boolean deductSingleCurrency(Connection conn, UUID uuid, String currencyId, long amount) throws SQLException {
         String sql = """
             UPDATE player_currencies
@@ -1005,6 +1211,18 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
         }
         sb.append(']');
         return sb.toString();
+    }
+
+    private static List<UUID> parseUuidJsonArray(@Nullable String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        Set<UUID> out = new LinkedHashSet<>();
+        Matcher matcher = UUID_PATTERN.matcher(json);
+        while (matcher.find()) {
+            out.add(UUID.fromString(matcher.group()));
+        }
+        return List.copyOf(out);
     }
 
     private enum CounterColumn {

@@ -144,15 +144,15 @@ final class ContentPackYamlLoader {
         if (root.virtual() || !root.isMap()) {
             throw new ContentPackException(folderName, file, "", "pack.yml must be a YAML map");
         }
-        String id = optionalString(root.node("id"), folderName);
+        String id = optionalString(folderName, file, root.node("id"), folderName);
         if (id.isBlank()) {
             throw new ContentPackException(folderName, file, "id", "Pack id must not be blank");
         }
-        String name = optionalString(root.node("name"), id);
-        String version = optionalString(root.node("version"), "1.0.0");
+        String name = optionalString(id, file, root.node("name"), id);
+        String version = optionalString(id, file, root.node("version"), "1.0.0");
         boolean enabled = optionalBoolean(id, file, root.node("enabled"), true);
         int priority = optionalInt(id, file, root.node("priority"), 100);
-        String description = optionalString(root.node("description"), "");
+        String description = optionalString(id, file, root.node("description"), "");
         try {
             return new ContentPackManifest(id, name, version, enabled, priority, description);
         } catch (IllegalArgumentException ex) {
@@ -162,9 +162,9 @@ final class ContentPackYamlLoader {
 
     private static ContentEntrySpec parseContentEntry(String packId, Path file, ConfigurationNode node) {
         String id = requireNonBlankString(packId, file, node, "id");
-        String displayNameKey = optionalString(node.node("display-name-key"), id);
-        String blueprintId = optionalString(node.node("blueprint-id"), id);
-        String unlockKey = optionalString(node.node("required-unlock-key"), "");
+        String displayNameKey = optionalString(packId, file, node.node("display-name-key"), id);
+        String blueprintId = optionalString(packId, file, node.node("blueprint-id"), id);
+        String unlockKey = optionalString(packId, file, node.node("required-unlock-key"), "");
         int minPlayers = optionalInt(packId, file, node.node("min-players"), 1);
         int maxPlayers = optionalInt(packId, file, node.node("max-players"), 8);
         int minIlvl = optionalInt(packId, file, node.node("min-average-item-level"), 0);
@@ -178,9 +178,9 @@ final class ContentPackYamlLoader {
 
     private static AchievementDefinition parseAchievement(String packId, Path file, ConfigurationNode node) {
         String id = requireNonBlankString(packId, file, node, "id");
-        String titleKey = optionalString(node.node("title-key"), "ach." + id + ".title");
-        String descriptionKey = optionalString(node.node("description-key"), "ach." + id + ".desc");
-        String icon = optionalString(node.node("icon"), "NETHER_STAR");
+        String titleKey = optionalString(packId, file, node.node("title-key"), "ach." + id + ".title");
+        String descriptionKey = optionalString(packId, file, node.node("description-key"), "ach." + id + ".desc");
+        String icon = optionalString(packId, file, node.node("icon"), "NETHER_STAR");
         boolean hidden = optionalBoolean(packId, file, node.node("hidden"), false);
         Set<String> prerequisites = parseStringSet(packId, file, node.node("prerequisites"));
         List<String> rewards = parseStringList(packId, file, node.node("rewards"));
@@ -217,13 +217,13 @@ final class ContentPackYamlLoader {
             throw new ContentPackException(packId, file, nodePath(node), "Achievement trigger entry must be a map");
         }
         AchievementTriggerType type = requireEnum(packId, file, node, "type", AchievementTriggerType.class);
-        String encounterId = optionalString(node.node("encounter-id"), "");
+        String encounterId = optionalString(packId, file, node.node("encounter-id"), "");
         EncounterDifficulty difficulty = optionalEnum(packId, file, node.node("difficulty"), EncounterDifficulty.class);
-        String worldName = optionalString(node.node("world"), "");
-        String mechanicId = optionalString(node.node("mechanic-id"), "");
-        String sourceEnemyId = optionalString(node.node("source-enemy-id"), "");
-        String customEventKey = optionalString(node.node("custom-event-key"), "");
-        String conditionHook = optionalString(node.node("condition-hook"), "");
+        String worldName = optionalString(packId, file, node.node("world"), "");
+        String mechanicId = optionalString(packId, file, node.node("mechanic-id"), "");
+        String sourceEnemyId = optionalString(packId, file, node.node("source-enemy-id"), "");
+        String customEventKey = optionalString(packId, file, node.node("custom-event-key"), "");
+        String conditionHook = optionalString(packId, file, node.node("condition-hook"), "");
 
         long maxDurationMs = 0L;
         if (!node.node("max-duration-ms").virtual()) {
@@ -392,14 +392,14 @@ final class ContentPackYamlLoader {
         if (!node.isMap()) {
             throw new ContentPackException(packId, file, nodePath(node), "Reward pool entry must be a map");
         }
-        String id = optionalString(node.node("id"), "");
+        String id = optionalString(packId, file, node.node("id"), "");
         RewardPoolMode mode = optionalEnum(packId, file, node.node("mode"), RewardPoolMode.class);
         if (mode == null) {
             mode = RewardPoolMode.WEIGHTED;
         }
         RollRange rolls = parseRollRange(packId, file, node.node("rolls"), RollRange.exact(1));
         double bonusRollsPerLuck = optionalDouble(packId, file, node.node("bonus-rolls-per-luck"), 0.0);
-        String claimKey = optionalString(node.node("claim-key"), "");
+        String claimKey = optionalString(packId, file, node.node("claim-key"), "");
         List<RewardConditionSpec> conditions = parseConditions(packId, file, node.node("conditions"));
 
         ConfigurationNode entriesNode = node.node("entries");
@@ -424,7 +424,7 @@ final class ContentPackYamlLoader {
             throw new ContentPackException(packId, file, nodePath(node), "Reward entry must be a map");
         }
         RewardEntryType type = requireEnum(packId, file, node, "type", RewardEntryType.class);
-        String target = optionalString(node.node("target"), "");
+        String target = optionalString(packId, file, node.node("target"), "");
         int weight = optionalInt(packId, file, node.node("weight"), 1);
         double quality = optionalDouble(packId, file, node.node("quality"), 0.0);
         RollRange defaultAmount = (type == RewardEntryType.CURRENCY
@@ -434,12 +434,12 @@ final class ContentPackYamlLoader {
                 : RollRange.exact(0);
         RollRange amount = parseRollRange(packId, file, node.node("amount"), defaultAmount);
         boolean notifyPlayer = optionalBoolean(packId, file, node.node("notify"), true);
-        String titleKey = optionalString(node.node("title-key"), "");
-        String subtitleKey = optionalString(node.node("subtitle-key"), "");
-        String toastTitleKey = optionalString(node.node("toast-title-key"), "");
-        String toastDescKey = optionalString(node.node("toast-description-key"), "");
-        String icon = optionalString(node.node("icon"), "");
-        String sound = optionalString(node.node("sound"), "");
+        String titleKey = optionalString(packId, file, node.node("title-key"), "");
+        String subtitleKey = optionalString(packId, file, node.node("subtitle-key"), "");
+        String toastTitleKey = optionalString(packId, file, node.node("toast-title-key"), "");
+        String toastDescKey = optionalString(packId, file, node.node("toast-description-key"), "");
+        String icon = optionalString(packId, file, node.node("icon"), "");
+        String sound = optionalString(packId, file, node.node("sound"), "");
         Map<String, Object> params = parseParamsMap(node.node("params"));
         List<RewardConditionSpec> conditions = parseConditions(packId, file, node.node("conditions"));
         List<RewardFunctionSpec> functions = parseFunctions(packId, file, node.node("functions"));
@@ -488,6 +488,8 @@ final class ContentPackYamlLoader {
         RewardConditionType type = requireEnum(packId, file, node, "type", RewardConditionType.class);
         boolean negate = optionalBoolean(packId, file, node.node("negate"), false);
         String target = firstNonEmptyString(
+                packId,
+                file,
                 node.node("target"),
                 node.node("key"),
                 node.node("achievement"),
@@ -516,7 +518,7 @@ final class ContentPackYamlLoader {
         }
 
         double luckMultiplier = optionalDouble(packId, file, node.node("luck-multiplier"), 0.0);
-        String expectedValue = scalarAsString(node.node("expected"), "");
+        String expectedValue = scalarAsString(packId, file, node.node("expected"), "");
         Map<String, Object> params = parseParamsMap(node.node("params"));
 
         try {
@@ -563,7 +565,7 @@ final class ContentPackYamlLoader {
         double factor = optionalDouble(packId, file, node.node("factor"), 1.0);
         RewardRoundingMode rounding = optionalEnum(packId, file, node.node("rounding"), RewardRoundingMode.class);
         RewardMetricType metric = optionalEnum(packId, file, node.node("metric"), RewardMetricType.class);
-        String attributeKey = optionalString(node.node("attribute-key"), "");
+        String attributeKey = optionalString(packId, file, node.node("attribute-key"), "");
         double step = optionalDouble(packId, file, node.node("step"), 1.0);
         double perStep = optionalDouble(packId, file, node.node("per-step"), 0.0);
         long minBound = optionalLong(packId, file, node.node("min"), 0L);
@@ -621,21 +623,27 @@ final class ContentPackYamlLoader {
                 throw new ContentPackException(packId, file, nodePath(gateNode), "'entry-gate' must be a map");
             }
             EndEntryGateMode mode = requireEnum(packId, file, gateNode, "mode", EndEntryGateMode.class);
-            String target = optionalString(gateNode.node("target"), "");
-            String denialMessageKey = optionalString(gateNode.node("denial-message-key"), "");
+            String target = optionalString(packId, file, gateNode.node("target"), "");
+            String denialMessageKey = optionalString(packId, file, gateNode.node("denial-message-key"), "");
             boolean allowBypass = optionalBoolean(packId, file, gateNode.node("allow-bypass-permission"), true);
             boolean pushBack = optionalBoolean(packId, file, gateNode.node("push-back-on-deny"), true);
             entryGate = new EndEntryGateSpec(mode, target, denialMessageKey, allowBypass, pushBack);
         }
 
         List<VanillaClearHookSpec> clearHooks = new ArrayList<>();
+        Set<String> seenHookIds = new LinkedHashSet<>();
         ConfigurationNode hooksNode = node.node("clear-hooks");
         if (!hooksNode.virtual()) {
             if (!hooksNode.isList()) {
                 throw new ContentPackException(packId, file, nodePath(hooksNode), "'clear-hooks' must be a list");
             }
             for (ConfigurationNode hookNode : hooksNode.childrenList()) {
-                clearHooks.add(parseClearHook(packId, file, hookNode));
+                VanillaClearHookSpec hook = parseClearHook(packId, file, hookNode);
+                if (!hook.id().isEmpty() && !seenHookIds.add(hook.id())) {
+                    throw new ContentPackException(
+                            packId, file, nodePath(hookNode), "Duplicate clear-hook id '" + hook.id() + "' in rule '" + id + "'");
+                }
+                clearHooks.add(hook);
             }
         }
 
@@ -650,21 +658,23 @@ final class ContentPackYamlLoader {
         if (!node.isMap()) {
             throw new ContentPackException(packId, file, nodePath(node), "clear-hook entry must be a map");
         }
+        String hookId = optionalString(packId, file, node.node("id"), "");
         String encounterId = requireNonBlankString(packId, file, node, "encounter-id");
         EncounterDifficulty difficulty = optionalEnum(packId, file, node.node("difficulty"), EncounterDifficulty.class);
         boolean firstClearOnly = optionalBoolean(packId, file, node.node("first-clear-only"), false);
         boolean serverFirstOnly = optionalBoolean(packId, file, node.node("server-first-only"), false);
-        String endWorldName = optionalString(node.node("end-world"), "");
+        String endWorldName = optionalString(packId, file, node.node("end-world"), "");
         boolean syncDefeated = optionalBoolean(packId, file, node.node("sync-dragon-battle-defeated"), false);
         boolean generatePortal = optionalBoolean(packId, file, node.node("generate-exit-portal"), false);
         boolean removeDragon = optionalBoolean(packId, file, node.node("remove-live-vanilla-dragon"), false);
         int spawnGatewayCount = optionalInt(packId, file, node.node("spawn-gateway-count"), 0);
         int maxGateways = optionalInt(packId, file, node.node("max-gateways"), VanillaClearHookSpec.MAX_VANILLA_GATEWAYS);
-        String scriptHookId = optionalString(node.node("script-hook"), "");
+        String scriptHookId = optionalString(packId, file, node.node("script-hook"), "");
         Map<String, Object> params = parseParamsMap(node.node("params"));
 
         try {
             return new VanillaClearHookSpec(
+                    hookId,
                     encounterId,
                     difficulty,
                     firstClearOnly,
@@ -759,8 +769,20 @@ final class ContentPackYamlLoader {
         }
     }
 
+    private static void rejectNonScalar(String packId, Path file, ConfigurationNode node, String expectedType) {
+        if (!node.virtual() && (node.isMap() || node.isList())) {
+            throw new ContentPackException(
+                    packId,
+                    file,
+                    nodePath(node),
+                    "Expected scalar " + expectedType + " value, got " + (node.isList() ? "list" : "map")
+            );
+        }
+    }
+
     private static String requireNonBlankString(String packId, Path file, ConfigurationNode parent, String key) {
         ConfigurationNode node = parent.node(key);
+        rejectNonScalar(packId, file, node, "string");
         if (node.virtual() || node.rawScalar() == null) {
             throw new ContentPackException(packId, file, nodePath(node), "Missing required string '" + key + "'");
         }
@@ -771,7 +793,8 @@ final class ContentPackYamlLoader {
         return value.trim();
     }
 
-    private static String optionalString(ConfigurationNode node, String fallback) {
+    private static String optionalString(String packId, Path file, ConfigurationNode node, String fallback) {
+        rejectNonScalar(packId, file, node, "string");
         if (node.virtual() || node.rawScalar() == null) {
             return fallback;
         }
@@ -779,16 +802,17 @@ final class ContentPackYamlLoader {
         return value == null ? fallback : value.trim();
     }
 
-    private static String scalarAsString(ConfigurationNode node, String fallback) {
+    private static String scalarAsString(String packId, Path file, ConfigurationNode node, String fallback) {
+        rejectNonScalar(packId, file, node, "scalar");
         if (node.virtual() || node.rawScalar() == null) {
             return fallback;
         }
         return node.rawScalar().toString().trim();
     }
 
-    private static String firstNonEmptyString(ConfigurationNode... nodes) {
+    private static String firstNonEmptyString(String packId, Path file, ConfigurationNode... nodes) {
         for (ConfigurationNode node : nodes) {
-            String value = optionalString(node, "");
+            String value = optionalString(packId, file, node, "");
             if (!value.isEmpty()) {
                 return value;
             }
@@ -797,6 +821,7 @@ final class ContentPackYamlLoader {
     }
 
     private static boolean optionalBoolean(String packId, Path file, ConfigurationNode node, boolean fallback) {
+        rejectNonScalar(packId, file, node, "boolean");
         if (node.virtual() || node.rawScalar() == null) {
             return fallback;
         }
@@ -808,6 +833,7 @@ final class ContentPackYamlLoader {
     }
 
     private static int optionalInt(String packId, Path file, ConfigurationNode node, int fallback) {
+        rejectNonScalar(packId, file, node, "integer");
         if (node.virtual() || node.rawScalar() == null) {
             return fallback;
         }
@@ -823,6 +849,7 @@ final class ContentPackYamlLoader {
     }
 
     private static long optionalLong(String packId, Path file, ConfigurationNode node, long fallback) {
+        rejectNonScalar(packId, file, node, "long");
         if (node.virtual() || node.rawScalar() == null) {
             return fallback;
         }
@@ -834,6 +861,7 @@ final class ContentPackYamlLoader {
     }
 
     private static double optionalDouble(String packId, Path file, ConfigurationNode node, double fallback) {
+        rejectNonScalar(packId, file, node, "numeric");
         if (node.virtual() || node.rawScalar() == null) {
             return fallback;
         }
@@ -869,6 +897,7 @@ final class ContentPackYamlLoader {
             Path file,
             ConfigurationNode node,
             Class<E> enumType) {
+        rejectNonScalar(packId, file, node, enumType.getSimpleName());
         if (node.virtual() || node.rawScalar() == null) {
             return null;
         }

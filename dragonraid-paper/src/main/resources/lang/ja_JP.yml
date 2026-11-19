@@ -255,4 +255,5 @@ progression:
   end-locked-unlock-required: "<prefix><red>バニラ「ジ・エンド」へ進入するにはコンテンツ「<target>」の解放が必要です。</red>"
   end-locked-achievement-required: "<prefix><red>バニラ「ジ・エンド」へ進入するには実績「<target>」の獲得が必要です。</red>"
   end-locked-clear-required: "<prefix><red>バニラ「ジ・エンド」へ進入するにはレイド「<target>」の討伐が必要です。</red>"
+  end-locked-pack-error: "<prefix><red>コンテンツパックの読み込みに失敗したため、バニラ「ジ・エンド」は一時的に封印されています。管理者にお問い合わせください。</red>"
   end-locked-generic: "<prefix><red>現在はバニラ「ジ・エンド」へ直接進入できません。</red>"

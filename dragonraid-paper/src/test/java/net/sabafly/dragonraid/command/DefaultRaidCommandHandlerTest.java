@@ -525,4 +525,56 @@ class DefaultRaidCommandHandlerTest {
             .map(PLAIN::serialize)
             .toList();
     }
+
+    @Test
+    void adminUnlock_reportsDbFailureOnGrant_andDelegatesRevokeOnceViaUnlockService() {
+        UUID steveId = UUID.randomUUID();
+        Player steve = mock(Player.class);
+        when(steve.getUniqueId()).thenReturn(steveId);
+        when(steve.getName()).thenReturn("Steve");
+        onlinePlayers.put("Steve", steve);
+
+        net.sabafly.dragonraid.api.finder.ContentUnlockService mockUnlock =
+                mock(net.sabafly.dragonraid.api.finder.ContentUnlockService.class);
+        net.sabafly.dragonraid.storage.PlayerDataRepository mockRepo =
+                mock(net.sabafly.dragonraid.storage.PlayerDataRepository.class);
+        when(mockUnlock.unlockAsync(eq(steveId), eq("Steve"), eq("raid_normal")))
+                .thenReturn(java.util.concurrent.CompletableFuture.failedFuture(new RuntimeException("db failure")));
+        when(mockUnlock.revokeAsync(steveId, "raid_normal"))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(true));
+
+        DefaultRaidCommandHandler unlockHandler = new DefaultRaidCommandHandler(
+                configManager,
+                messageService,
+                scheduler,
+                mockRepo,
+                Logger.getLogger("UnlockAsyncTest"),
+                name -> Optional.ofNullable(onlinePlayers.get(name)),
+                null,
+                null,
+                mockUnlock,
+                null,
+                null,
+                null,
+                null
+        );
+
+        Player admin = mock(Player.class);
+        when(admin.locale()).thenReturn(Locale.US);
+
+        // #14 Failed DB unlock reports failure and does not claim success
+        unlockHandler.adminUnlock(admin, RaidCommandHandler.UnlockAction.GRANT, "Steve", "raid_normal");
+        List<String> grantFailureMsgs = captureMessages(admin);
+        assertTrue(grantFailureMsgs.stream().anyMatch(m -> m.contains("Failed to update or query content unlocks")));
+        assertTrue(grantFailureMsgs.stream().noneMatch(m -> m.contains("Unlocked content")));
+
+        // #15 REVOKE delegates once through unlockService.revokeAsync without duplicate repo.revokeContentUnlock call
+        Player admin2 = mock(Player.class);
+        when(admin2.locale()).thenReturn(Locale.US);
+        unlockHandler.adminUnlock(admin2, RaidCommandHandler.UnlockAction.REVOKE, "Steve", "raid_normal");
+        verify(mockUnlock, org.mockito.Mockito.times(1)).revokeAsync(steveId, "raid_normal");
+        verify(mockRepo, org.mockito.Mockito.never()).revokeContentUnlock(any(), any());
+        List<String> revokeMsgs = captureMessages(admin2);
+        assertTrue(revokeMsgs.stream().anyMatch(m -> m.contains("Revoked content unlock")));
+    }
 }

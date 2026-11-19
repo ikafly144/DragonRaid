@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import net.sabafly.dragonraid.api.event.EncounterResultSnapshot;
+import net.sabafly.dragonraid.api.script.EncounterDifficulty;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Policy SPI controlling vanilla End dimension gating and post-clear vanilla End progression hooks
@@ -33,6 +35,20 @@ public interface VanillaEndProgressionPolicy {
         if (snapshot != null) {
             onEncounterCleared(snapshot.encounterId(), snapshot.participantMetrics().keySet());
         }
+    }
+
+    default boolean hasMatchingClearHook(String encounterId, @Nullable EncounterDifficulty difficulty) {
+        return false;
+    }
+
+    default void markPackLoadFailed(@Nullable String reason) {
+    }
+
+    default void markPackLoadSucceeded() {
+    }
+
+    default boolean isPackLoadFailed() {
+        return false;
     }
 
     default void registerRule(VanillaProgressionRule rule) {

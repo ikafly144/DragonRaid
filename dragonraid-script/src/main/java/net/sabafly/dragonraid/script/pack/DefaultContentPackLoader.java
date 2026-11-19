@@ -15,12 +15,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 import net.sabafly.dragonraid.api.achievement.AchievementDefinition;
 import net.sabafly.dragonraid.api.achievement.RaidAchievementService;
 import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.finder.ContentFinderService;
+import net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot;
 import net.sabafly.dragonraid.api.pack.ContentPackLoadReport;
 import net.sabafly.dragonraid.api.pack.ContentPackLoader;
 import net.sabafly.dragonraid.api.pack.LoadedContentPack;
@@ -46,8 +48,11 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
     private final VanillaEndProgressionPolicy progressionPolicy;
     private final Logger logger;
 
+    private final AtomicLong generationCounter = new AtomicLong(0L);
+    private volatile boolean hasLoadedSuccessfully;
     private volatile List<LoadedContentPack> loadedPacks = List.of();
     private volatile ContentPackLoadReport lastReport = ContentPackLoadReport.empty();
+    private volatile ContentPackCatalogSnapshot catalogSnapshot = ContentPackCatalogSnapshot.empty();
 
     public DefaultContentPackLoader(
             Path contentsRoot,
@@ -62,10 +67,22 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
         this.rewardService = Objects.requireNonNull(rewardService, "rewardService");
         this.progressionPolicy = Objects.requireNonNull(progressionPolicy, "progressionPolicy");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.achievementService.bindCatalogSnapshotSupplier(this::catalogSnapshot);
     }
 
     @Override
     public synchronized ContentPackLoadReport reload() {
+        try {
+            return reloadInternal();
+        } catch (RuntimeException ex) {
+            if (!hasLoadedSuccessfully) {
+                progressionPolicy.markPackLoadFailed(ex.getMessage());
+            }
+            throw ex;
+        }
+    }
+
+    private ContentPackLoadReport reloadInternal() {
         try {
             Files.createDirectories(contentsRoot);
         } catch (IOException ex) {
@@ -162,11 +179,33 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
                 stagedExtensions
         );
 
-        // All validation passed; commit atomically to runtime registries.
+        // Stage unified catalog generation BEFORE switching live registries.
+        rewardService.replacePackTables(stagedTablesById.values(), stagedExtensions);
+        Map<String, RewardTable> effectiveTablesSnapshot = rewardService.effectiveTablesSnapshot();
+
+        Map<String, ContentEntrySpec> contentsMap = new LinkedHashMap<>();
+        for (ContentEntrySpec entry : stagedContents) {
+            contentsMap.put(entry.contentId(), entry);
+        }
+        Map<String, AchievementDefinition> achievementsMap = new LinkedHashMap<>();
+        for (AchievementDefinition ach : stagedAchievements) {
+            achievementsMap.put(ach.id(), ach);
+        }
+        long generation = generationCounter.incrementAndGet();
+        this.catalogSnapshot = new ContentPackCatalogSnapshot(
+                generation,
+                contentsMap,
+                achievementsMap,
+                effectiveTablesSnapshot,
+                List.copyOf(stagedProgressionRules)
+        );
+
+        // All validation passed; atomically swap runtime registries.
         contentFinderService.replacePackContents(stagedContents);
         achievementService.replacePackDefinitions(stagedAchievements);
-        rewardService.replacePackTables(stagedTablesById.values(), stagedExtensions);
         progressionPolicy.replacePackRules(stagedProgressionRules);
+        progressionPolicy.markPackLoadSucceeded();
+        this.hasLoadedSuccessfully = true;
 
         ContentPackLoadReport report = new ContentPackLoadReport(
                 sortedEnabled,
@@ -198,14 +237,22 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
             Map<String, RewardTable> stagedTablesById,
             List<RewardTableExtension> stagedExtensions) {
         Set<String> knownTableIds = new LinkedHashSet<>(rewardService.staticTableIds());
+        for (RewardTable staticTable : rewardService.staticTables()) {
+            knownTableIds.add(staticTable.id());
+        }
         knownTableIds.addAll(stagedTablesById.keySet());
 
         Map<String, List<RewardPool>> mergedPools = new LinkedHashMap<>();
+        for (RewardTable staticTable : rewardService.staticTables()) {
+            mergedPools.put(staticTable.id(), new ArrayList<>(staticTable.pools()));
+        }
         for (RewardTable table : stagedTablesById.values()) {
             mergedPools.put(table.id(), new ArrayList<>(table.pools()));
         }
 
-        List<RewardTableExtension> sortedExtensions = stagedExtensions.stream()
+        List<RewardTableExtension> allExtensions = new ArrayList<>(rewardService.staticExtensions());
+        allExtensions.addAll(stagedExtensions);
+        List<RewardTableExtension> sortedExtensions = allExtensions.stream()
                 .sorted(Comparator.comparingInt(RewardTableExtension::priority)
                         .thenComparing(RewardTableExtension::packId)
                         .thenComparing(RewardTableExtension::id))
@@ -330,5 +377,10 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
     @Override
     public Path contentsRoot() {
         return contentsRoot;
+    }
+
+    @Override
+    public ContentPackCatalogSnapshot catalogSnapshot() {
+        return catalogSnapshot;
     }
 }

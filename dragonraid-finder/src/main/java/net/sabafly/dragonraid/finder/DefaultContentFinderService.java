@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.finder;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,7 +23,7 @@ import net.sabafly.dragonraid.api.party.RaidPartyService;
 public final class DefaultContentFinderService implements ContentFinderService {
 
     private final Map<String, ContentEntrySpec> staticEntries = new ConcurrentHashMap<>();
-    private final Map<String, ContentEntrySpec> packEntries = new ConcurrentHashMap<>();
+    private volatile Map<String, ContentEntrySpec> packEntries = Map.of();
     private final ContentUnlockService unlockService;
     private final RaidPartyService partyService;
     private final RaidItemService itemService;
@@ -47,18 +48,25 @@ public final class DefaultContentFinderService implements ContentFinderService {
     }
 
     @Override
-    public boolean unregisterContent(String contentId) {
+    public synchronized boolean unregisterContent(String contentId) {
         if (contentId == null || contentId.isBlank()) {
             return false;
         }
         boolean removedStatic = staticEntries.remove(contentId) != null;
-        boolean removedPack = packEntries.remove(contentId) != null;
+        Map<String, ContentEntrySpec> currentPack = this.packEntries;
+        boolean removedPack = false;
+        if (currentPack.containsKey(contentId)) {
+            Map<String, ContentEntrySpec> next = new LinkedHashMap<>(currentPack);
+            next.remove(contentId);
+            this.packEntries = Collections.unmodifiableMap(next);
+            removedPack = true;
+        }
         return removedStatic || removedPack;
     }
 
     @Override
-    public void replacePackContents(Collection<ContentEntrySpec> entries) {
-        Map<String, ContentEntrySpec> next = new ConcurrentHashMap<>();
+    public synchronized void replacePackContents(Collection<ContentEntrySpec> entries) {
+        Map<String, ContentEntrySpec> next = new LinkedHashMap<>();
         if (entries != null) {
             for (ContentEntrySpec entry : entries) {
                 if (entry != null) {
@@ -66,8 +74,7 @@ public final class DefaultContentFinderService implements ContentFinderService {
                 }
             }
         }
-        packEntries.clear();
-        packEntries.putAll(next);
+        this.packEntries = Collections.unmodifiableMap(next);
     }
 
     @Override

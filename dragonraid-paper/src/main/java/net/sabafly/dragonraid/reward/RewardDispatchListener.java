@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -12,6 +13,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.sabafly.dragonraid.api.achievement.AchievementUnlockedEvent;
@@ -23,11 +25,13 @@ import net.sabafly.dragonraid.api.event.RaidEncounterCompletedEvent;
 import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.finder.ContentFinderService;
 import net.sabafly.dragonraid.api.finder.ContentUnlockService;
+import net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot;
 import net.sabafly.dragonraid.api.progression.PlayerProgressionRepository;
 import net.sabafly.dragonraid.api.reward.RaidRewardService;
 import net.sabafly.dragonraid.api.reward.RewardApplyResult;
 import net.sabafly.dragonraid.api.reward.RewardBundle;
 import net.sabafly.dragonraid.api.reward.RewardContext;
+import net.sabafly.dragonraid.api.reward.RewardTable;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -49,8 +53,10 @@ public final class RewardDispatchListener implements Listener {
     private final @Nullable PlayerProgressionRepository progressionRepository;
     private final LongSupplier clockMillis;
     private final Logger logger;
+    private final @Nullable Supplier<ContentPackCatalogSnapshot> catalogSnapshotSupplier;
 
     private final Set<String> claimedServerFirstInMemory = ConcurrentHashMap.newKeySet();
+    private final Map<String, Set<UUID>> inMemoryPendingServerFirst = new ConcurrentHashMap<>();
 
     public RewardDispatchListener(
             RaidRewardService rewardService,
@@ -60,6 +66,27 @@ public final class RewardDispatchListener implements Listener {
             @Nullable PlayerProgressionRepository progressionRepository,
             LongSupplier clockMillis,
             Logger logger) {
+        this(
+                rewardService,
+                contentFinderService,
+                achievementService,
+                unlockService,
+                progressionRepository,
+                clockMillis,
+                logger,
+                null
+        );
+    }
+
+    public RewardDispatchListener(
+            RaidRewardService rewardService,
+            ContentFinderService contentFinderService,
+            @Nullable RaidAchievementService achievementService,
+            @Nullable ContentUnlockService unlockService,
+            @Nullable PlayerProgressionRepository progressionRepository,
+            LongSupplier clockMillis,
+            Logger logger,
+            @Nullable Supplier<ContentPackCatalogSnapshot> catalogSnapshotSupplier) {
         this.rewardService = Objects.requireNonNull(rewardService, "rewardService");
         this.contentFinderService = Objects.requireNonNull(contentFinderService, "contentFinderService");
         this.achievementService = achievementService;
@@ -67,6 +94,7 @@ public final class RewardDispatchListener implements Listener {
         this.progressionRepository = progressionRepository;
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.catalogSnapshotSupplier = catalogSnapshotSupplier;
     }
 
     @EventHandler(priority = EventPriority.NORMAL)
@@ -84,6 +112,7 @@ public final class RewardDispatchListener implements Listener {
                     RewardApplyResult.empty(RewardBundle.empty("", playerId)));
         }
 
+        @Nullable Map<String, RewardTable> tableSnapshot = event.rewardTableSnapshot();
         CompletableFuture<Set<String>> claimedFuture = loadClaimedKeys(playerId);
         return claimedFuture.thenCompose(claimedKeys -> {
             Set<String> unlockedAchievements = new LinkedHashSet<>();
@@ -101,7 +130,9 @@ public final class RewardDispatchListener implements Listener {
                     unlockedContents,
                     claimedKeys
             );
-            return rewardService.evaluateAndApplyAll(tableIds, context, ThreadLocalRandom.current());
+            return tableSnapshot != null
+                    ? rewardService.evaluateAndApplyAll(tableSnapshot, tableIds, context, ThreadLocalRandom.current())
+                    : rewardService.evaluateAndApplyAll(tableIds, context, ThreadLocalRandom.current());
         }).exceptionally(ex -> {
             logger.log(Level.WARNING, "Failed to dispatch achievement rewards for " + event.achievement().id(), ex);
             return RewardApplyResult.empty(RewardBundle.empty("", playerId));
@@ -119,7 +150,21 @@ public final class RewardDispatchListener implements Listener {
         if (snapshot.outcome() != EncounterOutcome.VICTORY || snapshot.participantMetrics().isEmpty()) {
             return CompletableFuture.completedFuture(List.of());
         }
-        Optional<ContentEntrySpec> contentOpt = resolveContent(snapshot.encounterId());
+
+        ContentPackCatalogSnapshot catalog = catalogSnapshotSupplier != null ? catalogSnapshotSupplier.get() : null;
+        Optional<ContentEntrySpec> contentOpt;
+        @Nullable Map<String, RewardTable> tableSnapshot;
+        if (catalog != null && catalog.generation() > 0L) {
+            contentOpt = catalog.resolveContent(snapshot.encounterId());
+            if (contentOpt.isEmpty()) {
+                contentOpt = resolveContent(snapshot.encounterId());
+            }
+            tableSnapshot = catalog.rewardTables();
+        } else {
+            contentOpt = resolveContent(snapshot.encounterId());
+            tableSnapshot = rewardService.effectiveTablesSnapshot();
+        }
+
         if (contentOpt.isEmpty() || contentOpt.get().clearRewards().isEmpty()) {
             return CompletableFuture.completedFuture(List.of());
         }
@@ -127,19 +172,23 @@ public final class RewardDispatchListener implements Listener {
         Collection<UUID> participantIds = List.copyOf(snapshot.participantMetrics().keySet());
         String sfKey = ENCOUNTER_SERVER_FIRST_PREFIX + snapshot.encounterId();
 
-        CompletableFuture<Boolean> serverFirstFuture = progressionRepository != null
-                ? progressionRepository.tryClaimServerFirst(sfKey, participantIds, clockMillis.getAsLong())
+        CompletableFuture<Set<UUID>> sfRecipientsFuture = progressionRepository != null
+                ? progressionRepository.claimOrResumeServerFirstRecipients(sfKey, participantIds, clockMillis.getAsLong())
                         .exceptionally(ex -> {
                             logger.log(Level.WARNING, "Failed to check encounter reward server-first " + sfKey, ex);
-                            return false;
+                            return Set.of();
                         })
-                : CompletableFuture.completedFuture(claimedServerFirstInMemory.add(sfKey));
+                : CompletableFuture.completedFuture(claimOrResumeInMemoryServerFirst(sfKey, participantIds));
 
-        return serverFirstFuture.thenCompose(serverFirst -> {
-            boolean isServerFirst = Boolean.TRUE.equals(serverFirst);
+        Map<String, RewardTable> effectiveSnapshot = tableSnapshot;
+        return sfRecipientsFuture.thenCompose(sfRecipients -> {
+            Set<UUID> safeSfRecipients = sfRecipients == null ? Set.of() : sfRecipients;
             List<CompletableFuture<RewardApplyResult>> participantFutures = new ArrayList<>();
             for (ParticipantCombatMetrics metrics : snapshot.participantMetrics().values()) {
                 UUID playerId = metrics.playerId();
+                boolean playerFirstClear = snapshot.isFirstClearFor(playerId);
+                boolean playerServerFirst = safeSfRecipients.contains(playerId);
+
                 CompletableFuture<RewardApplyResult> future = loadClaimedKeys(playerId).thenCompose(claimedKeys -> {
                     Set<String> unlockedAchievements = achievementService != null
                             ? achievementService.unlockedFor(playerId)
@@ -150,13 +199,20 @@ public final class RewardDispatchListener implements Listener {
                     RewardContext ctx = RewardContext.forEncounterParticipant(
                             snapshot,
                             metrics,
-                            snapshot.firstClear(),
-                            isServerFirst,
+                            playerFirstClear,
+                            playerServerFirst,
                             unlockedAchievements,
                             unlockedContents,
                             claimedKeys
                     );
-                    return rewardService.evaluateAndApplyAll(tableIds, ctx, ThreadLocalRandom.current());
+                    return effectiveSnapshot != null
+                            ? rewardService.evaluateAndApplyAll(effectiveSnapshot, tableIds, ctx, ThreadLocalRandom.current())
+                            : rewardService.evaluateAndApplyAll(tableIds, ctx, ThreadLocalRandom.current());
+                }).thenCompose(applyResult -> {
+                    if (playerServerFirst && applyResult.failedGrants().isEmpty()) {
+                        return markServerFirstRecipientCompleted(sfKey, playerId).thenApply(v -> applyResult);
+                    }
+                    return CompletableFuture.completedFuture(applyResult);
                 }).exceptionally(ex -> {
                     logger.log(Level.WARNING, "Failed to dispatch encounter rewards for " + playerId, ex);
                     return RewardApplyResult.empty(RewardBundle.empty("", playerId));
@@ -166,6 +222,46 @@ public final class RewardDispatchListener implements Listener {
             return CompletableFuture.allOf(participantFutures.toArray(CompletableFuture[]::new))
                     .thenApply(ignored -> participantFutures.stream().map(CompletableFuture::join).toList());
         });
+    }
+
+    private Set<UUID> claimOrResumeInMemoryServerFirst(String key, Collection<UUID> participantIds) {
+        if (claimedServerFirstInMemory.add(key)) {
+            Set<UUID> pending = ConcurrentHashMap.newKeySet();
+            for (UUID id : participantIds) {
+                if (id != null) {
+                    pending.add(id);
+                }
+            }
+            inMemoryPendingServerFirst.put(key, pending);
+            return Set.copyOf(pending);
+        }
+        Set<UUID> pending = inMemoryPendingServerFirst.get(key);
+        if (pending == null || pending.isEmpty()) {
+            return Set.of();
+        }
+        Set<UUID> resume = new LinkedHashSet<>();
+        for (UUID id : participantIds) {
+            if (pending.contains(id)) {
+                resume.add(id);
+            }
+        }
+        return Set.copyOf(resume);
+    }
+
+    private CompletableFuture<Void> markServerFirstRecipientCompleted(String key, UUID playerId) {
+        if (progressionRepository != null) {
+            return progressionRepository.completeServerFirstRecipient(key, playerId)
+                    .exceptionally(ex -> {
+                        logger.log(Level.WARNING,
+                                "Failed to mark server-first reward dispatch completed for " + playerId + " on " + key, ex);
+                        return null;
+                    });
+        }
+        Set<UUID> pending = inMemoryPendingServerFirst.get(key);
+        if (pending != null) {
+            pending.remove(playerId);
+        }
+        return CompletableFuture.completedFuture(null);
     }
 
     private Optional<ContentEntrySpec> resolveContent(String encounterId) {

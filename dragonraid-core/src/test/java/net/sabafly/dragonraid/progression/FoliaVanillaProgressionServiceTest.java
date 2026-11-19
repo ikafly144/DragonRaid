@@ -49,6 +49,122 @@ class FoliaVanillaProgressionServiceTest {
             inv.getArgument(1, Runnable.class).run();
             return mock(TaskHandle.class);
         }).when(scheduler).runAtEntity(any(Entity.class), any(Runnable.class));
+        doAnswer(inv -> {
+            inv.getArgument(1, Runnable.class).run();
+            return mock(TaskHandle.class);
+        }).when(scheduler).runAtEntity(any(Entity.class), any(Runnable.class), any(Runnable.class));
+    }
+
+    @Test
+    void synchronizeDragonDefeated_waitsForEntityRemovalAndHandlesRetired() {
+        org.bukkit.World world = mock(org.bukkit.World.class);
+        org.bukkit.boss.DragonBattle battle = mock(org.bukkit.boss.DragonBattle.class);
+        org.bukkit.entity.EnderDragon dragon = mock(org.bukkit.entity.EnderDragon.class);
+        org.mockito.Mockito.when(world.getName()).thenReturn("world_the_end");
+        org.mockito.Mockito.when(world.getEnderDragonBattle()).thenReturn(battle);
+        org.mockito.Mockito.when(battle.getEnderDragon()).thenReturn(dragon);
+        org.mockito.Mockito.when(battle.getEndPortalLocation()).thenReturn(new org.bukkit.Location(world, 0.0, 64.0, 0.0));
+
+        java.util.concurrent.atomic.AtomicReference<Runnable> entityTask = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<Runnable> retiredTask = new java.util.concurrent.atomic.AtomicReference<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        org.mockito.Mockito.when(deferredScheduler.runAtRegion(any(org.bukkit.Location.class), any(Runnable.class)))
+                .thenAnswer(inv -> {
+                    inv.getArgument(1, Runnable.class).run();
+                    return mock(TaskHandle.class);
+                });
+        java.util.List<Runnable> cancelCallbacks = new java.util.ArrayList<>();
+        org.mockito.Mockito.when(deferredScheduler.runAtEntity(
+                        org.mockito.ArgumentMatchers.eq(dragon), any(Runnable.class), any(Runnable.class)))
+                .thenAnswer(inv -> {
+                    entityTask.set(inv.getArgument(1, Runnable.class));
+                    retiredTask.set(inv.getArgument(2, Runnable.class));
+                    TaskHandle handle = mock(TaskHandle.class);
+                    doAnswer(cb -> {
+                        cancelCallbacks.add(cb.getArgument(0, Runnable.class));
+                        return null;
+                    }).when(handle).onCancel(any(Runnable.class));
+                    return handle;
+                });
+
+        FoliaVanillaProgressionService deferred = new FoliaVanillaProgressionService(
+                configManager,
+                deferredScheduler,
+                name -> world,
+                java.util.logging.Logger.getLogger("test"));
+
+        java.util.concurrent.CompletableFuture<Boolean> future =
+                deferred.synchronizeDragonDefeated("world_the_end", true, false, true);
+        org.junit.jupiter.api.Assertions.assertFalse(future.isDone());
+        verify(dragon, org.mockito.Mockito.never()).remove();
+
+        entityTask.get().run();
+        verify(dragon).remove();
+        assertTrue(future.join());
+
+        // Entity retired before execution -> vanilla dragon is already gone, completes true without removing again
+        java.util.concurrent.CompletableFuture<Boolean> retiredFuture =
+                deferred.synchronizeDragonDefeated("world_the_end", true, false, true);
+        org.junit.jupiter.api.Assertions.assertFalse(retiredFuture.isDone());
+        retiredTask.get().run();
+        assertTrue(retiredFuture.join());
+        verify(dragon, org.mockito.Mockito.times(1)).remove();
+
+        // Cancelling a live removal TaskHandle via onCancel completes the returned future exceptionally
+        java.util.concurrent.CompletableFuture<Boolean> cancelledFuture =
+                deferred.synchronizeDragonDefeated("world_the_end", true, false, true);
+        org.junit.jupiter.api.Assertions.assertFalse(cancelledFuture.isDone());
+        cancelCallbacks.get(cancelCallbacks.size() - 1).run();
+        assertTrue(cancelledFuture.isCompletedExceptionally());
+    }
+
+    @Test
+    void cancelPendingTasks_andHandleOnCancel_failAllPendingFutures() {
+        org.bukkit.World world = mock(org.bukkit.World.class);
+        org.bukkit.boss.DragonBattle battle = mock(org.bukkit.boss.DragonBattle.class);
+        org.mockito.Mockito.when(world.getName()).thenReturn("world_the_end");
+        org.mockito.Mockito.when(world.getEnderDragonBattle()).thenReturn(battle);
+
+        java.util.List<Runnable> cancelCallbacks = new java.util.ArrayList<>();
+        RaidScheduler manualScheduler = mock(RaidScheduler.class);
+        org.mockito.Mockito.when(manualScheduler.runAtRegion(any(org.bukkit.Location.class), any(Runnable.class)))
+                .thenAnswer(inv -> {
+                    TaskHandle handle = mock(TaskHandle.class);
+                    doAnswer(cbInv -> {
+                        cancelCallbacks.add(cbInv.getArgument(0, Runnable.class));
+                        return null;
+                    }).when(handle).onCancel(any(Runnable.class));
+                    return handle;
+                });
+
+        FoliaVanillaProgressionService pending = new FoliaVanillaProgressionService(
+                configManager,
+                manualScheduler,
+                name -> world,
+                java.util.logging.Logger.getLogger("test"));
+
+        java.util.concurrent.CompletableFuture<Boolean> syncFuture =
+                pending.synchronizeDragonDefeated("world_the_end", true, false, false);
+        java.util.concurrent.CompletableFuture<Integer> expandFuture =
+                pending.expandEndGateways("world_the_end", 1, 20);
+        java.util.concurrent.CompletableFuture<Boolean> killedFuture =
+                pending.isVanillaDragonPreviouslyKilled("world_the_end");
+        java.util.concurrent.CompletableFuture<Integer> gatewayFuture =
+                pending.getEndGatewayCount("world_the_end");
+
+        org.junit.jupiter.api.Assertions.assertFalse(
+                syncFuture.isDone() || expandFuture.isDone() || killedFuture.isDone() || gatewayFuture.isDone());
+        pending.cancelPendingTasks();
+        assertTrue(syncFuture.isCompletedExceptionally());
+        assertTrue(expandFuture.isCompletedExceptionally());
+        assertTrue(killedFuture.isCompletedExceptionally());
+        assertTrue(gatewayFuture.isCompletedExceptionally());
+
+        java.util.concurrent.CompletableFuture<Boolean> onCancelFuture =
+                pending.isVanillaDragonPreviouslyKilled("world_the_end");
+        org.junit.jupiter.api.Assertions.assertFalse(onCancelFuture.isDone());
+        cancelCallbacks.get(cancelCallbacks.size() - 1).run();
+        assertTrue(onCancelFuture.isCompletedExceptionally());
     }
 
     @Test
@@ -76,7 +192,7 @@ class FoliaVanillaProgressionServiceTest {
 
         assertTrue(service.synchronizeDragonDefeated(null, true, true, true).join());
         verify(scheduler).runAtRegion(any(Location.class), any(Runnable.class));
-        verify(scheduler).runAtEntity(any(Entity.class), any(Runnable.class));
+        verify(scheduler).runAtEntity(any(Entity.class), any(Runnable.class), any(Runnable.class));
         verify(liveDragon).remove();
         verify(battle).generateEndPortal(true);
         verify(battle).setPreviouslyKilled(true);

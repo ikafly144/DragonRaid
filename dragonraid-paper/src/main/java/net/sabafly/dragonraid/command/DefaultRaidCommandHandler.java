@@ -684,17 +684,16 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                 }
                 PlayerIdentity identity = identityOpt.get();
                 switch (action) {
-                    case LIST -> repository.loadUnlockedContents(identity.uuid())
+                    case LIST -> unlockService.loadPlayer(identity.uuid())
                         .whenComplete((dbUnlocks, loadErr) -> replyOnSenderThread(sender, () -> {
                             if (loadErr != null) {
                                 logger.log(Level.WARNING, "Failed to list unlocks for " + identity.name(), loadErr);
                                 messageService.send(sender, "command.unlock-failed");
                                 return;
                             }
-                            Set<String> combined = new LinkedHashSet<>(unlockService.unlockedContents(identity.uuid()));
-                            if (dbUnlocks != null) {
-                                combined.addAll(dbUnlocks);
-                            }
+                            Set<String> combined = dbUnlocks == null
+                                    ? Set.of()
+                                    : new LinkedHashSet<>(dbUnlocks);
                             if (combined.isEmpty()) {
                                 messageService.send(
                                     sender,
@@ -710,8 +709,7 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                                 );
                             }
                         }));
-                    case GRANT -> unlockService.loadPlayer(identity.uuid())
-                        .thenApply(ignored -> unlockService.unlock(identity.uuid(), identity.name(), normalizedContent))
+                    case GRANT -> unlockService.unlockAsync(identity.uuid(), identity.name(), normalizedContent)
                         .whenComplete((newlyUnlocked, grantErr) -> replyOnSenderThread(sender, () -> {
                             if (grantErr != null) {
                                 logger.log(Level.WARNING, "Failed to grant unlock for " + identity.name(), grantErr);
@@ -725,18 +723,16 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                                 Placeholder.unparsed("content", normalizedContent)
                             );
                         }));
-                    case REVOKE -> repository.revokeContentUnlock(identity.uuid(), normalizedContent)
-                        .whenComplete((dbRemoved, revokeErr) -> replyOnSenderThread(sender, () -> {
+                    case REVOKE -> unlockService.revokeAsync(identity.uuid(), normalizedContent)
+                        .whenComplete((removed, revokeErr) -> replyOnSenderThread(sender, () -> {
                             if (revokeErr != null) {
                                 logger.log(Level.WARNING, "Failed to revoke unlock for " + identity.name(), revokeErr);
                                 messageService.send(sender, "command.unlock-failed");
                                 return;
                             }
-                            boolean memRemoved = unlockService.revoke(identity.uuid(), normalizedContent);
-                            boolean removed = Boolean.TRUE.equals(dbRemoved) || memRemoved;
                             messageService.send(
                                 sender,
-                                removed ? "command.unlock-revoked" : "command.unlock-not-found",
+                                Boolean.TRUE.equals(removed) ? "command.unlock-revoked" : "command.unlock-not-found",
                                 Placeholder.unparsed("player", identity.name()),
                                 Placeholder.unparsed("content", normalizedContent)
                             );
@@ -945,7 +941,8 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
             return;
         }
         String normalizedTableId = tableId.trim();
-        if (rewardService.getTable(normalizedTableId).isEmpty()) {
+        Map<String, RewardTable> tableSnapshot = rewardService.effectiveTablesSnapshot();
+        if (!tableSnapshot.containsKey(normalizedTableId)) {
             messageService.send(
                 sender,
                 "command.reward-unknown",
@@ -990,10 +987,12 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                     .thenCompose(ctx -> {
                         if (action == RewardAction.SIMULATE) {
                             RandomGenerator rng = seed != null ? new Random(seed) : ThreadLocalRandom.current();
-                            RewardBundle evaluated = rewardService.evaluate(normalizedTableId, ctx, rng);
+                            RewardBundle evaluated = rewardService.evaluate(tableSnapshot, normalizedTableId, ctx, rng);
                             return CompletableFuture.completedFuture(RewardCommandOutcome.simulated(evaluated));
                         }
-                        return rewardService.evaluateAndApply(normalizedTableId, ctx, ThreadLocalRandom.current())
+                        RewardBundle evaluated = rewardService.evaluate(
+                                tableSnapshot, normalizedTableId, ctx, ThreadLocalRandom.current());
+                        return rewardService.apply(evaluated, ctx)
                                 .thenApply(RewardCommandOutcome::applied);
                     })
                     .whenComplete((outcome, rewardErr) -> replyOnSenderThread(sender, () -> {

@@ -16,4 +16,8 @@ public interface ContentPackLoader {
     ContentPackLoadReport lastReport();
 
     Path contentsRoot();
+
+    default ContentPackCatalogSnapshot catalogSnapshot() {
+        return ContentPackCatalogSnapshot.empty();
+    }
 }
