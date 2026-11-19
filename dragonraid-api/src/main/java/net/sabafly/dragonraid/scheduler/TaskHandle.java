@@ -18,6 +18,16 @@ public interface TaskHandle {
     boolean isCancelled();
 
     /**
+     * Registers a callback invoked if this task is cancelled before executing (or immediately if
+     * already cancelled/retired).
+     */
+    default void onCancel(Runnable callback) {
+        if (isCancelled() && callback != null) {
+            callback.run();
+        }
+    }
+
+    /**
      * Returns a no-op handle representing a task whose target entity was already retired.
      *
      * @return an already-cancelled no-op {@link TaskHandle}

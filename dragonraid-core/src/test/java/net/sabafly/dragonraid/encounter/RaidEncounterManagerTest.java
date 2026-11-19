@@ -290,6 +290,113 @@ class RaidEncounterManagerTest {
     }
 
     @Test
+    void victory_aggregatesPerPlayerFirstClearExcludingDbFailure_andGatesLegacyFallbackByHookMatch() {
+        assertTrue(configManager.pluginConfig().world().preserveVanillaProgression());
+        lenient().when(scheduler.runAtRegion(any(Location.class), any(Runnable.class))).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+
+        EncounterBlueprint bp = new EncounterBlueprintBuilder("custom_raid")
+                .difficulty(EncounterDifficulty.NORMAL)
+                .displayNameKey("boss.normal-name")
+                .primaryBoss("boss_alpha")
+                .enemy("boss_alpha", e -> e
+                        .displayNameKey("boss.normal-name")
+                        .stats(1200.0, 0.65, false, true, true))
+                .phase("phase-1", p -> p
+                        .displayNameKey("phase.p1.name")
+                        .hpRange(1.0, 0.0)
+                        .loop(10.0))
+                .build();
+
+        org.bukkit.boss.DragonBattle endBattle = mock(org.bukkit.boss.DragonBattle.class);
+        lenient().when(endBattle.getEndPortalLocation()).thenReturn(new Location(endWorld, 0.0, 64.0, 0.0));
+        lenient().when(endWorld.getEnderDragonBattle()).thenReturn(endBattle);
+
+        Player alice = addPlayer("Alice", new Location(endWorld, 100.5, 50.0, 0.5));
+        Player bob = addPlayer("Bob", new Location(endWorld, 101.5, 50.0, 0.5));
+        Player charlie = addPlayer("Charlie", new Location(endWorld, 102.5, 50.0, 0.5));
+        lenient().when(alice.getWorld()).thenReturn(endWorld);
+        lenient().when(bob.getWorld()).thenReturn(endWorld);
+        lenient().when(charlie.getWorld()).thenReturn(endWorld);
+
+        net.sabafly.dragonraid.storage.PlayerDataRepository mockRepo =
+                mock(net.sabafly.dragonraid.storage.PlayerDataRepository.class);
+        lenient().when(mockRepo.recordClear(any(), any(), any(), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        when(mockRepo.recordEncounterClear(eq(alice.getUniqueId()), any(), eq("custom_raid"), anyLong(), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        when(mockRepo.recordEncounterClear(eq(bob.getUniqueId()), any(), eq("custom_raid"), anyLong(), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(false));
+        when(mockRepo.recordEncounterClear(eq(charlie.getUniqueId()), any(), eq("custom_raid"), anyLong(), anyLong()))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("db error")));
+
+        UUID dragonId = UUID.randomUUID();
+        EnderDragon mockDragon = mock(EnderDragon.class);
+        lenient().when(mockDragon.getUniqueId()).thenReturn(dragonId);
+        lenient().when(mockDragon.getWorld()).thenReturn(endWorld);
+        lenient().when(mockDragon.getDragonBattle()).thenReturn(null);
+
+        DragonBossController mockBoss = mock(DragonBossController.class);
+        lenient().when(mockBoss.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(mockBoss.cleanup(anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(mockBoss.hpRatio()).thenReturn(1.0);
+        lenient().when(mockBoss.activeDragon()).thenReturn(mockDragon);
+
+        net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy mockPolicy =
+                mock(net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy.class);
+        when(mockPolicy.hasMatchingClearHook("custom_raid", EncounterDifficulty.NORMAL)).thenReturn(true);
+
+        AtomicReference<net.sabafly.dragonraid.api.event.EncounterResultSnapshot> capturedSnapshot =
+                new AtomicReference<>();
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager,
+                messageService,
+                scheduler,
+                regionService,
+                blockTracker,
+                soulMarkerService,
+                null,
+                mockRepo,
+                mockBoss,
+                null,
+                blueprintRegistry,
+                gimmickActionRegistry,
+                null,
+                Logger.getLogger("VictoryTest"),
+                () -> endWorld,
+                () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id),
+                nowMillis::get);
+        mgr.setVanillaEndProgressionPolicy(mockPolicy);
+        mgr.setEncounterCompletedSink(capturedSnapshot::set);
+
+        assertTrue(mgr.startEncounter(bp, List.of(alice, bob, charlie)));
+        nowMillis.addAndGet(5_000L);
+        mgr.onDragonDefeated(mockDragon);
+
+        net.sabafly.dragonraid.api.event.EncounterResultSnapshot snap = capturedSnapshot.get();
+        assertTrue(snap.firstClear());
+        assertEquals(java.util.Set.of(alice.getUniqueId()), snap.firstClearPlayerIds());
+        assertTrue(snap.isFirstClearFor(alice.getUniqueId()));
+        assertFalse(snap.isFirstClearFor(bob.getUniqueId()));
+        assertFalse(snap.isFirstClearFor(charlie.getUniqueId()));
+        // Clear hook matched -> legacy vanilla fallback is skipped
+        verify(endBattle, never()).spawnNewGateway();
+        verify(endBattle, never()).setPreviouslyKilled(true);
+
+        // Run a second victory where no clear hook matches -> legacy fallback executes
+        when(mockPolicy.hasMatchingClearHook("custom_raid", EncounterDifficulty.NORMAL)).thenReturn(false);
+        assertTrue(mgr.startEncounter(bp, List.of(bob)));
+        nowMillis.addAndGet(5_000L);
+        mgr.onDragonDefeated(mockDragon);
+
+        verify(endBattle, org.mockito.Mockito.times(1)).spawnNewGateway();
+        verify(endBattle, org.mockito.Mockito.times(1)).setPreviouslyKilled(true);
+    }
+
+    @Test
     void scriptContextDamageAndKnockback_ignoreStaleGenerationAfterReset() {
         List<Runnable> queuedEntityTasks = new ArrayList<>();
         RaidScheduler queuedScheduler = mock(RaidScheduler.class);

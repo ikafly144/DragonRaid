@@ -1,5 +1,25 @@
 package net.sabafly.dragonraid.command;
 
+import net.sabafly.dragonraid.api.achievement.AchievementTriggerType;
+import net.sabafly.dragonraid.api.achievement.RaidAchievementService;
+import net.sabafly.dragonraid.api.finder.ContentUnlockService;
+import net.sabafly.dragonraid.api.pack.ContentPackLoadReport;
+import net.sabafly.dragonraid.api.pack.ContentPackLoader;
+import net.sabafly.dragonraid.api.pack.LoadedContentPack;
+import net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy;
+import net.sabafly.dragonraid.api.progression.VanillaProgressionRule;
+import net.sabafly.dragonraid.api.progression.VanillaProgressionService;
+import net.sabafly.dragonraid.api.reward.ContentUnlockGrant;
+import net.sabafly.dragonraid.api.reward.CurrencyGrant;
+import net.sabafly.dragonraid.api.reward.CustomItemGrant;
+import net.sabafly.dragonraid.api.reward.RaidRewardService;
+import net.sabafly.dragonraid.api.reward.RewardApplyResult;
+import net.sabafly.dragonraid.api.reward.RewardBundle;
+import net.sabafly.dragonraid.api.reward.RewardContext;
+import net.sabafly.dragonraid.api.reward.RewardGrant;
+import net.sabafly.dragonraid.api.reward.RewardTable;
+import net.sabafly.dragonraid.api.reward.ScriptHookGrant;
+import net.sabafly.dragonraid.api.reward.VanillaItemGrant;
 import net.sabafly.dragonraid.config.BossConfig;
 import net.sabafly.dragonraid.config.ConfigManager;
 import net.sabafly.dragonraid.config.RegionConfig;
@@ -14,17 +34,23 @@ import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.PlayerRaidStats;
 import net.sabafly.dragonraid.storage.PointTransactionResult;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.random.RandomGenerator;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -47,6 +73,12 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     private final Logger logger;
     private final Function<String, Optional<Player>> onlinePlayerLookup;
     private final @Nullable RaidEncounterManager encounterManager;
+    private final @Nullable ContentPackLoader contentPackLoader;
+    private final @Nullable ContentUnlockService unlockService;
+    private final @Nullable RaidAchievementService achievementService;
+    private final @Nullable VanillaEndProgressionPolicy progressionPolicy;
+    private final @Nullable VanillaProgressionService vanillaProgressionService;
+    private final @Nullable RaidRewardService rewardService;
 
     /**
      * Creates a command handler backed by Bukkit's online player registry.
@@ -130,6 +162,74 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         Function<String, Optional<Player>> onlinePlayerLookup,
         @Nullable RaidEncounterManager encounterManager
     ) {
+        this(
+            configManager,
+            messageService,
+            scheduler,
+            repository,
+            logger,
+            onlinePlayerLookup,
+            encounterManager,
+            null,
+            null,
+            null,
+            null,
+            null
+        );
+    }
+
+    /**
+     * Full constructor including M2 Content Pack, Achievement, Unlock, and Vanilla Progression services.
+     */
+    public DefaultRaidCommandHandler(
+        ConfigManager configManager,
+        MessageService messageService,
+        RaidScheduler scheduler,
+        PlayerDataRepository repository,
+        Logger logger,
+        Function<String, Optional<Player>> onlinePlayerLookup,
+        @Nullable RaidEncounterManager encounterManager,
+        @Nullable ContentPackLoader contentPackLoader,
+        @Nullable ContentUnlockService unlockService,
+        @Nullable RaidAchievementService achievementService,
+        @Nullable VanillaEndProgressionPolicy progressionPolicy,
+        @Nullable VanillaProgressionService vanillaProgressionService
+    ) {
+        this(
+            configManager,
+            messageService,
+            scheduler,
+            repository,
+            logger,
+            onlinePlayerLookup,
+            encounterManager,
+            contentPackLoader,
+            unlockService,
+            achievementService,
+            progressionPolicy,
+            vanillaProgressionService,
+            null
+        );
+    }
+
+    /**
+     * Full constructor including M2 Content Pack, Achievement, Unlock, Vanilla Progression, and Loot-Table Reward services.
+     */
+    public DefaultRaidCommandHandler(
+        ConfigManager configManager,
+        MessageService messageService,
+        RaidScheduler scheduler,
+        PlayerDataRepository repository,
+        Logger logger,
+        Function<String, Optional<Player>> onlinePlayerLookup,
+        @Nullable RaidEncounterManager encounterManager,
+        @Nullable ContentPackLoader contentPackLoader,
+        @Nullable ContentUnlockService unlockService,
+        @Nullable RaidAchievementService achievementService,
+        @Nullable VanillaEndProgressionPolicy progressionPolicy,
+        @Nullable VanillaProgressionService vanillaProgressionService,
+        @Nullable RaidRewardService rewardService
+    ) {
         this.configManager = Objects.requireNonNull(configManager, "configManager");
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
@@ -137,6 +237,12 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.onlinePlayerLookup = Objects.requireNonNull(onlinePlayerLookup, "onlinePlayerLookup");
         this.encounterManager = encounterManager;
+        this.contentPackLoader = contentPackLoader;
+        this.unlockService = unlockService;
+        this.achievementService = achievementService;
+        this.progressionPolicy = progressionPolicy;
+        this.vanillaProgressionService = vanillaProgressionService;
+        this.rewardService = rewardService;
     }
 
     @Override
@@ -474,12 +580,25 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
     @Override
     public void adminReload(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
-        CompletableFuture.runAsync(() -> {
+        CompletableFuture.supplyAsync(() -> {
             configManager.reload();
             messageService.reload();
-        }, scheduler.asyncExecutor()).whenComplete((ignored, error) -> replyOnSenderThread(sender, () -> {
+            return contentPackLoader != null ? contentPackLoader.reload() : null;
+        }, scheduler.asyncExecutor()).whenComplete((report, error) -> replyOnSenderThread(sender, () -> {
             if (error == null) {
-                messageService.send(sender, "command.reload-success");
+                if (report != null) {
+                    messageService.send(
+                        sender,
+                        "command.reload-success-packs",
+                        Placeholder.unparsed("packs", String.valueOf(report.loadedPacks().size())),
+                        Placeholder.unparsed("contents", String.valueOf(report.totalContents())),
+                        Placeholder.unparsed("achievements", String.valueOf(report.totalAchievements())),
+                        Placeholder.unparsed("rewards", String.valueOf(report.totalRewardTables())),
+                        Placeholder.unparsed("rules", String.valueOf(report.totalProgressionRules()))
+                    );
+                } else {
+                    messageService.send(sender, "command.reload-success");
+                }
             } else {
                 Throwable cause = unwrapCause(error);
                 logger.log(Level.WARNING, "Failed to reload DragonRaid configuration", cause);
@@ -487,6 +606,437 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                         Placeholder.unparsed("error", formatErrorDetail(cause)));
             }
         }));
+    }
+
+    @Override
+    public void adminPacks(CommandSender sender) {
+        Objects.requireNonNull(sender, "sender");
+        if (contentPackLoader == null) {
+            messageService.send(sender, "command.packs-empty");
+            return;
+        }
+        ContentPackLoadReport report = contentPackLoader.lastReport();
+        if (report.loadedPacks().isEmpty()) {
+            messageService.send(sender, "command.packs-empty");
+        } else {
+            messageService.send(
+                sender,
+                "command.packs-header",
+                Placeholder.unparsed("count", String.valueOf(report.loadedPacks().size())),
+                Placeholder.unparsed("skipped", String.valueOf(report.skippedPackIds().size()))
+            );
+            for (LoadedContentPack pack : report.loadedPacks()) {
+                messageService.send(
+                    sender,
+                    "command.packs-entry",
+                    Placeholder.unparsed("id", pack.manifest().id()),
+                    Placeholder.unparsed("name", pack.manifest().name()),
+                    Placeholder.unparsed("version", pack.manifest().version()),
+                    Placeholder.unparsed("priority", String.valueOf(pack.manifest().priority())),
+                    Placeholder.unparsed("contents", String.valueOf(pack.contents().size())),
+                    Placeholder.unparsed("achievements", String.valueOf(pack.achievements().size())),
+                    Placeholder.unparsed("rewards", String.valueOf(pack.rewardTables().size())),
+                    Placeholder.unparsed("rules", String.valueOf(pack.progressionRules().size()))
+                );
+            }
+        }
+    }
+
+    @Override
+    public void adminUnlock(
+            CommandSender sender,
+            UnlockAction action,
+            String targetPlayerName,
+            @Nullable String contentId) {
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(action, "action");
+        Objects.requireNonNull(targetPlayerName, "targetPlayerName");
+        if (unlockService == null) {
+            messageService.send(sender, "command.service-unavailable");
+            return;
+        }
+        if (action != UnlockAction.LIST && (contentId == null || contentId.isBlank())) {
+            messageService.send(
+                sender,
+                "command.invalid-usage",
+                Placeholder.unparsed("usage", "/dr admin unlock <grant|revoke|list> <player> [contentId]")
+            );
+            return;
+        }
+        String normalizedContent = contentId == null ? null : contentId.trim();
+
+        resolvePlayerIdentity(targetPlayerName)
+            .whenComplete((identityOpt, error) -> {
+                if (error != null) {
+                    replyOnSenderThread(sender, () -> {
+                        logger.log(Level.WARNING, "Failed to resolve player for unlock command: " + targetPlayerName, error);
+                        messageService.send(sender, "command.unlock-failed");
+                    });
+                    return;
+                }
+                if (identityOpt.isEmpty()) {
+                    replyOnSenderThread(sender, () -> messageService.send(
+                        sender,
+                        "command.player-not-found",
+                        Placeholder.unparsed("target", targetPlayerName)
+                    ));
+                    return;
+                }
+                PlayerIdentity identity = identityOpt.get();
+                switch (action) {
+                    case LIST -> unlockService.loadPlayer(identity.uuid())
+                        .whenComplete((dbUnlocks, loadErr) -> replyOnSenderThread(sender, () -> {
+                            if (loadErr != null) {
+                                logger.log(Level.WARNING, "Failed to list unlocks for " + identity.name(), loadErr);
+                                messageService.send(sender, "command.unlock-failed");
+                                return;
+                            }
+                            Set<String> combined = dbUnlocks == null
+                                    ? Set.of()
+                                    : new LinkedHashSet<>(dbUnlocks);
+                            if (combined.isEmpty()) {
+                                messageService.send(
+                                    sender,
+                                    "command.unlock-list-empty",
+                                    Placeholder.unparsed("player", identity.name())
+                                );
+                            } else {
+                                messageService.send(
+                                    sender,
+                                    "command.unlock-list",
+                                    Placeholder.unparsed("player", identity.name()),
+                                    Placeholder.unparsed("contents", String.join(", ", combined))
+                                );
+                            }
+                        }));
+                    case GRANT -> unlockService.unlockAsync(identity.uuid(), identity.name(), normalizedContent)
+                        .whenComplete((newlyUnlocked, grantErr) -> replyOnSenderThread(sender, () -> {
+                            if (grantErr != null) {
+                                logger.log(Level.WARNING, "Failed to grant unlock for " + identity.name(), grantErr);
+                                messageService.send(sender, "command.unlock-failed");
+                                return;
+                            }
+                            messageService.send(
+                                sender,
+                                Boolean.TRUE.equals(newlyUnlocked) ? "command.unlock-granted" : "command.unlock-already",
+                                Placeholder.unparsed("player", identity.name()),
+                                Placeholder.unparsed("content", normalizedContent)
+                            );
+                        }));
+                    case REVOKE -> unlockService.revokeAsync(identity.uuid(), normalizedContent)
+                        .whenComplete((removed, revokeErr) -> replyOnSenderThread(sender, () -> {
+                            if (revokeErr != null) {
+                                logger.log(Level.WARNING, "Failed to revoke unlock for " + identity.name(), revokeErr);
+                                messageService.send(sender, "command.unlock-failed");
+                                return;
+                            }
+                            messageService.send(
+                                sender,
+                                Boolean.TRUE.equals(removed) ? "command.unlock-revoked" : "command.unlock-not-found",
+                                Placeholder.unparsed("player", identity.name()),
+                                Placeholder.unparsed("content", normalizedContent)
+                            );
+                        }));
+                }
+            });
+    }
+
+    @Override
+    public void adminAchievement(
+            CommandSender sender,
+            AchievementAction action,
+            String targetPlayerName,
+            @Nullable String achievementId) {
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(action, "action");
+        Objects.requireNonNull(targetPlayerName, "targetPlayerName");
+        if (achievementService == null) {
+            messageService.send(sender, "command.service-unavailable");
+            return;
+        }
+        if (action == AchievementAction.GRANT) {
+            if (achievementId == null || achievementId.isBlank()) {
+                messageService.send(
+                    sender,
+                    "command.invalid-usage",
+                    Placeholder.unparsed("usage", "/dr admin achievement grant <player> <achievementId>")
+                );
+                return;
+            }
+            if (achievementService.getDefinition(achievementId.trim()).isEmpty()) {
+                messageService.send(
+                    sender,
+                    "command.achievement-unknown",
+                    Placeholder.unparsed("achievement", achievementId.trim())
+                );
+                return;
+            }
+        }
+        String normalizedAchievement = achievementId == null ? null : achievementId.trim();
+
+        resolvePlayerIdentity(targetPlayerName)
+            .whenComplete((identityOpt, error) -> {
+                if (error != null) {
+                    replyOnSenderThread(sender, () -> {
+                        logger.log(Level.WARNING, "Failed to resolve player for achievement command: " + targetPlayerName, error);
+                        messageService.send(sender, "command.achievement-failed");
+                    });
+                    return;
+                }
+                if (identityOpt.isEmpty()) {
+                    replyOnSenderThread(sender, () -> messageService.send(
+                        sender,
+                        "command.player-not-found",
+                        Placeholder.unparsed("target", targetPlayerName)
+                    ));
+                    return;
+                }
+                PlayerIdentity identity = identityOpt.get();
+                switch (action) {
+                    case LIST -> repository.loadAchievements(identity.uuid())
+                        .whenComplete((dbAch, loadErr) -> replyOnSenderThread(sender, () -> {
+                            if (loadErr != null) {
+                                logger.log(Level.WARNING, "Failed to list achievements for " + identity.name(), loadErr);
+                                messageService.send(sender, "command.achievement-failed");
+                                return;
+                            }
+                            Set<String> combined = new LinkedHashSet<>(achievementService.unlockedFor(identity.uuid()));
+                            if (dbAch != null) {
+                                combined.addAll(dbAch);
+                            }
+                            if (combined.isEmpty()) {
+                                messageService.send(
+                                    sender,
+                                    "command.achievement-list-empty",
+                                    Placeholder.unparsed("player", identity.name())
+                                );
+                            } else {
+                                messageService.send(
+                                    sender,
+                                    "command.achievement-list",
+                                    Placeholder.unparsed("player", identity.name()),
+                                    Placeholder.unparsed("achievements", String.join(", ", combined))
+                                );
+                            }
+                        }));
+                    case GRANT -> achievementService.loadPlayer(identity.uuid())
+                        .thenCompose(ignored -> achievementService.grantAchievement(
+                            identity.uuid(),
+                            identity.name(),
+                            normalizedAchievement,
+                            AchievementTriggerType.CUSTOM_SCRIPT,
+                            false,
+                            Map.of("grantedBy", sender.getName() != null ? sender.getName() : "CONSOLE")
+                        ))
+                        .whenComplete((unlockedOpt, grantErr) -> replyOnSenderThread(sender, () -> {
+                            if (grantErr != null) {
+                                logger.log(Level.WARNING, "Failed to grant achievement for " + identity.name(), grantErr);
+                                messageService.send(sender, "command.achievement-failed");
+                                return;
+                            }
+                            messageService.send(
+                                sender,
+                                unlockedOpt.isPresent() ? "command.achievement-granted" : "command.achievement-already",
+                                Placeholder.unparsed("player", identity.name()),
+                                Placeholder.unparsed("achievement", normalizedAchievement)
+                            );
+                        }));
+                }
+            });
+    }
+
+    @Override
+    public void adminProgressionStatus(CommandSender sender) {
+        Objects.requireNonNull(sender, "sender");
+        CompletableFuture<Boolean> killedFuture = vanillaProgressionService != null
+                ? vanillaProgressionService.isVanillaDragonPreviouslyKilled(null)
+                : CompletableFuture.completedFuture(false);
+        CompletableFuture<Integer> gatewaysFuture = vanillaProgressionService != null
+                ? vanillaProgressionService.getEndGatewayCount(null)
+                : CompletableFuture.completedFuture(0);
+
+        killedFuture.thenCombine(gatewaysFuture, (killed, gateways) -> Map.entry(killed, gateways))
+            .whenComplete((vanillaState, error) -> replyOnSenderThread(sender, () -> {
+                if (error != null) {
+                    logger.log(Level.WARNING, "Failed to read vanilla progression status", error);
+                    messageService.send(sender, "command.progression-failed");
+                    return;
+                }
+                int ruleCount = progressionPolicy != null ? progressionPolicy.rules().size() : 0;
+                messageService.send(
+                    sender,
+                    "command.progression-header",
+                    Placeholder.unparsed("rules", String.valueOf(ruleCount)),
+                    Placeholder.unparsed("killed", String.valueOf(vanillaState.getKey())),
+                    Placeholder.unparsed("gateways", String.valueOf(vanillaState.getValue()))
+                );
+                if (progressionPolicy != null) {
+                    for (VanillaProgressionRule rule : progressionPolicy.rules()) {
+                        String gateSummary = rule.entryGate() != null
+                                ? rule.entryGate().mode().name() + "(" + rule.entryGate().targetId() + ")"
+                                : "NONE";
+                        boolean satisfied = rule.entryGate() != null
+                                && !rule.entryGate().targetId().isBlank()
+                                && progressionPolicy.isServerMilestoneAchieved(rule.entryGate().targetId());
+                        messageService.send(
+                            sender,
+                            "command.progression-rule",
+                            Placeholder.unparsed("id", rule.id()),
+                            Placeholder.unparsed("priority", String.valueOf(rule.priority())),
+                            Placeholder.unparsed("gate", gateSummary),
+                            Placeholder.unparsed("milestone_achieved", String.valueOf(satisfied)),
+                            Placeholder.unparsed("hooks", String.valueOf(rule.clearHooks().size()))
+                        );
+                    }
+                }
+            }));
+    }
+
+    @Override
+    public void adminReward(
+            CommandSender sender,
+            RewardAction action,
+            @Nullable String tableId,
+            @Nullable String targetPlayerName,
+            @Nullable Long seed) {
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(action, "action");
+        if (rewardService == null) {
+            messageService.send(sender, "command.service-unavailable");
+            return;
+        }
+        if (action == RewardAction.LIST) {
+            var tables = rewardService.tables();
+            if (tables.isEmpty()) {
+                messageService.send(sender, "command.reward-list-empty");
+                return;
+            }
+            messageService.send(
+                sender,
+                "command.reward-list-header",
+                Placeholder.unparsed("count", String.valueOf(tables.size())),
+                Placeholder.unparsed("extensions", String.valueOf(rewardService.extensions().size()))
+            );
+            for (RewardTable table : tables) {
+                long extCount = rewardService.extensions().stream()
+                        .filter(ext -> ext.targetTableId().equals(table.id()))
+                        .count();
+                messageService.send(
+                    sender,
+                    "command.reward-list-entry",
+                    Placeholder.unparsed("id", table.id()),
+                    Placeholder.unparsed("pools", String.valueOf(table.pools().size())),
+                    Placeholder.unparsed("extensions", String.valueOf(extCount))
+                );
+            }
+            return;
+        }
+
+        if (tableId == null || tableId.isBlank() || targetPlayerName == null || targetPlayerName.isBlank()) {
+            messageService.send(
+                sender,
+                "command.invalid-usage",
+                Placeholder.unparsed("usage", "/dr admin reward <list|simulate|grant> <tableId> <player> [seed]")
+            );
+            return;
+        }
+        String normalizedTableId = tableId.trim();
+        Map<String, RewardTable> tableSnapshot = rewardService.effectiveTablesSnapshot();
+        if (!tableSnapshot.containsKey(normalizedTableId)) {
+            messageService.send(
+                sender,
+                "command.reward-unknown",
+                Placeholder.unparsed("table_id", normalizedTableId)
+            );
+            return;
+        }
+
+        resolvePlayerIdentity(targetPlayerName)
+            .whenComplete((identityOpt, error) -> {
+                if (error != null) {
+                    replyOnSenderThread(sender, () -> {
+                        logger.log(Level.WARNING, "Failed to resolve player for reward command: " + targetPlayerName, error);
+                        messageService.send(sender, "command.reward-failed");
+                    });
+                    return;
+                }
+                if (identityOpt.isEmpty()) {
+                    replyOnSenderThread(sender, () -> messageService.send(
+                        sender,
+                        "command.player-not-found",
+                        Placeholder.unparsed("target", targetPlayerName)
+                    ));
+                    return;
+                }
+                PlayerIdentity identity = identityOpt.get();
+                UUID playerId = identity.uuid();
+
+                CompletableFuture<Set<String>> claimedFuture = repository.loadClaimedRewards(playerId);
+                CompletableFuture<Set<String>> achFuture = repository.loadAchievements(playerId);
+                CompletableFuture<Set<String>> unlockFuture = repository.loadUnlockedContents(playerId);
+
+                CompletableFuture.allOf(claimedFuture, achFuture, unlockFuture)
+                    .thenApply(ignored -> RewardContext.builder(playerId)
+                            .playerName(identity.name())
+                            .sourceType(action == RewardAction.SIMULATE ? "ADMIN_SIMULATE" : "ADMIN_GRANT")
+                            .sourceId(normalizedTableId)
+                            .claimedKeys(claimedFuture.join())
+                            .unlockedAchievements(achFuture.join())
+                            .unlockedContents(unlockFuture.join())
+                            .build())
+                    .thenCompose(ctx -> {
+                        if (action == RewardAction.SIMULATE) {
+                            RandomGenerator rng = seed != null ? new Random(seed) : ThreadLocalRandom.current();
+                            RewardBundle evaluated = rewardService.evaluate(tableSnapshot, normalizedTableId, ctx, rng);
+                            return CompletableFuture.completedFuture(RewardCommandOutcome.simulated(evaluated));
+                        }
+                        RewardBundle evaluated = rewardService.evaluate(
+                                tableSnapshot, normalizedTableId, ctx, ThreadLocalRandom.current());
+                        return rewardService.apply(evaluated, ctx)
+                                .thenApply(RewardCommandOutcome::applied);
+                    })
+                    .whenComplete((outcome, rewardErr) -> replyOnSenderThread(sender, () -> {
+                        if (rewardErr != null) {
+                            logger.log(Level.WARNING, "Failed reward command for " + identity.name(), rewardErr);
+                            messageService.send(sender, "command.reward-failed");
+                            return;
+                        }
+                        if (action == RewardAction.SIMULATE) {
+                            RewardBundle bundle = outcome.bundle();
+                            if (bundle.isEmpty()) {
+                                messageService.send(
+                                    sender,
+                                    "command.reward-simulate-empty",
+                                    Placeholder.unparsed("table_id", normalizedTableId),
+                                    Placeholder.unparsed("player", identity.name())
+                                );
+                            } else {
+                                messageService.send(
+                                    sender,
+                                    "command.reward-simulate-result",
+                                    Placeholder.unparsed("table_id", normalizedTableId),
+                                    Placeholder.unparsed("player", identity.name()),
+                                    Placeholder.unparsed("seed", seed != null ? seed.toString() : "random"),
+                                    Placeholder.unparsed("grants", formatGrantSummary(bundle.grants())),
+                                    Placeholder.unparsed("claims", bundle.claimKeys().isEmpty()
+                                            ? "none"
+                                            : String.join(", ", bundle.claimKeys()))
+                                );
+                            }
+                        } else {
+                            RewardApplyResult result = outcome.applyResult();
+                            messageService.send(
+                                sender,
+                                "command.reward-grant-result",
+                                Placeholder.unparsed("table_id", normalizedTableId),
+                                Placeholder.unparsed("player", identity.name()),
+                                Placeholder.unparsed("applied", String.valueOf(result.appliedGrants().size())),
+                                Placeholder.unparsed("skipped_claims", String.valueOf(result.skippedClaimKeys().size())),
+                                Placeholder.unparsed("grants", formatGrantSummary(result.appliedGrants()))
+                            );
+                        }
+                    }));
+            });
     }
 
     @Override
@@ -818,6 +1368,37 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
         }
         sb.append(')');
         return sb.toString();
+    }
+
+    private static String formatGrantSummary(List<RewardGrant> grants) {
+        if (grants == null || grants.isEmpty()) {
+            return "none";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < grants.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            RewardGrant grant = grants.get(i);
+            switch (grant) {
+                case CurrencyGrant cg -> sb.append("CURRENCY:").append(cg.currencyId()).append(" x").append(cg.amount());
+                case VanillaItemGrant vg -> sb.append("VANILLA_ITEM:").append(vg.materialName()).append(" x").append(vg.amount());
+                case CustomItemGrant ig -> sb.append("CUSTOM_ITEM:").append(ig.customItemId()).append(" x").append(ig.amount());
+                case ContentUnlockGrant ug -> sb.append("UNLOCK_CONTENT:").append(ug.contentId());
+                case ScriptHookGrant sg -> sb.append("SCRIPT_HOOK:").append(sg.hookId());
+            }
+        }
+        return sb.toString();
+    }
+
+    private record RewardCommandOutcome(@Nullable RewardBundle bundle, @Nullable RewardApplyResult applyResult) {
+        static RewardCommandOutcome simulated(RewardBundle bundle) {
+            return new RewardCommandOutcome(bundle, null);
+        }
+
+        static RewardCommandOutcome applied(RewardApplyResult applyResult) {
+            return new RewardCommandOutcome(null, applyResult);
+        }
     }
 
     private record PlayerIdentity(UUID uuid, String name, boolean online) {
