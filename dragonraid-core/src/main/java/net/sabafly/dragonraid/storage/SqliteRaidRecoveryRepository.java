@@ -1,12 +1,17 @@
 package net.sabafly.dragonraid.storage;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -18,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import net.sabafly.dragonraid.protection.BlockPosKey;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * SQLite-backed {@link RaidRecoveryRepository} sharing the plugin's {@link SqliteDatabase}.
@@ -71,12 +77,50 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
                         invisible INTEGER NOT NULL,
                         collidable INTEGER NOT NULL,
                         invulnerable INTEGER NOT NULL,
-                        teleport_to_safe_zone INTEGER NOT NULL
+                        teleport_to_safe_zone INTEGER NOT NULL,
+                        restore_flags INTEGER NOT NULL DEFAULT 1,
+                        return_world_id TEXT,
+                        return_x REAL,
+                        return_y REAL,
+                        return_z REAL,
+                        return_yaw REAL,
+                        return_pitch REAL
                     )
                     """);
             }
+            ensurePendingPlayerCleanupColumns(conn);
             return null;
         });
+    }
+
+    private static void ensurePendingPlayerCleanupColumns(Connection conn) throws SQLException {
+        Set<String> columns = new HashSet<>();
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(pending_player_cleanups)")) {
+            while (rs.next()) {
+                String name = rs.getString("name");
+                if (name != null) {
+                    columns.add(name.toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        Map<String, String> requiredColumns = Map.of(
+                "restore_flags", "INTEGER NOT NULL DEFAULT 1",
+                "return_world_id", "TEXT",
+                "return_x", "REAL",
+                "return_y", "REAL",
+                "return_z", "REAL",
+                "return_yaw", "REAL",
+                "return_pitch", "REAL"
+        );
+        try (Statement alter = conn.createStatement()) {
+            for (Map.Entry<String, String> entry : requiredColumns.entrySet()) {
+                if (!columns.contains(entry.getKey())) {
+                    alter.execute("ALTER TABLE pending_player_cleanups ADD COLUMN "
+                            + entry.getKey() + " " + entry.getValue());
+                }
+            }
+        }
     }
 
     @Override
@@ -177,7 +221,8 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
     public Map<UUID, PendingPlayerCleanup> loadPendingPlayerCleanupsSync() {
         return database.withReadConnection(conn -> {
             String sql = """
-                SELECT uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone
+                SELECT uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone,
+                       restore_flags, return_world_id, return_x, return_y, return_z, return_yaw, return_pitch
                 FROM pending_player_cleanups
                 """;
             Map<UUID, PendingPlayerCleanup> map = new LinkedHashMap<>();
@@ -185,13 +230,34 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
                  ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     UUID id = UUID.fromString(rs.getString("uuid"));
+                    UUID returnWorldId = readNullableUuid(rs, "return_world_id");
+                    Double returnX = readNullableDouble(rs, "return_x");
+                    Double returnY = readNullableDouble(rs, "return_y");
+                    Double returnZ = readNullableDouble(rs, "return_z");
+                    Float returnYaw = readNullableFloat(rs, "return_yaw");
+                    Float returnPitch = readNullableFloat(rs, "return_pitch");
+                    if (returnWorldId == null || returnX == null || returnY == null || returnZ == null) {
+                        returnWorldId = null;
+                        returnX = null;
+                        returnY = null;
+                        returnZ = null;
+                        returnYaw = null;
+                        returnPitch = null;
+                    }
                     map.put(id, new PendingPlayerCleanup(
                             id,
                             rs.getString("game_mode"),
                             rs.getInt("invisible") != 0,
                             rs.getInt("collidable") != 0,
                             rs.getInt("invulnerable") != 0,
-                            rs.getInt("teleport_to_safe_zone") != 0
+                            rs.getInt("teleport_to_safe_zone") != 0,
+                            rs.getInt("restore_flags") != 0,
+                            returnWorldId,
+                            returnX,
+                            returnY,
+                            returnZ,
+                            returnYaw,
+                            returnPitch
                     ));
                 }
             }
@@ -205,22 +271,25 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
         return enqueuePlayerCleanupOp(cleanup.playerId(), (conn, tx) -> {
             String sql = """
                 INSERT INTO pending_player_cleanups (
-                    uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone,
+                    restore_flags, return_world_id, return_x, return_y, return_z, return_yaw, return_pitch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(uuid) DO UPDATE SET
                     game_mode = excluded.game_mode,
                     invisible = excluded.invisible,
                     collidable = excluded.collidable,
                     invulnerable = excluded.invulnerable,
-                    teleport_to_safe_zone = excluded.teleport_to_safe_zone
+                    teleport_to_safe_zone = excluded.teleport_to_safe_zone,
+                    restore_flags = excluded.restore_flags,
+                    return_world_id = excluded.return_world_id,
+                    return_x = excluded.return_x,
+                    return_y = excluded.return_y,
+                    return_z = excluded.return_z,
+                    return_yaw = excluded.return_yaw,
+                    return_pitch = excluded.return_pitch
                 """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, cleanup.playerId().toString());
-                ps.setString(2, cleanup.gameModeName());
-                ps.setInt(3, cleanup.invisible() ? 1 : 0);
-                ps.setInt(4, cleanup.collidable() ? 1 : 0);
-                ps.setInt(5, cleanup.invulnerable() ? 1 : 0);
-                ps.setInt(6, cleanup.teleportToSafeZone() ? 1 : 0);
+                bindPendingPlayerCleanup(ps, cleanup);
                 ps.executeUpdate();
             }
             return null;
@@ -240,17 +309,13 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
             if (!copy.isEmpty()) {
                 String sql = """
                     INSERT INTO pending_player_cleanups (
-                        uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone,
+                        restore_flags, return_world_id, return_x, return_y, return_z, return_yaw, return_pitch
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """;
                 try (PreparedStatement ps = conn.prepareStatement(sql)) {
                     for (PendingPlayerCleanup cleanup : copy) {
-                        ps.setString(1, cleanup.playerId().toString());
-                        ps.setString(2, cleanup.gameModeName());
-                        ps.setInt(3, cleanup.invisible() ? 1 : 0);
-                        ps.setInt(4, cleanup.collidable() ? 1 : 0);
-                        ps.setInt(5, cleanup.invulnerable() ? 1 : 0);
-                        ps.setInt(6, cleanup.teleportToSafeZone() ? 1 : 0);
+                        bindPendingPlayerCleanup(ps, cleanup);
                         ps.addBatch();
                     }
                     ps.executeBatch();
@@ -258,6 +323,68 @@ public final class SqliteRaidRecoveryRepository implements RaidRecoveryRepositor
             }
             return null;
         });
+    }
+
+    private static void bindPendingPlayerCleanup(PreparedStatement ps, PendingPlayerCleanup cleanup) throws SQLException {
+        ps.setString(1, cleanup.playerId().toString());
+        ps.setString(2, cleanup.gameModeName());
+        ps.setInt(3, cleanup.invisible() ? 1 : 0);
+        ps.setInt(4, cleanup.collidable() ? 1 : 0);
+        ps.setInt(5, cleanup.invulnerable() ? 1 : 0);
+        ps.setInt(6, cleanup.teleportToSafeZone() ? 1 : 0);
+        ps.setInt(7, cleanup.restoreFlags() ? 1 : 0);
+        bindNullableUuid(ps, 8, cleanup.returnWorldId());
+        bindNullableDouble(ps, 9, cleanup.returnX());
+        bindNullableDouble(ps, 10, cleanup.returnY());
+        bindNullableDouble(ps, 11, cleanup.returnZ());
+        bindNullableFloat(ps, 12, cleanup.returnYaw());
+        bindNullableFloat(ps, 13, cleanup.returnPitch());
+    }
+
+    private static void bindNullableUuid(PreparedStatement ps, int index, @Nullable UUID value) throws SQLException {
+        if (value == null) {
+            ps.setNull(index, Types.VARCHAR);
+        } else {
+            ps.setString(index, value.toString());
+        }
+    }
+
+    private static void bindNullableDouble(PreparedStatement ps, int index, @Nullable Double value) throws SQLException {
+        if (value == null) {
+            ps.setNull(index, Types.REAL);
+        } else {
+            ps.setDouble(index, value);
+        }
+    }
+
+    private static void bindNullableFloat(PreparedStatement ps, int index, @Nullable Float value) throws SQLException {
+        if (value == null) {
+            ps.setNull(index, Types.REAL);
+        } else {
+            ps.setFloat(index, value);
+        }
+    }
+
+    private static @Nullable UUID readNullableUuid(ResultSet rs, String column) throws SQLException {
+        String raw = rs.getString(column);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
+    }
+
+    private static @Nullable Double readNullableDouble(ResultSet rs, String column) throws SQLException {
+        Object raw = rs.getObject(column);
+        return raw instanceof Number n ? n.doubleValue() : null;
+    }
+
+    private static @Nullable Float readNullableFloat(ResultSet rs, String column) throws SQLException {
+        Object raw = rs.getObject(column);
+        return raw instanceof Number n ? n.floatValue() : null;
     }
 
     @Override

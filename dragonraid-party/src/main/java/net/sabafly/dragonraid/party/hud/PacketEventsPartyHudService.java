@@ -88,6 +88,7 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
     private final Map<UUID, Boolean> hudPreferenceByPlayer = new ConcurrentHashMap<>();
     private final Map<UUID, VitalsSample> sampledVitals = new ConcurrentHashMap<>();
     private final Map<UUID, RenderedViewerState> renderedStates = new ConcurrentHashMap<>();
+    private final Set<UUID> pendingRemovals = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Object> viewerLocks = new ConcurrentHashMap<>();
     private volatile boolean shutdown;
 
@@ -196,16 +197,20 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         Object vLock = viewerLocks.computeIfAbsent(viewerId, ignored -> new Object());
         synchronized (vLock) {
             RenderedViewerState previous = renderedStates.remove(viewerId);
-            if (previous == null) {
+            boolean hadPendingRemoval = pendingRemovals.contains(viewerId);
+            if (previous == null && !hadPendingRemoval) {
                 return;
             }
             Player viewer = playerLookup.apply(viewerId);
-            if (viewer != null && viewer.isOnline()) {
-                try {
-                    transport.removeObjective(viewer, OBJECTIVE_NAME);
-                } catch (RuntimeException ex) {
-                    logger.log(Level.FINE, "Failed to remove party HUD objective for " + viewerId, ex);
-                }
+            if (viewer == null || !viewer.isOnline()) {
+                pendingRemovals.remove(viewerId);
+                return;
+            }
+            boolean removed = tryRemoveObjective(viewer);
+            if (removed) {
+                pendingRemovals.remove(viewerId);
+            } else {
+                pendingRemovals.add(viewerId);
             }
         }
     }
@@ -215,9 +220,10 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         if (shutdown) {
             return;
         }
-        Set<UUID> renderedCopy = Set.copyOf(renderedStates.keySet());
+        Set<UUID> trackedViewers = new HashSet<>(renderedStates.keySet());
+        trackedViewers.addAll(pendingRemovals);
         Set<UUID> activePartyIds = new HashSet<>();
-        for (UUID viewerId : renderedCopy) {
+        for (UUID viewerId : trackedViewers) {
             Optional<RaidParty> partyOpt = partyService.partyOf(viewerId);
             if (partyOpt.isEmpty() || !isHudEnabled(viewerId)) {
                 clearViewer(viewerId);
@@ -282,10 +288,13 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
     @Override
     public void shutdown() {
         shutdown = true;
-        for (UUID viewerId : List.copyOf(renderedStates.keySet())) {
+        Set<UUID> allTracked = new HashSet<>(renderedStates.keySet());
+        allTracked.addAll(pendingRemovals);
+        for (UUID viewerId : allTracked) {
             clearViewer(viewerId);
         }
         renderedStates.clear();
+        pendingRemovals.clear();
         sampledVitals.clear();
         viewerLocks.clear();
     }
@@ -361,13 +370,24 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
 
         Object vLock = viewerLocks.computeIfAbsent(viewerId, ignored -> new Object());
         synchronized (vLock) {
-            if (shutdown || !isHudEnabled(viewerId)) {
+            if (shutdown) {
+                return;
+            }
+            if (!isHudEnabled(viewerId)) {
+                clearViewer(viewerId);
                 return;
             }
             RenderedViewerState prev = renderedStates.get(viewerId);
             boolean sent = true;
             try {
                 if (prev == null) {
+                    if (pendingRemovals.contains(viewerId)) {
+                        if (!tryRemoveObjective(viewer)) {
+                            pendingRemovals.add(viewerId);
+                            return;
+                        }
+                        pendingRemovals.remove(viewerId);
+                    }
                     sent = transport.createObjective(viewer, OBJECTIVE_NAME, nextTitle)
                             && transport.displaySidebar(viewer, SIDEBAR_POSITION, OBJECTIVE_NAME);
                     for (int i = 0; i < nextLines.size() && sent; i++) {
@@ -375,6 +395,7 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
                         sent = transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
                     }
                     if (sent) {
+                        pendingRemovals.remove(viewerId);
                         renderedStates.put(viewerId, new RenderedViewerState(nextTitle, nextLines));
                     } else {
                         invalidateUnsyncedHud(viewerId, viewer);
@@ -420,10 +441,19 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
 
     private void invalidateUnsyncedHud(UUID viewerId, Player viewer) {
         renderedStates.remove(viewerId);
+        if (tryRemoveObjective(viewer)) {
+            pendingRemovals.remove(viewerId);
+        } else {
+            pendingRemovals.add(viewerId);
+        }
+    }
+
+    private boolean tryRemoveObjective(Player viewer) {
         try {
-            transport.removeObjective(viewer, OBJECTIVE_NAME);
-        } catch (RuntimeException ignored) {
-            // Best-effort cleanup so partial scoreboard state does not linger.
+            return transport.removeObjective(viewer, OBJECTIVE_NAME);
+        } catch (RuntimeException ex) {
+            logger.log(Level.FINE, "Failed to remove party HUD objective for " + viewer.getUniqueId(), ex);
+            return false;
         }
     }
 

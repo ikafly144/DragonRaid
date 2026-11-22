@@ -305,6 +305,7 @@ finder:
   leave-not-in-duty: "<prefix><yellow>現在レイドまたはコンテンツインスタンスに参加していません。</yellow>"
   leave-ending-in-progress: "<prefix><yellow>現在コンテンツの終了処理を実行中です。完了まで少々お待ちください。</yellow>"
   leave-success: "<prefix><aqua>コンテンツから退出し、元の場所へ帰還しました。</aqua>"
+  leave-teleport-failed: "<prefix><red>元の場所への帰還テレポートに失敗しました。帰還先は保持されています。<yellow><click:run_command:'/cf leave'>[/cf leave]</click></yellow> で再試行してください。</red>"
   gui:
     title: "<dark_purple><bold>コンテンツファインダー</bold></dark_purple>"
     empty-title: "<red>挑戦可能なコンテンツがありません</red>"

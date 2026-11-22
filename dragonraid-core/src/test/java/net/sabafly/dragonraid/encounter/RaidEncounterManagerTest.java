@@ -1626,11 +1626,20 @@ class RaidEncounterManagerTest {
         assertTrue(instActive.get());
 
         // Wipe enters standby -> adminStart must reject instead of clobbering standbySession
+        Location instSafe = new Location(instWorld, 0.5, 65.0, 24.5);
+        lenient().when(regionService.isInArena(instSafe)).thenReturn(true);
+        lenient().when(regionService.isInSafeZone(instSafe)).thenReturn(true);
         when(alice.getWorld()).thenReturn(instWorld);
+        when(alice.getLocation()).thenReturn(instSafe);
         instManager.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
         capturedDelayedTasks.getLast().run();
         assertTrue(instManager.isInWipeStandby(alice.getUniqueId()));
+        net.kyori.adventure.text.Component expectedRunningMsg = messageService.render(alice, "command.already-running");
+        net.kyori.adventure.text.Component noPlayersMsg = messageService.render(alice, "command.start-no-players");
+        org.mockito.Mockito.clearInvocations(alice);
         instManager.adminStart(alice, BossConfig.Difficulty.NORMAL);
+        verify(alice).sendMessage(expectedRunningMsg);
+        verify(alice, never()).sendMessage(noPlayersMsg);
         assertEquals(RaidState.IDLE, instManager.state());
         assertTrue(instManager.isInWipeStandby(alice.getUniqueId()));
     }
@@ -1768,6 +1777,313 @@ class RaidEncounterManagerTest {
         assertEquals(retA, rp.preEntryReturnLocation());
         rp.setPreEntryReturnLocation(null);
         assertEquals(null, rp.preEntryReturnLocation());
+    }
+
+    @Test
+    void soloWipeFinalDisconnectBeforeStandbyPublicationDestroysInstanceWithoutPublishingStandby() {
+        World overworld = mock(World.class);
+        lenient().when(overworld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(overworld.getName()).thenReturn("world");
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_quit_race");
+        lenient().when(regionService.isRaidWorld(instWorld)).thenReturn(true);
+        lenient().when(regionService.safeZoneSpawnLocation(instWorld))
+                .thenReturn(new Location(instWorld, 0.5, 65.0, 24.5));
+
+        net.sabafly.dragonraid.instance.RaidInstanceManager instanceMgr =
+                mock(net.sabafly.dragonraid.instance.RaidInstanceManager.class);
+        net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance inst =
+                new net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance(
+                        instWorld, new Location(instWorld, 0.0, 64.0, 0.0), 40.0, List.of());
+        AtomicBoolean instActive = new AtomicBoolean(false);
+        lenient().when(instanceMgr.getOrCreateInstance()).thenAnswer(inv -> {
+            instActive.set(true);
+            return CompletableFuture.completedFuture(inst);
+        });
+        lenient().when(instanceMgr.activeInstance()).thenAnswer(inv -> instActive.get() ? inst : null);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenAnswer(inv -> instActive.get() ? instWorld : inv.getArgument(0));
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.destroyInstance(any(), any())).thenAnswer(inv -> {
+            instActive.set(false);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        DragonBossController bossCtrl = mock(DragonBossController.class);
+        lenient().when(bossCtrl.bindOrSpawn(any(), any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Runnable> onCleanupHook = new AtomicReference<>();
+        lenient().when(bossCtrl.cleanup(anyBoolean())).thenAnswer(inv -> {
+            Runnable hook = onCleanupHook.getAndSet(null);
+            if (hook != null) {
+                hook.run();
+            }
+            return CompletableFuture.completedFuture(null);
+        });
+
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager, messageService, scheduler, regionService, blockTracker, soulMarkerService,
+                null, null, bossCtrl, null, blueprintRegistry, gimmickActionRegistry, instanceMgr,
+                Logger.getLogger("QuitWipeRaceTest"), () -> endWorld, () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id), nowMillis::get);
+
+        Location retA = new Location(overworld, 15.0, 64.0, 25.0);
+        Player alice = addPlayer("Alice", retA);
+        when(alice.getWorld()).thenReturn(overworld);
+        EncounterBlueprint bp = sampleBlueprint("dragon_normal", EncounterDifficulty.NORMAL);
+
+        assertTrue(mgr.startEncounter(bp, List.of(alice), Map.of(alice.getUniqueId(), retA)));
+        when(alice.getWorld()).thenReturn(instWorld);
+
+        // Simulate Paper PlayerQuitEvent during finishWipe before standbySession is published (while isOnline is still true!)
+        onCleanupHook.set(() -> mgr.onPlayerQuit(alice));
+        mgr.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        assertEquals(RaidState.WIPING, mgr.state());
+        capturedDelayedTasks.getLast().run();
+
+        assertFalse(mgr.isInWipeStandby(alice.getUniqueId()));
+        assertFalse(mgr.hasActiveDutySession());
+        assertFalse(instActive.get());
+        verify(instanceMgr).destroyInstance(eq(inst), any());
+    }
+
+    @Test
+    void failedWithdrawalTeleportPreservesFlagsSeparationRetryAndSqliteRestartRecovery() {
+        World overworld = mock(World.class);
+        UUID overworldId = UUID.randomUUID();
+        lenient().when(overworld.getUID()).thenReturn(overworldId);
+        lenient().when(overworld.getName()).thenReturn("world");
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_tp_retry");
+        lenient().when(regionService.isRaidWorld(instWorld)).thenReturn(true);
+        lenient().when(regionService.safeZoneSpawnLocation(instWorld))
+                .thenReturn(new Location(instWorld, 0.5, 65.0, 24.5));
+
+        net.sabafly.dragonraid.instance.RaidInstanceManager instanceMgr =
+                mock(net.sabafly.dragonraid.instance.RaidInstanceManager.class);
+        net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance inst =
+                new net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance(
+                        instWorld, new Location(instWorld, 0.0, 64.0, 0.0), 40.0, List.of());
+        AtomicBoolean instActive = new AtomicBoolean(false);
+        lenient().when(instanceMgr.getOrCreateInstance()).thenAnswer(inv -> {
+            instActive.set(true);
+            return CompletableFuture.completedFuture(inst);
+        });
+        lenient().when(instanceMgr.activeInstance()).thenAnswer(inv -> instActive.get() ? inst : null);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenAnswer(inv -> instActive.get() ? instWorld : inv.getArgument(0));
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.destroyInstance(any(), any())).thenAnswer(inv -> {
+            instActive.set(false);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        DragonBossController bossCtrl = mock(DragonBossController.class);
+        lenient().when(bossCtrl.bindOrSpawn(any(), any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.cleanup(anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
+
+        Path dbPath = tempDir.resolve("withdrawal-retry-recovery.db");
+        Location retA = new Location(overworld, 112.5, 71.0, -34.25, 45.0f, 10.0f);
+        Location retB = new Location(overworld, -18.0, 64.0, 42.0);
+        UUID aliceId;
+
+        try (SqliteDatabase db1 = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository repo1 = new SqliteRaidRecoveryRepository(db1);
+            DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                    configManager, messageService, scheduler, regionService, blockTracker, soulMarkerService,
+                    repo1, null, bossCtrl, null, blueprintRegistry, gimmickActionRegistry, instanceMgr,
+                    Logger.getLogger("TpFailRetryTest"), () -> endWorld, () -> onlinePlayers.values(),
+                    id -> onlinePlayers.get(id), nowMillis::get);
+
+            Player alice = addPlayer("Alice", retA);
+            Player bob = addPlayer("Bob", retB);
+            aliceId = alice.getUniqueId();
+            when(alice.getWorld()).thenReturn(overworld);
+            when(bob.getWorld()).thenReturn(overworld);
+            EncounterBlueprint bp = sampleBlueprint("dragon_normal", EncounterDifficulty.NORMAL);
+
+            assertTrue(mgr.startEncounter(bp, List.of(alice, bob),
+                    Map.of(aliceId, retA, bob.getUniqueId(), retB)));
+            when(alice.getWorld()).thenReturn(instWorld);
+            when(bob.getWorld()).thenReturn(instWorld);
+
+            // Down Alice so her state flags are modified and captured
+            mgr.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+            assertTrue(mgr.isDowned(aliceId));
+
+            // Alice's withdrawal teleport returns false -> flags restored, return record preserved, /cf leave retry works
+            net.kyori.adventure.text.Component tpFailedMsg = messageService.render(alice, "finder.leave-teleport-failed");
+            org.mockito.Mockito.clearInvocations(alice);
+            when(alice.teleportAsync(retA)).thenReturn(CompletableFuture.completedFuture(false));
+            assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(alice));
+
+            verify(alice, atLeastOnce()).setInvisible(false);
+            verify(alice, atLeastOnce()).setCollidable(true);
+            verify(alice, atLeastOnce()).setInvulnerable(false);
+            verify(alice).sendMessage(tpFailedMsg);
+            assertTrue(mgr.isInDutyOrInstance(aliceId), "Stuck player inside instance remains in duty lock");
+            assertFalse(mgr.isParticipant(aliceId));
+
+            PendingPlayerCleanup persistedRetry = repo1.loadPendingPlayerCleanupsSync().get(aliceId);
+            assertTrue(persistedRetry != null && !persistedRetry.restoreFlags() && persistedRetry.hasReturnLocation());
+            assertEquals(overworldId, persistedRetry.returnWorldId());
+            assertEquals(112.5, persistedRetry.returnX());
+
+            // Retry /cf leave with succeeding teleport -> does NOT re-apply flags, removes record, clears duty lock
+            org.mockito.Mockito.clearInvocations(alice);
+            when(alice.teleportAsync(retA)).thenReturn(CompletableFuture.completedFuture(true));
+            assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(alice));
+            verify(alice).teleportAsync(retA);
+            verify(alice, never()).setGameMode(any());
+            verify(alice, never()).setInvisible(anyBoolean());
+            verify(alice, never()).setCollidable(anyBoolean());
+            verify(alice, never()).setInvulnerable(anyBoolean());
+            when(alice.getWorld()).thenReturn(overworld);
+            assertFalse(mgr.isInDutyOrInstance(aliceId));
+            assertFalse(repo1.loadPendingPlayerCleanupsSync().containsKey(aliceId));
+
+            // Now fail Bob's teleport exceptionally and simulate server restart recovery
+            when(bob.teleportAsync(retB)).thenReturn(
+                    CompletableFuture.failedFuture(new IllegalStateException("tp failed")));
+            assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(bob));
+            PendingPlayerCleanup bobPersisted = repo1.loadPendingPlayerCleanupsSync().get(bob.getUniqueId());
+            assertTrue(bobPersisted != null && !bobPersisted.restoreFlags() && bobPersisted.hasReturnLocation());
+            assertEquals(overworldId, bobPersisted.returnWorldId());
+            mgr.shutdown();
+        }
+
+        // Reopen DB on simulated server restart and verify Bob returns to exact retB on join without touching flags
+        try (SqliteDatabase db2 = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository repo2 = new SqliteRaidRecoveryRepository(db2);
+            DefaultRaidEncounterManager recoveredMgr = new DefaultRaidEncounterManager(
+                    configManager, messageService, scheduler, regionService, blockTracker, soulMarkerService,
+                    repo2, null, bossCtrl, null, blueprintRegistry, gimmickActionRegistry, instanceMgr,
+                    Logger.getLogger("TpFailRestartTest"), () -> endWorld, () -> onlinePlayers.values(),
+                    id -> onlinePlayers.get(id), nowMillis::get);
+            recoveredMgr.setWorldLookup(id -> overworldId.equals(id) ? overworld : endWorld.getUID().equals(id) ? endWorld : null);
+
+            Player bobRejoined = mock(Player.class);
+            UUID bobId = repo2.loadPendingPlayerCleanupsSync().keySet().iterator().next();
+            when(bobRejoined.getUniqueId()).thenReturn(bobId);
+            when(bobRejoined.getName()).thenReturn("Bob");
+            when(bobRejoined.isOnline()).thenReturn(true);
+            when(bobRejoined.getWorld()).thenReturn(endWorld);
+            when(bobRejoined.getLocation()).thenReturn(new Location(endWorld, 0.0, 64.0, 0.0));
+            when(bobRejoined.teleportAsync(retB)).thenReturn(CompletableFuture.completedFuture(true));
+
+            recoveredMgr.onPlayerJoin(bobRejoined);
+            verify(bobRejoined).teleportAsync(retB);
+            verify(bobRejoined, never()).setGameMode(any());
+            verify(bobRejoined, never()).setInvisible(anyBoolean());
+            assertTrue(repo2.loadPendingPlayerCleanupsSync().isEmpty());
+        }
+    }
+
+    @Test
+    void concurrentInstanceWithdrawalsNeverDropInFlightFuturesBeforeInstanceDestroy() throws Exception {
+        World overworld = mock(World.class);
+        lenient().when(overworld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(overworld.getName()).thenReturn("world");
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_concurrent");
+        lenient().when(regionService.isRaidWorld(instWorld)).thenReturn(true);
+        lenient().when(regionService.safeZoneSpawnLocation(instWorld))
+                .thenReturn(new Location(instWorld, 0.5, 65.0, 24.5));
+
+        net.sabafly.dragonraid.instance.RaidInstanceManager instanceMgr =
+                mock(net.sabafly.dragonraid.instance.RaidInstanceManager.class);
+        net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance inst =
+                new net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance(
+                        instWorld, new Location(instWorld, 0.0, 64.0, 0.0), 40.0, List.of());
+        AtomicBoolean instActive = new AtomicBoolean(false);
+        lenient().when(instanceMgr.getOrCreateInstance()).thenAnswer(inv -> {
+            instActive.set(true);
+            return CompletableFuture.completedFuture(inst);
+        });
+        lenient().when(instanceMgr.activeInstance()).thenAnswer(inv -> instActive.get() ? inst : null);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenAnswer(inv -> instActive.get() ? instWorld : inv.getArgument(0));
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.destroyInstance(any(), any())).thenAnswer(inv -> {
+            instActive.set(false);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        DragonBossController bossCtrl = mock(DragonBossController.class);
+        lenient().when(bossCtrl.bindOrSpawn(any(), any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.cleanup(anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
+
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager, messageService, scheduler, regionService, blockTracker, soulMarkerService,
+                null, null, bossCtrl, null, blueprintRegistry, gimmickActionRegistry, instanceMgr,
+                Logger.getLogger("ConcurrentWithdrawalTest"), () -> endWorld, () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id), nowMillis::get);
+
+        EncounterBlueprint bp = sampleBlueprint("dragon_normal", EncounterDifficulty.NORMAL);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            for (int iter = 0; iter < 15; iter++) {
+                onlinePlayers.clear();
+                org.mockito.Mockito.clearInvocations(instanceMgr);
+
+                Location retA = new Location(overworld, 1.0, 64.0, 1.0);
+                Location retB = new Location(overworld, 2.0, 64.0, 2.0);
+                Location retC = new Location(overworld, 3.0, 64.0, 3.0);
+                Player alice = addPlayer("Alice" + iter, retA);
+                Player bob = addPlayer("Bob" + iter, retB);
+                Player charlie = addPlayer("Charlie" + iter, retC);
+                when(alice.getWorld()).thenReturn(overworld);
+                when(bob.getWorld()).thenReturn(overworld);
+                when(charlie.getWorld()).thenReturn(overworld);
+
+                assertTrue(mgr.startEncounter(bp, List.of(alice, bob, charlie),
+                        Map.of(alice.getUniqueId(), retA, bob.getUniqueId(), retB, charlie.getUniqueId(), retC)));
+
+                CompletableFuture<Boolean> tpA = new CompletableFuture<>();
+                CompletableFuture<Boolean> tpB = new CompletableFuture<>();
+                when(alice.teleportAsync(retA)).thenReturn(tpA);
+                when(bob.teleportAsync(retB)).thenReturn(tpB);
+                when(charlie.teleportAsync(retC)).thenReturn(CompletableFuture.completedFuture(true));
+
+                // Alice initiates withdrawal first
+                assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(alice));
+
+                // Race Alice's completion against Bob's registration on separate threads
+                java.util.concurrent.CyclicBarrier barrier = new java.util.concurrent.CyclicBarrier(2);
+                CompletableFuture<Void> fA = CompletableFuture.runAsync(() -> {
+                    try {
+                        barrier.await(2, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                    tpA.complete(true);
+                }, pool);
+                CompletableFuture<Void> fB = CompletableFuture.runAsync(() -> {
+                    try {
+                        barrier.await(2, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                    mgr.leaveEncounterDetailed(bob);
+                }, pool);
+                CompletableFuture.allOf(fA, fB).join();
+
+                // Charlie (last participant) leaves and completes immediately BEFORE Bob's tpB finishes
+                when(alice.getWorld()).thenReturn(overworld);
+                when(bob.getWorld()).thenReturn(overworld);
+                when(charlie.getWorld()).thenReturn(overworld);
+                assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(charlie));
+
+                // Bob's teleport is still incomplete -> instance MUST NOT be destroyed yet!
+                verify(instanceMgr, never()).destroyInstance(any(), any());
+                tpB.complete(true);
+                verify(instanceMgr).destroyInstance(eq(inst), any());
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     private void startActiveEncounter(Player initiator, BossConfig.Difficulty difficulty) {

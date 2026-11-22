@@ -243,6 +243,84 @@ class PacketEventsPartyHudServiceTest {
         assertTrue(transport.ops.stream().anyMatch(s -> s.contains("10/20")));
     }
 
+    @Test
+    void retainsPendingRemovalAfterRemoveFailureUntilTransportRecoversEvenWhenHudDisabled() {
+        DefaultRaidPartyService partyService = new DefaultRaidPartyService();
+        RecordingTransport transport = new RecordingTransport();
+
+        Map<UUID, Player> online = new ConcurrentHashMap<>();
+        RaidScheduler scheduler = mock(RaidScheduler.class);
+        lenient().when(scheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+
+        UUID leaderId = UUID.randomUUID();
+        Player leader = mockPlayer(leaderId, "LeaderRetry", 20.0, 20.0, false);
+        online.put(leaderId, leader);
+
+        PacketEventsPartyHudService hud = new PacketEventsPartyHudService(
+                partyService,
+                PartyCombatStatusProvider.NONE,
+                id -> Optional.empty(),
+                scheduler,
+                online::get,
+                transport,
+                Logger.getLogger("test"),
+                true,
+                8
+        );
+        partyService.addListener(hud);
+
+        partyService.createParty(leaderId);
+        assertTrue(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderRetry:CREATE:")));
+
+        // Update fails AND subsequent removeObjective returns false while transport is failing
+        transport.ops.clear();
+        transport.failAll.set(true);
+        when(leader.getHealth()).thenReturn(12.0);
+        hud.tickAll();
+        assertTrue(transport.ops.contains("LeaderRetry:REMOVE"));
+
+        // Player disables HUD while transport is still down -> clearViewer must keep pending removal
+        transport.ops.clear();
+        hud.setHudEnabled(leaderId, false);
+        assertTrue(transport.ops.contains("LeaderRetry:REMOVE"));
+
+        // Transport recovers -> tickAll retries REMOVE even though HUD is disabled and renderedStates is empty
+        transport.ops.clear();
+        transport.failAll.set(false);
+        hud.tickAll();
+        assertTrue(transport.ops.contains("LeaderRetry:REMOVE"));
+
+        // Subsequent tickAll must NOT keep sending REMOVE once confirmed
+        transport.ops.clear();
+        hud.tickAll();
+        assertTrue(transport.ops.isEmpty(), "Expected no redundant REMOVE after confirmation, got: " + transport.ops);
+
+        // Re-enabling HUD after another failed remove removes stale objective before rebuilding CREATE, then stays delta-quiet
+        hud.setHudEnabled(leaderId, true);
+        transport.failAll.set(true);
+        when(leader.getHealth()).thenReturn(8.0);
+        hud.tickAll();
+        transport.ops.clear();
+        transport.failAll.set(false);
+        hud.tickAll();
+        int removeIdx = transport.ops.indexOf("LeaderRetry:REMOVE");
+        int createIdx = -1;
+        for (int i = 0; i < transport.ops.size(); i++) {
+            if (transport.ops.get(i).startsWith("LeaderRetry:CREATE:")) {
+                createIdx = i;
+                break;
+            }
+        }
+        assertTrue(removeIdx >= 0 && createIdx > removeIdx,
+                "Expected REMOVE before CREATE on recovery, got: " + transport.ops);
+        transport.ops.clear();
+        hud.tickAll();
+        assertTrue(transport.ops.isEmpty());
+    }
+
     @SuppressWarnings("deprecation")
     private static Player mockPlayer(UUID id, String name, double hp, double maxHp, boolean blocking) {
         Player p = mock(Player.class);

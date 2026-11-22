@@ -305,6 +305,7 @@ finder:
   leave-not-in-duty: "<prefix><yellow>You are not currently in an active duty or instance.</yellow>"
   leave-ending-in-progress: "<prefix><yellow>The duty is currently finishing cleanup. Please wait a moment before leaving or retrying.</yellow>"
   leave-success: "<prefix><aqua>Withdrew from duty and returned to your previous location.</aqua>"
+  leave-teleport-failed: "<prefix><red>Failed to teleport you back to your previous location. Your return location is preserved — please retry <yellow><click:run_command:'/cf leave'>[/cf leave]</click></yellow>.</red>"
   gui:
     title: "<dark_purple><bold>Content Finder</bold></dark_purple>"
     empty-title: "<red>No Available Duties</red>"
