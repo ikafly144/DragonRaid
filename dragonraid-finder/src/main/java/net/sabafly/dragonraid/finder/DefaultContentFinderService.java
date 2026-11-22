@@ -242,6 +242,16 @@ public final class DefaultContentFinderService implements ContentFinderService, 
 
     @Override
     public boolean respondReadyCheck(UUID playerId, boolean accepted) {
+        return respondReadyCheckInternal(playerId, null, accepted);
+    }
+
+    @Override
+    public boolean respondReadyCheck(UUID playerId, UUID expectedSessionId, boolean accepted) {
+        Objects.requireNonNull(expectedSessionId, "expectedSessionId");
+        return respondReadyCheckInternal(playerId, expectedSessionId, accepted);
+    }
+
+    private boolean respondReadyCheckInternal(UUID playerId, UUID expectedSessionId, boolean accepted) {
         Objects.requireNonNull(playerId, "playerId");
         ReadyCheckSession updatedSession = null;
         ReadyCheckSession commencedSession = null;
@@ -255,7 +265,9 @@ public final class DefaultContentFinderService implements ContentFinderService, 
             timedOut = expireElapsedLocked(now);
             UUID sessionId = sessionIdByParticipant.get(playerId);
             MutableReadyCheck session = sessionId == null ? null : activeSessionsById.get(sessionId);
-            if (session != null && session.status == ReadyCheckStatus.PENDING) {
+            if (session != null
+                    && session.status == ReadyCheckStatus.PENDING
+                    && (expectedSessionId == null || expectedSessionId.equals(session.sessionId))) {
                 responded = true;
                 if (!accepted) {
                     session.responses.put(playerId, ReadyCheckResponse.DECLINED);
@@ -455,6 +467,7 @@ public final class DefaultContentFinderService implements ContentFinderService, 
             ));
         }
 
+        long now = clockMillis.getAsLong();
         for (UUID memberId : applicants) {
             boolean disconnectedInParty = partyService != null && partyService.isDisconnected(memberId);
             if (disconnectedInParty || !environmentChecker.isPlayerOnline(memberId)) {
@@ -463,7 +476,7 @@ public final class DefaultContentFinderService implements ContentFinderService, 
             if (environmentChecker.isPlayerInEncounter(memberId)) {
                 issues.add(new EligibilityIssue(EligibilityFailureReason.MEMBER_IN_ACTIVE_ENCOUNTER, memberId));
             }
-            if (hasOtherActiveReadyCheck(memberId, ignoreReadyCheckSessionId)) {
+            if (hasOtherActiveReadyCheck(memberId, ignoreReadyCheckSessionId, now)) {
                 issues.add(new EligibilityIssue(EligibilityFailureReason.MEMBER_IN_READY_CHECK, memberId));
             }
         }
@@ -516,10 +529,16 @@ public final class DefaultContentFinderService implements ContentFinderService, 
                 : ContentEligibilityResult.denied(spec, applicants, issues);
     }
 
-    private boolean hasOtherActiveReadyCheck(UUID memberId, UUID ignoreSessionId) {
+    private boolean hasOtherActiveReadyCheck(UUID memberId, UUID ignoreSessionId, long nowMillis) {
         synchronized (readyCheckLock) {
             UUID activeId = sessionIdByParticipant.get(memberId);
-            return activeId != null && !activeId.equals(ignoreSessionId);
+            if (activeId == null || activeId.equals(ignoreSessionId)) {
+                return false;
+            }
+            MutableReadyCheck session = activeSessionsById.get(activeId);
+            return session != null
+                    && session.status == ReadyCheckStatus.PENDING
+                    && nowMillis < session.expiresAtMillis;
         }
     }
 

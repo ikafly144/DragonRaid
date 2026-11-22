@@ -283,11 +283,10 @@ public final class ContentFinderMenu implements InventoryHolder {
     }
 
     private Component formatIssueLine(EligibilityIssue issue) {
-        String targetName = issue.playerId() == null
-                ? ""
-                : playerLookup.apply(issue.playerId()) != null
-                        ? playerLookup.apply(issue.playerId()).getName()
-                        : issue.playerId().toString().substring(0, 8);
+        Player subject = issue.playerId() != null ? playerLookup.apply(issue.playerId()) : null;
+        String targetName = subject != null
+                ? subject.getName()
+                : (issue.playerId() != null ? issue.playerId().toString().substring(0, 8) : "");
         return switch (issue.reason()) {
             case NOT_PARTY_LEADER -> messageService.render(viewer, "finder.reason.not-leader");
             case PARTY_TOO_SMALL -> messageService.render(

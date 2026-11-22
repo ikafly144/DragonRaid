@@ -12,6 +12,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -209,13 +210,13 @@ class FinderGuiTest {
         InventoryClickEvent acceptClick = new InventoryClickEvent(rcView, SlotType.CONTAINER, ReadyCheckMenu.SLOT_ACCEPT, ClickType.LEFT, InventoryAction.PICKUP_ALL);
         listener.onInventoryClick(acceptClick);
         assertTrue(acceptClick.isCancelled());
-        verify(handler).acceptReadyCheck(viewer);
-        verify(handler, never()).declineReadyCheck(any());
+        verify(handler).acceptReadyCheck(viewer, session.sessionId());
+        verify(handler, never()).declineReadyCheck(any(), any());
 
         InventoryClickEvent declineClick = new InventoryClickEvent(rcView, SlotType.CONTAINER, ReadyCheckMenu.SLOT_DECLINE, ClickType.LEFT, InventoryAction.PICKUP_ALL);
         listener.onInventoryClick(declineClick);
         assertTrue(declineClick.isCancelled());
-        verify(handler).declineReadyCheck(viewer);
+        verify(handler).declineReadyCheck(viewer, session.sessionId());
     }
 
     @Test
@@ -338,5 +339,69 @@ class FinderGuiTest {
         verify(viewer).closeInventory();
         verify(viewer, never()).playSound(any(Sound.class));
         verify(encounterManager, never()).startEncounter(any(), any(), any());
+    }
+
+    @Test
+    void coordinatorIgnoresQueuedStartTasksAfterSessionEndedAndReportsEndingOnLeave() {
+        UUID playerId = UUID.randomUUID();
+        Player viewer = mock(Player.class);
+        when(viewer.getUniqueId()).thenReturn(playerId);
+        when(viewer.getName()).thenReturn("LateAlice");
+        when(viewer.locale()).thenReturn(Locale.US);
+        when(viewer.isOnline()).thenReturn(true);
+
+        List<Runnable> deferredEntityTasks = new ArrayList<>();
+        RaidScheduler deferredScheduler = mock(RaidScheduler.class);
+        when(deferredScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            deferredEntityTasks.add(inv.getArgument(1));
+            return TaskHandle.retired();
+        });
+
+        DutyReadyCheckCoordinator coordinator = new DutyReadyCheckCoordinator(
+                configManager,
+                finderService,
+                mock(EncounterBlueprintRegistry.class),
+                encounterManager,
+                messageService,
+                deferredScheduler,
+                menuFactory,
+                id -> id.equals(playerId) ? viewer : null,
+                System::currentTimeMillis,
+                Logger.getLogger("FinderGuiTest")
+        );
+
+        UUID sid = UUID.randomUUID();
+        ReadyCheckSession pending = new ReadyCheckSession(
+                sid, "normal_trial", null, playerId, List.of(playerId),
+                Map.of(playerId, ReadyCheckResponse.PENDING), ReadyCheckStatus.PENDING,
+                System.currentTimeMillis(), System.currentTimeMillis() + 30_000L);
+        ReadyCheckSession ended = new ReadyCheckSession(
+                sid, "normal_trial", null, playerId, List.of(playerId),
+                Map.of(playerId, ReadyCheckResponse.DECLINED), ReadyCheckStatus.CANCELLED,
+                pending.createdAtMillis(), pending.expiresAtMillis());
+
+        // Schedule start task, end session BEFORE entity task executes, then run queued tasks -> no BossBar/GUI opened
+        coordinator.onSessionStarted(pending);
+        coordinator.onSessionEnded(ended, playerId, "cancelled");
+        deferredEntityTasks.forEach(Runnable::run);
+        verify(viewer, never()).showBossBar(any());
+        verify(viewer, never()).openInventory(any(Inventory.class));
+
+        // Duplicate late onSessionStarted for already-ended session ID is also ignored
+        deferredEntityTasks.clear();
+        coordinator.onSessionStarted(pending);
+        assertTrue(deferredEntityTasks.isEmpty());
+
+        // #3: ENDING_IN_PROGRESS guidance from DefaultContentFinderCommandHandler.leaveEncounter
+        DefaultContentFinderCommandHandler handler = new DefaultContentFinderCommandHandler(
+                finderService, unlockService, partyService, encounterManager, coordinator,
+                messageService, menuFactory, id -> viewer);
+        when(encounterManager.leaveEncounterDetailed(viewer))
+                .thenReturn(RaidEncounterManager.LeaveEncounterResult.ENDING_IN_PROGRESS);
+        org.mockito.Mockito.clearInvocations(viewer);
+        handler.leaveEncounter(viewer);
+        ArgumentCaptor<Component> msgCaptor = ArgumentCaptor.forClass(Component.class);
+        verify(viewer).sendMessage(msgCaptor.capture());
+        assertTrue(PLAIN.serialize(msgCaptor.getValue()).contains("finishing cleanup"));
     }
 }

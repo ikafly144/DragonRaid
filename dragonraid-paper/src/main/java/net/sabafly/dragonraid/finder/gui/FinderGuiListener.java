@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.finder.gui;
 
 import java.util.Objects;
+import java.util.UUID;
 import net.sabafly.dragonraid.command.ContentFinderCommandHandler;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import org.bukkit.entity.Player;
@@ -66,13 +67,14 @@ public final class FinderGuiListener implements Listener {
             if (contentId != null) {
                 scheduler.runAtEntity(player, () -> commandHandler.applyContent(player, contentId));
             }
-        } else if (holder instanceof ReadyCheckMenu) {
+        } else if (holder instanceof ReadyCheckMenu rcMenu) {
+            UUID sessionId = rcMenu.sessionId();
             if (rawSlot == ReadyCheckMenu.SLOT_ACCEPT) {
-                scheduler.runAtEntity(player, () -> commandHandler.acceptReadyCheck(player));
+                scheduler.runAtEntity(player, () -> commandHandler.acceptReadyCheck(player, sessionId));
             } else if (rawSlot == ReadyCheckMenu.SLOT_DECLINE) {
                 scheduler.runAtEntity(player, () -> {
                     player.closeInventory();
-                    commandHandler.declineReadyCheck(player);
+                    commandHandler.declineReadyCheck(player, sessionId);
                 });
             }
         }

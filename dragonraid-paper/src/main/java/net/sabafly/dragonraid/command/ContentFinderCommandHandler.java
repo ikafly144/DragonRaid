@@ -1,5 +1,6 @@
 package net.sabafly.dragonraid.command;
 
+import java.util.UUID;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
@@ -14,7 +15,15 @@ public interface ContentFinderCommandHandler {
 
     void acceptReadyCheck(Player player);
 
+    default void acceptReadyCheck(Player player, UUID expectedSessionId) {
+        acceptReadyCheck(player);
+    }
+
     void declineReadyCheck(Player player);
+
+    default void declineReadyCheck(Player player, UUID expectedSessionId) {
+        declineReadyCheck(player);
+    }
 
     void cancelReadyCheck(Player player);
 

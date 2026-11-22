@@ -336,6 +336,11 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
         }
 
         @Override
+        public boolean respondReadyCheck(UUID playerId, UUID expectedSessionId, boolean accepted) {
+            throw readOnlyError("ContentFinderService.respondReadyCheck");
+        }
+
+        @Override
         public boolean cancelReadyCheck(UUID actorId) {
             throw readOnlyError("ContentFinderService.cancelReadyCheck");
         }

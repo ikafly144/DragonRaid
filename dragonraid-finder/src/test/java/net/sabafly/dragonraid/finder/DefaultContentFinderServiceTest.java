@@ -471,6 +471,18 @@ class DefaultContentFinderServiceTest {
         assertTrue(finder.activeReadyCheck(leader).isEmpty());
         assertEquals(List.of("TIMED_OUT:timed_out"), endedEvents);
 
+        // #11: evaluateEligibility excludes expired ReadyCheck session without prior tickReadyChecks()
+        UUID prevId = finder.startReadyCheck(leader, "leader_only_savage").orElseThrow().sessionId();
+        clock.addAndGet(10_001L);
+        assertTrue(finder.evaluateEligibility(leader, "leader_only_savage").eligible());
+
+        // #10: Stale session ID respondReadyCheck must not accept or modify a newly started session B
+        ReadyCheckSession sessionB = finder.startReadyCheck(leader, "leader_only_savage").orElseThrow();
+        assertFalse(finder.respondReadyCheck(member, prevId, true));
+        assertEquals(ReadyCheckResponse.PENDING, finder.activeReadyCheck(member).orElseThrow().responses().get(member));
+        assertTrue(finder.respondReadyCheck(member, sessionB.sessionId(), true));
+        assertTrue(finder.respondReadyCheck(leader, sessionB.sessionId(), true));
+
         // ReadOnlyRaidServiceRegistry allows read-only queries and blocks all ReadyCheck mutations
         RaidServiceRegistry rawRegistry = new RaidServiceRegistry() {
             @Override
@@ -490,6 +502,7 @@ class DefaultContentFinderServiceTest {
         assertTrue(roFinder.activeReadyCheck(leader).isEmpty());
         assertThrows(UnsupportedOperationException.class, () -> roFinder.startReadyCheck(leader, "leader_only_savage"));
         assertThrows(UnsupportedOperationException.class, () -> roFinder.respondReadyCheck(leader, true));
+        assertThrows(UnsupportedOperationException.class, () -> roFinder.respondReadyCheck(leader, sessionB.sessionId(), true));
         assertThrows(UnsupportedOperationException.class, () -> roFinder.cancelReadyCheck(leader));
         assertThrows(UnsupportedOperationException.class, roFinder::tickReadyChecks);
         assertThrows(UnsupportedOperationException.class, () -> roFinder.addReadyCheckListener(new ReadyCheckListener() {}));

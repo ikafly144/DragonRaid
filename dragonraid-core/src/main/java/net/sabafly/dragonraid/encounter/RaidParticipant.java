@@ -153,7 +153,8 @@ public final class RaidParticipant {
     }
 
     public @Nullable Location preEntryReturnLocation() {
-        return preEntryReturnLocation == null ? null : preEntryReturnLocation.clone();
+        Location loc = this.preEntryReturnLocation;
+        return loc == null ? null : loc.clone();
     }
 
     public void setPreEntryReturnLocation(@Nullable Location preEntryReturnLocation) {

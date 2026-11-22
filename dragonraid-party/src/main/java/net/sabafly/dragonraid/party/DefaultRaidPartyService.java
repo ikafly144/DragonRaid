@@ -109,25 +109,29 @@ public final class DefaultRaidPartyService implements RaidPartyService {
     @Override
     public RaidParty createParty(UUID leaderId) {
         Objects.requireNonNull(leaderId, "leaderId");
-        final RaidParty created;
+        RaidParty created = null;
+        IllegalStateException failure = null;
         final List<PartyChangeEvent> events = new ArrayList<>(1);
         synchronized (lock) {
             expireDisconnectedSeatsLocked(clockMillis.getAsLong(), events);
             if (partyIdByPlayer.containsKey(leaderId)) {
-                throw new IllegalStateException("Player is already in a party: " + leaderId);
+                failure = new IllegalStateException("Player is already in a party: " + leaderId);
+            } else if (lockChecker.isPartyMutationLocked(leaderId)) {
+                failure = new IllegalStateException("Player is locked inside an active raid duty: " + leaderId);
+            } else {
+                UUID partyId = UUID.randomUUID();
+                MutableParty party = new MutableParty(partyId, leaderId);
+                partiesById.put(partyId, party);
+                partyIdByPlayer.put(leaderId, partyId);
+                invitesByTarget.remove(leaderId);
+                created = party.snapshot();
+                events.add(new PartyChangeEvent(PartyChangeEvent.Type.CREATED, partyId, null, created, leaderId, leaderId));
             }
-            if (lockChecker.isPartyMutationLocked(leaderId)) {
-                throw new IllegalStateException("Player is locked inside an active raid duty: " + leaderId);
-            }
-            UUID partyId = UUID.randomUUID();
-            MutableParty party = new MutableParty(partyId, leaderId);
-            partiesById.put(partyId, party);
-            partyIdByPlayer.put(leaderId, partyId);
-            invitesByTarget.remove(leaderId);
-            created = party.snapshot();
-            events.add(new PartyChangeEvent(PartyChangeEvent.Type.CREATED, partyId, null, created, leaderId, leaderId));
         }
         dispatchEvents(events);
+        if (failure != null) {
+            throw failure;
+        }
         return created;
     }
 
@@ -218,6 +222,7 @@ public final class DefaultRaidPartyService implements RaidPartyService {
                     party.memberIds.add(playerId);
                     partyIdByPlayer.put(playerId, partyId);
                     invitesByTarget.remove(playerId);
+                    chatChannelsByPlayer.remove(playerId);
                     RaidParty after = party.snapshot();
                     events.add(new PartyChangeEvent(PartyChangeEvent.Type.JOINED, partyId, before, after, playerId, playerId));
                     accepted = true;
@@ -261,12 +266,13 @@ public final class DefaultRaidPartyService implements RaidPartyService {
             return List.of();
         }
         synchronized (lock) {
-            purgeExpiredInvitesLocked(clockMillis.getAsLong());
+            long now = clockMillis.getAsLong();
             Map<UUID, PartyInvite> invites = invitesByTarget.get(targetId);
             if (invites == null || invites.isEmpty()) {
                 return List.of();
             }
             return invites.values().stream()
+                    .filter(invite -> !invite.isExpired(now) && partiesById.containsKey(invite.partyId()))
                     .sorted(Comparator.comparingLong(PartyInvite::createdAtMillis))
                     .toList();
         }
@@ -486,14 +492,11 @@ public final class DefaultRaidPartyService implements RaidPartyService {
         if (playerId == null) {
             return false;
         }
-        List<PartyChangeEvent> events = new ArrayList<>();
-        boolean disconnected;
         synchronized (lock) {
-            expireDisconnectedSeatsLocked(clockMillis.getAsLong(), events);
-            disconnected = disconnectedSeatsByPlayer.containsKey(playerId);
+            long now = clockMillis.getAsLong();
+            DisconnectedMemberSeat seat = disconnectedSeatsByPlayer.get(playerId);
+            return seat != null && !seat.isExpired(now) && partiesById.containsKey(seat.partyId());
         }
-        dispatchEvents(events);
-        return disconnected;
     }
 
     @Override
@@ -501,44 +504,47 @@ public final class DefaultRaidPartyService implements RaidPartyService {
         if (partyId == null) {
             return Set.of();
         }
-        List<PartyChangeEvent> events = new ArrayList<>();
-        Set<UUID> result;
         synchronized (lock) {
-            expireDisconnectedSeatsLocked(clockMillis.getAsLong(), events);
+            long now = clockMillis.getAsLong();
             MutableParty party = partiesById.get(partyId);
             if (party == null) {
-                result = Set.of();
-            } else {
-                List<UUID> ids = new ArrayList<>();
-                for (UUID memberId : party.memberIds) {
-                    if (disconnectedSeatsByPlayer.containsKey(memberId)) {
-                        ids.add(memberId);
-                    }
-                }
-                result = Set.copyOf(ids);
+                return Set.of();
             }
+            List<UUID> ids = new ArrayList<>();
+            for (UUID memberId : party.memberIds) {
+                DisconnectedMemberSeat seat = disconnectedSeatsByPlayer.get(memberId);
+                if (seat != null && !seat.isExpired(now) && partyId.equals(seat.partyId())) {
+                    ids.add(memberId);
+                }
+            }
+            return Set.copyOf(ids);
         }
-        dispatchEvents(events);
-        return result;
     }
 
     @Override
     public PartyChatChannel chatChannel(UUID playerId) {
-        if (playerId == null || !partyIdByPlayer.containsKey(playerId)) {
+        if (playerId == null) {
             return PartyChatChannel.GLOBAL;
         }
-        return chatChannelsByPlayer.getOrDefault(playerId, PartyChatChannel.GLOBAL);
+        synchronized (lock) {
+            if (!partyIdByPlayer.containsKey(playerId)) {
+                return PartyChatChannel.GLOBAL;
+            }
+            return chatChannelsByPlayer.getOrDefault(playerId, PartyChatChannel.GLOBAL);
+        }
     }
 
     @Override
     public void setChatChannel(UUID playerId, PartyChatChannel channel) {
         Objects.requireNonNull(playerId, "playerId");
         Objects.requireNonNull(channel, "channel");
-        if (channel == PartyChatChannel.GLOBAL || !partyIdByPlayer.containsKey(playerId)) {
-            chatChannelsByPlayer.remove(playerId);
-            return;
+        synchronized (lock) {
+            if (channel == PartyChatChannel.GLOBAL || !partyIdByPlayer.containsKey(playerId)) {
+                chatChannelsByPlayer.remove(playerId);
+                return;
+            }
+            chatChannelsByPlayer.put(playerId, channel);
         }
-        chatChannelsByPlayer.put(playerId, channel);
     }
 
     @Override

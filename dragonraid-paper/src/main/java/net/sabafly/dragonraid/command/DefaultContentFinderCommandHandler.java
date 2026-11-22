@@ -103,9 +103,29 @@ public final class DefaultContentFinderCommandHandler implements ContentFinderCo
     }
 
     @Override
+    public void acceptReadyCheck(Player player, UUID expectedSessionId) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(expectedSessionId, "expectedSessionId");
+        if (!finderService.respondReadyCheck(player.getUniqueId(), expectedSessionId, true)) {
+            messageService.send(player, "finder.readycheck.none-active");
+            return;
+        }
+        messageService.send(player, "finder.readycheck.accepted-self");
+    }
+
+    @Override
     public void declineReadyCheck(Player player) {
         Objects.requireNonNull(player, "player");
         if (!finderService.respondReadyCheck(player.getUniqueId(), false)) {
+            messageService.send(player, "finder.readycheck.none-active");
+        }
+    }
+
+    @Override
+    public void declineReadyCheck(Player player, UUID expectedSessionId) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(expectedSessionId, "expectedSessionId");
+        if (!finderService.respondReadyCheck(player.getUniqueId(), expectedSessionId, false)) {
             messageService.send(player, "finder.readycheck.none-active");
         }
     }
@@ -139,11 +159,15 @@ public final class DefaultContentFinderCommandHandler implements ContentFinderCo
     @Override
     public void leaveEncounter(Player player) {
         Objects.requireNonNull(player, "player");
-        if (!encounterManager.leaveEncounter(player)) {
-            messageService.send(player, "finder.leave-not-in-duty");
-            return;
+        RaidEncounterManager.LeaveEncounterResult result = encounterManager.leaveEncounterDetailed(player);
+        if (result == null) {
+            result = RaidEncounterManager.LeaveEncounterResult.NOT_IN_DUTY;
         }
-        messageService.send(player, "finder.leave-success");
+        switch (result) {
+            case LEFT -> messageService.send(player, "finder.leave-success");
+            case ENDING_IN_PROGRESS -> messageService.send(player, "finder.leave-ending-in-progress");
+            case NOT_IN_DUTY -> messageService.send(player, "finder.leave-not-in-duty");
+        }
     }
 
     @Override

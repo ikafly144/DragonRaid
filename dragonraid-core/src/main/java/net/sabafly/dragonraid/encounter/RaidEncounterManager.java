@@ -81,12 +81,26 @@ public interface RaidEncounterManager {
         return false;
     }
 
+    enum LeaveEncounterResult {
+        LEFT,
+        ENDING_IN_PROGRESS,
+        NOT_IN_DUTY
+    }
+
     /**
      * Withdraws {@code player} safely from active combat or post-wipe standby back to their
      * pre-entry location, destroying the temporary instance if no participants remain.
      */
     default boolean leaveEncounter(Player player) {
         return false;
+    }
+
+    /**
+     * Detailed variant of {@link #leaveEncounter(Player)} distinguishing active teardown ({@code ENDING})
+     * from not being in any duty.
+     */
+    default LeaveEncounterResult leaveEncounterDetailed(Player player) {
+        return leaveEncounter(player) ? LeaveEncounterResult.LEFT : LeaveEncounterResult.NOT_IN_DUTY;
     }
 
     /**

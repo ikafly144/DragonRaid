@@ -56,17 +56,17 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
      * Seam abstracting PacketEvents scoreboard packet delivery for unit tests.
      */
     public interface ScoreboardPacketTransport {
-        void createObjective(Player viewer, String objectiveName, Component displayName);
+        boolean createObjective(Player viewer, String objectiveName, Component displayName);
 
-        void updateObjective(Player viewer, String objectiveName, Component displayName);
+        boolean updateObjective(Player viewer, String objectiveName, Component displayName);
 
-        void removeObjective(Player viewer, String objectiveName);
+        boolean removeObjective(Player viewer, String objectiveName);
 
-        void displaySidebar(Player viewer, int position, String objectiveName);
+        boolean displaySidebar(Player viewer, int position, String objectiveName);
 
-        void updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName);
+        boolean updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName);
 
-        void resetLine(Player viewer, String objectiveName, String lineKey);
+        boolean resetLine(Player viewer, String objectiveName, String lineKey);
     }
 
     private record VitalsSample(String name, boolean online, double health, double maxHealth, boolean blocking) {
@@ -365,48 +365,65 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
                 return;
             }
             RenderedViewerState prev = renderedStates.get(viewerId);
+            boolean sent = true;
             try {
                 if (prev == null) {
-                    transport.createObjective(viewer, OBJECTIVE_NAME, nextTitle);
-                    transport.displaySidebar(viewer, SIDEBAR_POSITION, OBJECTIVE_NAME);
-                    for (int i = 0; i < nextLines.size(); i++) {
+                    sent = transport.createObjective(viewer, OBJECTIVE_NAME, nextTitle)
+                            && transport.displaySidebar(viewer, SIDEBAR_POSITION, OBJECTIVE_NAME);
+                    for (int i = 0; i < nextLines.size() && sent; i++) {
                         int score = nextLines.size() - i;
-                        transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
+                        sent = transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
                     }
-                    renderedStates.put(viewerId, new RenderedViewerState(nextTitle, nextLines));
+                    if (sent) {
+                        renderedStates.put(viewerId, new RenderedViewerState(nextTitle, nextLines));
+                    } else {
+                        invalidateUnsyncedHud(viewerId, viewer);
+                    }
                     return;
                 }
 
                 boolean changed = false;
                 if (!prev.title().equals(nextTitle)) {
-                    transport.updateObjective(viewer, OBJECTIVE_NAME, nextTitle);
                     changed = true;
+                    sent = transport.updateObjective(viewer, OBJECTIVE_NAME, nextTitle);
                 }
                 List<Component> prevLines = prev.lines();
                 boolean sizeChanged = prevLines.size() != nextLines.size();
                 int minSize = Math.min(prevLines.size(), nextLines.size());
-                for (int i = 0; i < minSize; i++) {
+                for (int i = 0; i < minSize && sent; i++) {
                     if (sizeChanged || !prevLines.get(i).equals(nextLines.get(i))) {
                         int score = nextLines.size() - i;
-                        transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
                         changed = true;
+                        sent = transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
                     }
                 }
-                for (int i = minSize; i < nextLines.size(); i++) {
+                for (int i = minSize; i < nextLines.size() && sent; i++) {
                     int score = nextLines.size() - i;
-                    transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
                     changed = true;
+                    sent = transport.updateLine(viewer, OBJECTIVE_NAME, lineKey(i), score, nextLines.get(i));
                 }
-                for (int i = nextLines.size(); i < prevLines.size(); i++) {
-                    transport.resetLine(viewer, OBJECTIVE_NAME, lineKey(i));
+                for (int i = nextLines.size(); i < prevLines.size() && sent; i++) {
                     changed = true;
+                    sent = transport.resetLine(viewer, OBJECTIVE_NAME, lineKey(i));
                 }
-                if (changed) {
+                if (!sent) {
+                    invalidateUnsyncedHud(viewerId, viewer);
+                } else if (changed) {
                     renderedStates.put(viewerId, new RenderedViewerState(nextTitle, nextLines));
                 }
             } catch (RuntimeException ex) {
+                invalidateUnsyncedHud(viewerId, viewer);
                 logger.log(Level.FINE, "PacketEvents party HUD send failed for " + viewer.getName(), ex);
             }
+        }
+    }
+
+    private void invalidateUnsyncedHud(UUID viewerId, Player viewer) {
+        renderedStates.remove(viewerId);
+        try {
+            transport.removeObjective(viewer, OBJECTIVE_NAME);
+        } catch (RuntimeException ignored) {
+            // Best-effort cleanup so partial scoreboard state does not linger.
         }
     }
 
@@ -447,8 +464,8 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         }
 
         @Override
-        public void createObjective(Player viewer, String objectiveName, Component displayName) {
-            sendPacket(viewer, new WrapperPlayServerScoreboardObjective(
+        public boolean createObjective(Player viewer, String objectiveName, Component displayName) {
+            return sendPacket(viewer, new WrapperPlayServerScoreboardObjective(
                     objectiveName,
                     ObjectiveMode.CREATE,
                     displayName,
@@ -458,8 +475,8 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         }
 
         @Override
-        public void updateObjective(Player viewer, String objectiveName, Component displayName) {
-            sendPacket(viewer, new WrapperPlayServerScoreboardObjective(
+        public boolean updateObjective(Player viewer, String objectiveName, Component displayName) {
+            return sendPacket(viewer, new WrapperPlayServerScoreboardObjective(
                     objectiveName,
                     ObjectiveMode.UPDATE,
                     displayName,
@@ -469,8 +486,8 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         }
 
         @Override
-        public void removeObjective(Player viewer, String objectiveName) {
-            sendPacket(viewer, new WrapperPlayServerScoreboardObjective(
+        public boolean removeObjective(Player viewer, String objectiveName) {
+            return sendPacket(viewer, new WrapperPlayServerScoreboardObjective(
                     objectiveName,
                     ObjectiveMode.REMOVE,
                     Component.empty(),
@@ -480,13 +497,13 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         }
 
         @Override
-        public void displaySidebar(Player viewer, int position, String objectiveName) {
-            sendPacket(viewer, new WrapperPlayServerDisplayScoreboard(position, objectiveName));
+        public boolean displaySidebar(Player viewer, int position, String objectiveName) {
+            return sendPacket(viewer, new WrapperPlayServerDisplayScoreboard(position, objectiveName));
         }
 
         @Override
-        public void updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName) {
-            sendPacket(viewer, new WrapperPlayServerUpdateScore(
+        public boolean updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName) {
+            return sendPacket(viewer, new WrapperPlayServerUpdateScore(
                     lineKey,
                     Action.CREATE_OR_UPDATE_ITEM,
                     objectiveName,
@@ -497,19 +514,21 @@ public final class PacketEventsPartyHudService implements PartyHudService, Party
         }
 
         @Override
-        public void resetLine(Player viewer, String objectiveName, String lineKey) {
-            sendPacket(viewer, new WrapperPlayServerResetScore(lineKey, objectiveName));
+        public boolean resetLine(Player viewer, String objectiveName, String lineKey) {
+            return sendPacket(viewer, new WrapperPlayServerResetScore(lineKey, objectiveName));
         }
 
-        private void sendPacket(Player viewer, com.github.retrooper.packetevents.wrapper.PacketWrapper<?> packet) {
+        private boolean sendPacket(Player viewer, com.github.retrooper.packetevents.wrapper.PacketWrapper<?> packet) {
             PacketEventsAPI<?> api = api();
             if (api == null) {
-                return;
+                return false;
             }
             try {
                 api.getPlayerManager().sendPacket(viewer, packet);
+                return true;
             } catch (RuntimeException ex) {
                 logger.log(Level.FINE, "Failed sending PacketEvents party scoreboard packet", ex);
+                return false;
             }
         }
     }

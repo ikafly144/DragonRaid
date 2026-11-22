@@ -29,9 +29,8 @@ public final class PartyChatListener implements Listener {
         if (partyService.chatChannel(sender.getUniqueId()) != PartyChatChannel.PARTY) {
             return;
         }
-        if (dispatcher.sendPartyMessage(sender, event.message())) {
-            event.setCancelled(true);
-        } else {
+        event.setCancelled(true);
+        if (!dispatcher.sendPartyMessage(sender, event.message())) {
             // Player is no longer in a party; revert channel cleanly to GLOBAL so global chat is never trapped.
             partyService.setChatChannel(sender.getUniqueId(), PartyChatChannel.GLOBAL);
         }

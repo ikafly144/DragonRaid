@@ -303,6 +303,7 @@ finder:
   retry-not-available: "<prefix><red>現在は再挑戦できるワイプ待機状態ではありません。</red>"
   retry-failed: "<prefix><red>再挑戦の開始に失敗しました（必要人数や状態を確認してください）。</red>"
   leave-not-in-duty: "<prefix><yellow>現在レイドまたはコンテンツインスタンスに参加していません。</yellow>"
+  leave-ending-in-progress: "<prefix><yellow>現在コンテンツの終了処理を実行中です。完了まで少々お待ちください。</yellow>"
   leave-success: "<prefix><aqua>コンテンツから退出し、元の場所へ帰還しました。</aqua>"
   gui:
     title: "<dark_purple><bold>コンテンツファインダー</bold></dark_purple>"

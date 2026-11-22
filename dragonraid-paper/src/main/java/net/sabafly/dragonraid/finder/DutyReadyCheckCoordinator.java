@@ -67,10 +67,24 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
     private final LongSupplier clockMillis;
     private final Logger logger;
 
-    private final Map<UUID, BossBar> activeBars = new ConcurrentHashMap<>();
-    private final Map<UUID, ReadyCheckMenu> openMenus = new ConcurrentHashMap<>();
+    private record TrackedBar(UUID sessionId, BossBar bar) {
+    }
+
+    private record TrackedMenu(UUID sessionId, ReadyCheckMenu menu) {
+    }
+
+    private final Object uiLock = new Object();
+    private final Map<UUID, TrackedBar> activeBars = new ConcurrentHashMap<>();
+    private final Map<UUID, TrackedMenu> openMenus = new ConcurrentHashMap<>();
     private final Map<UUID, ReadyCheckSession> trackedSessions = new ConcurrentHashMap<>();
     private final Map<UUID, Long> lastRenderedSecond = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> endedSessionIds = new LinkedHashMap<>(256, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<UUID, Boolean> eldest) {
+            return size() > 256;
+        }
+    };
+    private volatile boolean shutdown;
 
     public DutyReadyCheckCoordinator(
             ConfigManager configManager,
@@ -98,8 +112,14 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
     public void openReadyCheckMenu(Player player, ReadyCheckSession session) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(session, "session");
+        UUID sessionId = session.sessionId();
+        synchronized (uiLock) {
+            if (shutdown || endedSessionIds.containsKey(sessionId)) {
+                return;
+            }
+        }
         scheduler.runAtEntity(player, () -> {
-            if (!player.isOnline()) {
+            if (!player.isOnline() || !isSessionUiEligible(sessionId)) {
                 return;
             }
             ReadyCheckMenu menu = new ReadyCheckMenu(
@@ -111,23 +131,34 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
                     menuFactory,
                     playerLookup
             );
-            openMenus.put(player.getUniqueId(), menu);
+            synchronized (uiLock) {
+                if (shutdown || !player.isOnline() || endedSessionIds.containsKey(sessionId)) {
+                    return;
+                }
+                openMenus.put(player.getUniqueId(), new TrackedMenu(sessionId, menu));
+            }
             player.openInventory(menu.getInventory());
         });
     }
 
     public void tickVisuals() {
-        if (trackedSessions.isEmpty()) {
+        if (shutdown || trackedSessions.isEmpty()) {
             return;
         }
         long now = clockMillis.getAsLong();
         for (ReadyCheckSession session : List.copyOf(trackedSessions.values())) {
+            UUID sessionId = session.sessionId();
             long remainingSec = Math.max(0L, (long) Math.ceil(session.remainingMillis(now) / 1000.0));
-            Long prevSec = lastRenderedSecond.get(session.sessionId());
-            if (prevSec != null && prevSec == remainingSec) {
-                continue;
+            synchronized (uiLock) {
+                if (!trackedSessions.containsKey(sessionId) || endedSessionIds.containsKey(sessionId)) {
+                    continue;
+                }
+                Long prevSec = lastRenderedSecond.get(sessionId);
+                if (prevSec != null && prevSec == remainingSec) {
+                    continue;
+                }
+                lastRenderedSecond.put(sessionId, remainingSec);
             }
-            lastRenderedSecond.put(session.sessionId(), remainingSec);
             long totalMs = Math.max(1000L, session.expiresAtMillis() - session.createdAtMillis());
             float progress = (float) Math.max(0.0, Math.min(1.0, (double) session.remainingMillis(now) / totalMs));
             for (UUID participantId : session.participantIds()) {
@@ -135,15 +166,16 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
                 if (viewer == null || !viewer.isOnline()) {
                     continue;
                 }
-                BossBar bar = activeBars.get(participantId);
-                if (bar != null) {
-                    bar.name(formatBossBarTitle(viewer, session, remainingSec));
-                    bar.progress(progress);
+                TrackedBar trackedBar = activeBars.get(participantId);
+                if (trackedBar != null && trackedBar.sessionId().equals(sessionId)) {
+                    trackedBar.bar().name(formatBossBarTitle(viewer, session, remainingSec));
+                    trackedBar.bar().progress(progress);
                 }
-                ReadyCheckMenu menu = openMenus.get(participantId);
-                if (menu != null) {
+                TrackedMenu trackedMenu = openMenus.get(participantId);
+                if (trackedMenu != null && trackedMenu.sessionId().equals(sessionId)) {
+                    ReadyCheckMenu menu = trackedMenu.menu();
                     scheduler.runAtEntity(viewer, () -> {
-                        if (viewer.isOnline() && isViewingMenu(viewer, menu)) {
+                        if (viewer.isOnline() && isSessionActiveForUi(sessionId) && isViewingMenu(viewer, menu)) {
                             menu.refresh(session, now);
                         }
                     });
@@ -154,10 +186,16 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
 
     @Override
     public void onSessionStarted(ReadyCheckSession session) {
-        trackedSessions.put(session.sessionId(), session);
+        UUID sessionId = session.sessionId();
         long now = clockMillis.getAsLong();
         long remainingSec = Math.max(0L, (long) Math.ceil(session.remainingMillis(now) / 1000.0));
-        lastRenderedSecond.put(session.sessionId(), remainingSec);
+        synchronized (uiLock) {
+            if (shutdown || endedSessionIds.containsKey(sessionId)) {
+                return;
+            }
+            trackedSessions.put(sessionId, session);
+            lastRenderedSecond.put(sessionId, remainingSec);
+        }
 
         FinderSettings settings = configManager.pluginConfig().finder();
         Key soundKey = parseSoundKey(settings.commenceSound());
@@ -174,8 +212,27 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
                 continue;
             }
             scheduler.runAtEntity(member, () -> {
-                if (!member.isOnline()) {
+                if (!member.isOnline() || !isSessionActiveForUi(sessionId)) {
                     return;
+                }
+                BossBar newBar = BossBar.bossBar(
+                        formatBossBarTitle(member, session, remainingSec),
+                        1.0f,
+                        BossBar.Color.BLUE,
+                        BossBar.Overlay.PROGRESS
+                );
+                ReadyCheckMenu menu = new ReadyCheckMenu(
+                        member, session, now, finderService, messageService, menuFactory, playerLookup);
+                BossBar previousBar;
+                synchronized (uiLock) {
+                    if (shutdown || !member.isOnline()
+                            || !trackedSessions.containsKey(sessionId)
+                            || endedSessionIds.containsKey(sessionId)) {
+                        return;
+                    }
+                    TrackedBar prevTracked = activeBars.put(memberId, new TrackedBar(sessionId, newBar));
+                    previousBar = prevTracked != null ? prevTracked.bar() : null;
+                    openMenus.put(memberId, new TrackedMenu(sessionId, menu));
                 }
                 Component dutyName = resolveDutyName(member, session.contentId());
                 Component titleComp = messageService.render(member, "finder.readycheck.title");
@@ -193,23 +250,10 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
                         Placeholder.component("content", dutyName),
                         Placeholder.unparsed("seconds", String.valueOf(remainingSec))
                 );
-
-                BossBar oldBar = activeBars.remove(memberId);
-                if (oldBar != null) {
-                    member.hideBossBar(oldBar);
+                if (previousBar != null) {
+                    member.hideBossBar(previousBar);
                 }
-                BossBar newBar = BossBar.bossBar(
-                        formatBossBarTitle(member, session, remainingSec),
-                        1.0f,
-                        BossBar.Color.BLUE,
-                        BossBar.Overlay.PROGRESS
-                );
-                activeBars.put(memberId, newBar);
                 member.showBossBar(newBar);
-
-                ReadyCheckMenu menu = new ReadyCheckMenu(
-                        member, session, now, finderService, messageService, menuFactory, playerLookup);
-                openMenus.put(memberId, menu);
                 member.openInventory(menu.getInventory());
             });
         }
@@ -217,7 +261,13 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
 
     @Override
     public void onResponseUpdated(ReadyCheckSession session, UUID responderId, ReadyCheckResponse response) {
-        trackedSessions.put(session.sessionId(), session);
+        UUID sessionId = session.sessionId();
+        synchronized (uiLock) {
+            if (shutdown || !trackedSessions.containsKey(sessionId) || endedSessionIds.containsKey(sessionId)) {
+                return;
+            }
+            trackedSessions.put(sessionId, session);
+        }
         long now = clockMillis.getAsLong();
         long remainingSec = Math.max(0L, (long) Math.ceil(session.remainingMillis(now) / 1000.0));
         for (UUID memberId : session.participantIds()) {
@@ -225,14 +275,15 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
             if (member == null || !member.isOnline()) {
                 continue;
             }
-            BossBar bar = activeBars.get(memberId);
-            if (bar != null) {
-                bar.name(formatBossBarTitle(member, session, remainingSec));
+            TrackedBar trackedBar = activeBars.get(memberId);
+            if (trackedBar != null && trackedBar.sessionId().equals(sessionId)) {
+                trackedBar.bar().name(formatBossBarTitle(member, session, remainingSec));
             }
-            ReadyCheckMenu menu = openMenus.get(memberId);
-            if (menu != null) {
+            TrackedMenu trackedMenu = openMenus.get(memberId);
+            if (trackedMenu != null && trackedMenu.sessionId().equals(sessionId)) {
+                ReadyCheckMenu menu = trackedMenu.menu();
                 scheduler.runAtEntity(member, () -> {
-                    if (member.isOnline() && isViewingMenu(member, menu)) {
+                    if (member.isOnline() && isSessionActiveForUi(sessionId) && isViewingMenu(member, menu)) {
                         menu.refresh(session, now);
                     }
                 });
@@ -352,26 +403,50 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
     }
 
     public void shutdown() {
-        for (UUID memberId : List.copyOf(activeBars.keySet())) {
-            BossBar bar = activeBars.remove(memberId);
-            Player member = playerLookup.apply(memberId);
-            if (bar != null && member != null && member.isOnline()) {
-                member.hideBossBar(bar);
+        List<Map.Entry<UUID, TrackedBar>> barsToHide;
+        synchronized (uiLock) {
+            shutdown = true;
+            barsToHide = List.copyOf(activeBars.entrySet());
+            activeBars.clear();
+            openMenus.clear();
+            trackedSessions.clear();
+            lastRenderedSecond.clear();
+            endedSessionIds.clear();
+        }
+        for (Map.Entry<UUID, TrackedBar> entry : barsToHide) {
+            Player member = playerLookup.apply(entry.getKey());
+            if (member != null && member.isOnline()) {
+                member.hideBossBar(entry.getValue().bar());
             }
         }
-        openMenus.clear();
-        trackedSessions.clear();
-        lastRenderedSecond.clear();
     }
 
     private void cleanupSessionUi(ReadyCheckSession session, boolean closeFinderMenu) {
-        trackedSessions.remove(session.sessionId());
-        lastRenderedSecond.remove(session.sessionId());
+        UUID sessionId = session.sessionId();
+        Map<UUID, BossBar> barsToHide = new LinkedHashMap<>();
+        Map<UUID, ReadyCheckMenu> menusToClose = new LinkedHashMap<>();
+        synchronized (uiLock) {
+            endedSessionIds.put(sessionId, Boolean.TRUE);
+            trackedSessions.remove(sessionId);
+            lastRenderedSecond.remove(sessionId);
+            for (UUID memberId : session.participantIds()) {
+                TrackedBar trackedBar = activeBars.get(memberId);
+                if (trackedBar != null && trackedBar.sessionId().equals(sessionId)) {
+                    activeBars.remove(memberId, trackedBar);
+                    barsToHide.put(memberId, trackedBar.bar());
+                }
+                TrackedMenu trackedMenu = openMenus.get(memberId);
+                if (trackedMenu != null && trackedMenu.sessionId().equals(sessionId)) {
+                    openMenus.remove(memberId, trackedMenu);
+                    menusToClose.put(memberId, trackedMenu.menu());
+                }
+            }
+        }
         for (UUID memberId : session.participantIds()) {
-            BossBar bar = activeBars.remove(memberId);
-            ReadyCheckMenu menu = openMenus.remove(memberId);
+            BossBar bar = barsToHide.get(memberId);
+            ReadyCheckMenu menu = menusToClose.get(memberId);
             Player member = playerLookup.apply(memberId);
-            if (member != null && member.isOnline()) {
+            if (member != null && member.isOnline() && (bar != null || menu != null || closeFinderMenu)) {
                 scheduler.runAtEntity(member, () -> {
                     if (bar != null) {
                         member.hideBossBar(bar);
@@ -386,6 +461,18 @@ public final class DutyReadyCheckCoordinator implements ReadyCheckListener {
                     }
                 });
             }
+        }
+    }
+
+    private boolean isSessionActiveForUi(UUID sessionId) {
+        synchronized (uiLock) {
+            return !shutdown && trackedSessions.containsKey(sessionId) && !endedSessionIds.containsKey(sessionId);
+        }
+    }
+
+    private boolean isSessionUiEligible(UUID sessionId) {
+        synchronized (uiLock) {
+            return !shutdown && !endedSessionIds.containsKey(sessionId);
         }
     }
 

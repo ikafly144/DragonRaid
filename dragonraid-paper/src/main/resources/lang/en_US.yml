@@ -303,6 +303,7 @@ finder:
   retry-not-available: "<prefix><red>You are not in post-wipe standby to retry.</red>"
   retry-failed: "<prefix><red>Failed to restart encounter in instance.</red>"
   leave-not-in-duty: "<prefix><yellow>You are not currently in an active duty or instance.</yellow>"
+  leave-ending-in-progress: "<prefix><yellow>The duty is currently finishing cleanup. Please wait a moment before leaving or retrying.</yellow>"
   leave-success: "<prefix><aqua>Withdrew from duty and returned to your previous location.</aqua>"
   gui:
     title: "<dark_purple><bold>Content Finder</bold></dark_purple>"

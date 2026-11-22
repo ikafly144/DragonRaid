@@ -136,6 +136,27 @@ class PartyChatListenerTest {
         verify(hudService).refreshParty(party.partyId());
     }
 
+    @Test
+    void cancelsAsyncChatBeforeDeliverySoKickRaceNeverLeaksToGlobal() {
+        UUID senderId = UUID.randomUUID();
+        Player sender = mockPlayer(senderId, "Alice");
+        net.sabafly.dragonraid.api.party.RaidPartyService racePartyService =
+                mock(net.sabafly.dragonraid.api.party.RaidPartyService.class);
+        when(racePartyService.chatChannel(senderId)).thenReturn(PartyChatChannel.PARTY);
+        when(racePartyService.partyOf(senderId)).thenReturn(java.util.Optional.empty());
+
+        PartyChatDispatcher dispatcher = new PartyChatDispatcher(racePartyService, messageService, players::get);
+        PartyChatListener listener = new PartyChatListener(racePartyService, dispatcher);
+
+        AsyncChatEvent event = new AsyncChatEvent(
+                true, sender, Set.of(), ChatRenderer.defaultRenderer(),
+                Component.text("secret strategy"), Component.text("secret strategy"), mock(SignedMessage.class));
+        listener.onAsyncChat(event);
+
+        assertTrue(event.isCancelled(), "Event must be cancelled before delivery to avoid global chat leak");
+        verify(racePartyService).setChatChannel(senderId, PartyChatChannel.GLOBAL);
+    }
+
     private static Player mockPlayer(UUID id, String name) {
         Player p = mock(Player.class);
         when(p.getUniqueId()).thenReturn(id);

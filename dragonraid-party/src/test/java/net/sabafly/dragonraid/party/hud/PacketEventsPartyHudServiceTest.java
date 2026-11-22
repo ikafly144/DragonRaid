@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -34,35 +35,61 @@ class PacketEventsPartyHudServiceTest {
 
     private static final class RecordingTransport implements PacketEventsPartyHudService.ScoreboardPacketTransport {
         final List<String> ops = new ArrayList<>();
+        final AtomicBoolean failAll = new AtomicBoolean(false);
+        final AtomicBoolean throwOnUpdateLine = new AtomicBoolean(false);
 
         @Override
-        public void createObjective(Player viewer, String objectiveName, Component displayName) {
+        public boolean createObjective(Player viewer, String objectiveName, Component displayName) {
+            if (failAll.get()) {
+                return false;
+            }
             ops.add(viewer.getName() + ":CREATE:" + PLAIN.serialize(displayName));
+            return true;
         }
 
         @Override
-        public void updateObjective(Player viewer, String objectiveName, Component displayName) {
+        public boolean updateObjective(Player viewer, String objectiveName, Component displayName) {
+            if (failAll.get()) {
+                return false;
+            }
             ops.add(viewer.getName() + ":UPDATE_OBJ:" + PLAIN.serialize(displayName));
+            return true;
         }
 
         @Override
-        public void removeObjective(Player viewer, String objectiveName) {
+        public boolean removeObjective(Player viewer, String objectiveName) {
             ops.add(viewer.getName() + ":REMOVE");
+            return !failAll.get();
         }
 
         @Override
-        public void displaySidebar(Player viewer, int position, String objectiveName) {
+        public boolean displaySidebar(Player viewer, int position, String objectiveName) {
+            if (failAll.get()) {
+                return false;
+            }
             ops.add(viewer.getName() + ":DISPLAY:" + position);
+            return true;
         }
 
         @Override
-        public void updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName) {
+        public boolean updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName) {
+            if (failAll.get()) {
+                return false;
+            }
+            if (throwOnUpdateLine.get()) {
+                throw new IllegalStateException("packet send failed");
+            }
             ops.add(viewer.getName() + ":LINE:" + lineKey + "=" + PLAIN.serialize(displayName));
+            return true;
         }
 
         @Override
-        public void resetLine(Player viewer, String objectiveName, String lineKey) {
+        public boolean resetLine(Player viewer, String objectiveName, String lineKey) {
+            if (failAll.get()) {
+                return false;
+            }
             ops.add(viewer.getName() + ":RESET:" + lineKey);
+            return true;
         }
     }
 
@@ -161,6 +188,59 @@ class PacketEventsPartyHudServiceTest {
         transport.ops.clear();
         assertTrue(partyService.disband(leaderId));
         assertTrue(transport.ops.contains("LeaderOne:REMOVE"));
+    }
+
+    @Test
+    void invalidatesCacheOnSendFailureAndRebuildsWhenTransportRecovers() {
+        DefaultRaidPartyService partyService = new DefaultRaidPartyService();
+        RecordingTransport transport = new RecordingTransport();
+        transport.failAll.set(true);
+
+        Map<UUID, Player> online = new ConcurrentHashMap<>();
+        RaidScheduler scheduler = mock(RaidScheduler.class);
+        lenient().when(scheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+
+        UUID leaderId = UUID.randomUUID();
+        Player leader = mockPlayer(leaderId, "LeaderFail", 20.0, 20.0, false);
+        online.put(leaderId, leader);
+
+        PacketEventsPartyHudService hud = new PacketEventsPartyHudService(
+                partyService,
+                PartyCombatStatusProvider.NONE,
+                id -> Optional.empty(),
+                scheduler,
+                online::get,
+                transport,
+                Logger.getLogger("test"),
+                true,
+                8
+        );
+        partyService.addListener(hud);
+
+        RaidParty party = partyService.createParty(leaderId);
+        // Initial send failed -> state must not be cached; next tick with identical content must rebuild CREATE
+        assertFalse(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderFail:CREATE:")));
+        transport.ops.clear();
+        transport.failAll.set(false);
+        hud.refreshParty(party.partyId());
+        assertTrue(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderFail:CREATE:")));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.contains("★LeaderFail")));
+
+        // Partial line exception invalidates objective & rebuilds on next refresh
+        transport.ops.clear();
+        transport.throwOnUpdateLine.set(true);
+        when(leader.getHealth()).thenReturn(10.0);
+        hud.refreshParty(party.partyId());
+        assertTrue(transport.ops.contains("LeaderFail:REMOVE"));
+
+        transport.ops.clear();
+        transport.throwOnUpdateLine.set(false);
+        hud.refreshParty(party.partyId());
+        assertTrue(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderFail:CREATE:")));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.contains("10/20")));
     }
 
     @SuppressWarnings("deprecation")

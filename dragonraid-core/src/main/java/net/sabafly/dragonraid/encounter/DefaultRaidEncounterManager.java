@@ -147,6 +147,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     private final Map<UUID, RaidParticipant> participants = new ConcurrentHashMap<>();
     private final Map<UUID, Location> activeReturnLocations = new ConcurrentHashMap<>();
+    private final Map<UUID, Set<CompletableFuture<Void>>> inFlightInstanceWithdrawals = new ConcurrentHashMap<>();
     private final Map<UUID, SavedCleanupRecord> pendingCleanupPlayers = new ConcurrentHashMap<>();
     private final Map<BlockPosKey, PendingBlockRollback> unrecoveredPersistedRollbacks = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerSnapshot> snapshots = new ConcurrentHashMap<>();
@@ -487,7 +488,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
         }
         return activateEncounterWithParty(
-                blueprint, bossConfig, endWorld, party, List.of(), true, 0L, sanitizedReturns, false);
+                blueprint, bossConfig, endWorld, party, List.of(), true, -1L, sanitizedReturns, false);
     }
 
     @Override
@@ -519,6 +520,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     public boolean retryEncounter(Player requester) {
         Objects.requireNonNull(requester, "requester");
         final DutyStandbySession standby;
+        final long reservedGeneration;
         final List<Player> retryParty = new ArrayList<>();
         final Map<UUID, Location> retryReturns = new LinkedHashMap<>();
         synchronized (stateLock) {
@@ -553,6 +555,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     || (scaling.enforceMaxPlayers() && retryParty.size() > scaling.maxPlayers())) {
                 return false;
             }
+            reservedGeneration = encounterGeneration.get();
             this.standbySession = null;
         }
         boolean started = activateEncounterWithParty(
@@ -562,13 +565,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 List.copyOf(retryParty),
                 List.of(),
                 true,
-                0L,
+                reservedGeneration,
                 retryReturns,
                 true
         );
         if (!started) {
             synchronized (stateLock) {
-                if (this.standbySession == null && state == RaidState.IDLE) {
+                if (this.standbySession == null
+                        && state == RaidState.IDLE
+                        && encounterGeneration.get() == reservedGeneration) {
                     this.standbySession = standby;
                 }
             }
@@ -578,6 +583,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     @Override
     public boolean leaveEncounter(Player player) {
+        return leaveEncounterDetailed(player) == LeaveEncounterResult.LEFT;
+    }
+
+    @Override
+    public LeaveEncounterResult leaveEncounterDetailed(Player player) {
         Objects.requireNonNull(player, "player");
         UUID playerId = player.getUniqueId();
         World mainEndWorld = endWorldSupplier.get();
@@ -588,6 +598,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         Location standbyReturn = null;
         boolean destroyEmptyStandby = false;
         RaidInstanceManager.RaidInstance standbyInstance = null;
+        CompletableFuture<Void> standbyWithdrawalGate = null;
         synchronized (stateLock) {
             DutyStandbySession currentStandby = this.standbySession;
             if (currentStandby != null && currentStandby.memberIds().contains(playerId)) {
@@ -596,6 +607,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                         currentStandby.returnLocations().get(playerId),
                         defaultFallback
                 );
+                standbyInstance = currentStandby.instance() != null
+                        ? currentStandby.instance()
+                        : (instanceManager != null ? instanceManager.activeInstance() : null);
+                standbyWithdrawalGate = new CompletableFuture<>();
+                registerInstanceWithdrawal(standbyInstance, standbyWithdrawalGate);
                 Set<UUID> remainingIds = new LinkedHashSet<>(currentStandby.memberIds());
                 remainingIds.remove(playerId);
                 Map<UUID, Location> remainingReturns = new LinkedHashMap<>(currentStandby.returnLocations());
@@ -608,7 +624,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 if (remainingIds.isEmpty() || !anyRemainingOnline) {
                     this.standbySession = null;
                     this.activeReturnLocations.clear();
-                    standbyInstance = currentStandby.instance();
                     destroyEmptyStandby = true;
                 } else {
                     this.standbySession = new DutyStandbySession(
@@ -617,7 +632,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                             currentStandby.fallbackEndWorld(),
                             Set.copyOf(remainingIds),
                             Map.copyOf(remainingReturns),
-                            currentStandby.instance()
+                            currentStandby.instance(),
+                            currentStandby.rollbackFuture()
                     );
                 }
                 standbySnapshot = currentStandby;
@@ -625,27 +641,38 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         }
         if (standbySnapshot != null) {
             Location dest = standbyReturn != null ? standbyReturn : defaultFallback;
-            CompletableFuture<Void> tpFuture = teleportPlayerForWithdrawal(player, null, dest);
+            CompletableFuture<Void> gate = standbyWithdrawalGate;
+            CompletableFuture<Void> tpFuture = teleportPlayerForWithdrawal(player, null, null, dest);
+            tpFuture.whenComplete((ignored, err) -> {
+                if (gate != null) {
+                    gate.complete(null);
+                }
+            });
             if (destroyEmptyStandby && instanceManager != null) {
                 RaidInstanceManager.RaidInstance targetInst = standbyInstance != null
                         ? standbyInstance : instanceManager.activeInstance();
                 if (targetInst != null) {
-                    tpFuture.whenComplete((ignored, err) ->
-                            instanceManager.destroyInstance(targetInst, defaultFallback));
+                    destroyInstanceWhenReady(targetInst, standbySnapshot.rollbackFuture(), defaultFallback);
                 }
             }
-            return true;
+            return LeaveEncounterResult.LEFT;
         }
 
         // Case 2: Withdrawing during ACTIVE / WIPING encounter
         final RaidParticipant withdrawn;
         final Location activeReturn;
+        final SavedCleanupRecord cleanupRecord;
         final boolean triggerFullTeardown;
         final long currentGen;
+        final RaidInstanceManager.RaidInstance activeInst;
+        final CompletableFuture<Void> activeWithdrawalGate;
         synchronized (stateLock) {
+            if (state == RaidState.ENDING && participants.containsKey(playerId)) {
+                return LeaveEncounterResult.ENDING_IN_PROGRESS;
+            }
             if ((state != RaidState.ACTIVE && state != RaidState.WIPING)
                     || !participants.containsKey(playerId)) {
-                return false;
+                return LeaveEncounterResult.NOT_IN_DUTY;
             }
             withdrawn = participants.remove(playerId);
             activeReturn = resolveReturnLocation(
@@ -653,12 +680,25 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     withdrawn != null ? withdrawn.preEntryReturnLocation() : null,
                     defaultFallback
             );
+            cleanupRecord = (withdrawn != null && withdrawn.isStateCaptured())
+                    ? new SavedCleanupRecord(
+                            withdrawn.previousGameMode(),
+                            withdrawn.previousInvisible(),
+                            withdrawn.previousCollidable(),
+                            withdrawn.previousInvulnerable(),
+                            true)
+                    : null;
+            if (cleanupRecord != null) {
+                pendingCleanupPlayers.put(playerId, cleanupRecord);
+            }
             activeReturnLocations.remove(playerId);
-            pendingCleanupPlayers.remove(playerId);
             snapshots.remove(playerId);
             lastRightClickMillis.remove(playerId);
             lastFeedbackMillis.remove(playerId);
             currentGen = encounterGeneration.get();
+            activeInst = instanceManager != null ? instanceManager.activeInstance() : null;
+            activeWithdrawalGate = new CompletableFuture<>();
+            registerInstanceWithdrawal(activeInst, activeWithdrawalGate);
             boolean anyOnlineLeft = participants.values().stream().anyMatch(p -> {
                 if (!p.isOnline()) {
                     return false;
@@ -669,7 +709,6 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             triggerFullTeardown = participants.isEmpty() || !anyOnlineLeft;
         }
 
-        deletePlayerCleanupAsync(playerId);
         soulMarkerService.invalidateViewer(playerId);
         if (hudService != null) {
             hudService.removeViewer(player);
@@ -682,14 +721,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     combatWorld != null ? onlinePlayersInWorld(combatWorld) : List.of()
             );
         }
-        CompletableFuture<Void> withdrawTp = teleportPlayerForWithdrawal(player, withdrawn, activeReturn);
+        CompletableFuture<Void> withdrawTp = teleportPlayerForWithdrawal(player, withdrawn, cleanupRecord, activeReturn);
+        withdrawTp.whenComplete((ignored, err) -> activeWithdrawalGate.complete(null));
 
         if (triggerFullTeardown) {
-            teardownAfterAllParticipantsLeft(combatWorld, mainEndWorld, defaultFallback, currentGen, withdrawTp);
+            teardownAfterAllParticipantsLeft(combatWorld, mainEndWorld, defaultFallback, currentGen, activeWithdrawalGate);
         } else if (state == RaidState.ACTIVE) {
             evaluateWipeCondition(combatWorld, configManager.pluginConfig().revive());
         }
-        return true;
+        return LeaveEncounterResult.LEFT;
     }
 
     @Override
@@ -772,8 +812,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         final long countdownGeneration;
         boolean pendingRollbacks = false;
         synchronized (stateLock) {
-            if (state != RaidState.IDLE || arenaUpdatesInFlight.get() > 0 || hasPendingBlockRollbacks()) {
-                pendingRollbacks = state == RaidState.IDLE && hasPendingBlockRollbacks();
+            if (state != RaidState.IDLE
+                    || standbySession != null
+                    || (instanceManager != null && instanceManager.activeInstance() != null)
+                    || arenaUpdatesInFlight.get() > 0
+                    || hasPendingBlockRollbacks()) {
+                pendingRollbacks = state == RaidState.IDLE
+                        && standbySession == null
+                        && (instanceManager == null || instanceManager.activeInstance() == null)
+                        && hasPendingBlockRollbacks();
                 if (sender != null) {
                     messageService.send(sender, pendingRollbacks ? "command.rollback-pending" : "command.already-running");
                 }
@@ -966,11 +1013,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 if (state != RaidState.IDLE
                         || standbySession != null
                         || (!allowReuseActiveInstance && instanceManager != null && instanceManager.activeInstance() != null)
+                        || (expectedGeneration >= 0L && encounterGeneration.get() != expectedGeneration)
                         || arenaUpdatesInFlight.get() > 0
                         || hasPendingBlockRollbacks()) {
                     return false;
                 }
-            } else if (state != RaidState.COUNTDOWN || encounterGeneration.get() != expectedGeneration) {
+            } else if (state != RaidState.COUNTDOWN
+                    || standbySession != null
+                    || encounterGeneration.get() != expectedGeneration) {
                 return false;
             }
             activationGen = encounterGeneration.incrementAndGet();
@@ -1564,6 +1614,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 combatMetricsTracker.snapshot();
         long completionSeq = completionSequence.incrementAndGet();
 
+        emitEncounterCompleted(EncounterOutcome.WIPE, Math.max(0L, clockMillis.getAsLong() - combatStartedMillis), partySizeSnapshot, metricsSnapshot, completionSeq);
+        CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(targetWorld);
+        CompletableFuture<Void> endingFuture = rollbackFuture;
+
         if (enterInstanceStandby) {
             restoreParticipantsInsideInstanceForRetry(safeSpawn);
             boolean anyOnlineMember = wipedMemberIds.stream().anyMatch(id -> {
@@ -1580,7 +1634,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                                 fallbackWorld,
                                 Set.copyOf(wipedMemberIds),
                                 Map.copyOf(wipedReturnLocs),
-                                wipedInstance
+                                wipedInstance,
+                                rollbackFuture
                         );
                     }
                 }
@@ -1591,17 +1646,16 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     }
                 }
             } else if (instanceManager != null) {
+                activeReturnLocations.clear();
                 World mainEnd = endWorldSupplier.get();
                 Location mainFallback = mainEnd != null ? regionService.safeZoneSpawnLocation(mainEnd) : null;
-                instanceManager.destroyInstance(wipedInstance, mainFallback);
+                endingFuture = destroyInstanceWhenReady(wipedInstance, rollbackFuture, mainFallback);
             }
         } else {
             restoreAndResetParticipants(safeSpawn);
         }
 
-        emitEncounterCompleted(EncounterOutcome.WIPE, Math.max(0L, clockMillis.getAsLong() - combatStartedMillis), partySizeSnapshot, metricsSnapshot, completionSeq);
-        CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(targetWorld);
-        completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
+        completeEndingWhenRolledBack(endingGeneration, endingFuture);
     }
 
     @Override
@@ -1677,10 +1731,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         if (instanceManager != null && targetInstance == null) {
             instanceManager.destroyActiveInstance(safeSpawn);
         }
+        CompletableFuture<Void> standbyRollback = standbyBeforeReset != null
+                ? standbyBeforeReset.rollbackFuture()
+                : CompletableFuture.completedFuture(null);
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(combatWorld);
+        CompletableFuture<Void> combinedRollback = CompletableFuture.allOf(rollbackFuture, standbyRollback);
         CompletableFuture<Void> endingFuture = (instanceManager == null || targetInstance == null)
-                ? rollbackFuture
-                : rollbackFuture
+                ? combinedRollback
+                : combinedRollback
                         .handle((ignored, err) -> (Void) null)
                         .thenCompose(ignored -> evacuateToIndividualReturnsThenDestroy(
                                 targetInstance, resetReturns, safeSpawn));
@@ -1986,7 +2044,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             RaidInstanceManager.RaidInstance targetInst = standbyToDestroy.instance() != null
                     ? standbyToDestroy.instance() : instanceManager.activeInstance();
             if (targetInst != null) {
-                instanceManager.destroyInstance(targetInst, mainFallback);
+                destroyInstanceWhenReady(targetInst, standbyToDestroy.rollbackFuture(), mainFallback);
             }
         }
 
@@ -2307,8 +2365,20 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         for (RaidParticipant participant : List.copyOf(participants.values())) {
             UUID id = participant.playerId();
             Player player = playerLookup.apply(id);
+            SavedCleanupRecord cleanupRecord = participant.isStateCaptured()
+                    ? new SavedCleanupRecord(
+                            participant.previousGameMode(),
+                            participant.previousInvisible(),
+                            participant.previousCollidable(),
+                            participant.previousInvulnerable(),
+                            instanceSafeSpawn != null
+                    )
+                    : null;
             if (player != null && player.isOnline()) {
-                scheduler.runAtEntity(player, () -> {
+                if (cleanupRecord != null) {
+                    pendingCleanupPlayers.put(id, cleanupRecord);
+                }
+                TaskHandle handle = scheduler.runAtEntity(player, () -> {
                     restorePlayerFlags(participant, player);
                     player.setHealth(maxHealth(player));
                     player.setFireTicks(0);
@@ -2316,11 +2386,27 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     if (instanceSafeSpawn != null) {
                         player.teleportAsync(instanceSafeSpawn);
                     }
+                    if (cleanupRecord != null) {
+                        pendingCleanupPlayers.remove(id, cleanupRecord);
+                    } else {
+                        pendingCleanupPlayers.remove(id);
+                    }
+                    deletePlayerCleanupAsync(id);
                     updateSnapshot(player);
+                }, () -> {
+                    if (cleanupRecord != null && recoveryRepository != null) {
+                        recoveryRepository.upsertPendingPlayerCleanupAsync(cleanupRecord.toPendingCleanup(id));
+                    }
                 });
+                if (handle == null && cleanupRecord != null && recoveryRepository != null) {
+                    recoveryRepository.upsertPendingPlayerCleanupAsync(cleanupRecord.toPendingCleanup(id));
+                }
+            } else if (cleanupRecord != null) {
+                pendingCleanupPlayers.put(id, cleanupRecord);
+                if (recoveryRepository != null) {
+                    recoveryRepository.upsertPendingPlayerCleanupAsync(cleanupRecord.toPendingCleanup(id));
+                }
             }
-            pendingCleanupPlayers.remove(id);
-            deletePlayerCleanupAsync(id);
         }
         participants.clear();
     }
@@ -2328,7 +2414,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private CompletableFuture<Void> teleportPlayerForWithdrawal(
             Player player,
             @Nullable RaidParticipant participant,
+            @Nullable SavedCleanupRecord cleanupRecord,
             @Nullable Location destination) {
+        UUID playerId = player.getUniqueId();
         CompletableFuture<Void> done = new CompletableFuture<>();
         TaskHandle handle = scheduler.runAtEntity(player, () -> {
             if (participant != null) {
@@ -2341,16 +2429,88 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             }
             player.setFireTicks(0);
             player.setFallDistance(0.0f);
+            if (cleanupRecord != null) {
+                pendingCleanupPlayers.remove(playerId, cleanupRecord);
+            } else {
+                pendingCleanupPlayers.remove(playerId);
+            }
+            deletePlayerCleanupAsync(playerId);
             if (destination != null && destination.getWorld() != null) {
                 player.teleportAsync(destination).whenComplete((ok, err) -> done.complete(null));
             } else {
                 done.complete(null);
             }
-        }, () -> done.complete(null));
+        }, () -> {
+            if (cleanupRecord != null && recoveryRepository != null) {
+                recoveryRepository.upsertPendingPlayerCleanupAsync(cleanupRecord.toPendingCleanup(playerId));
+            }
+            done.complete(null);
+        });
         if (handle == null) {
+            if (cleanupRecord != null && recoveryRepository != null) {
+                recoveryRepository.upsertPendingPlayerCleanupAsync(cleanupRecord.toPendingCleanup(playerId));
+            }
             done.complete(null);
         }
         return done;
+    }
+
+    private void registerInstanceWithdrawal(
+            @Nullable RaidInstanceManager.RaidInstance inst,
+            @Nullable CompletableFuture<Void> withdrawalFuture) {
+        if (inst == null || inst.world() == null || withdrawalFuture == null) {
+            return;
+        }
+        UUID worldId = inst.world().getUID();
+        Set<CompletableFuture<Void>> set = inFlightInstanceWithdrawals.computeIfAbsent(
+                worldId, ignored -> ConcurrentHashMap.newKeySet());
+        set.add(withdrawalFuture);
+        withdrawalFuture.whenComplete((ignored, err) -> {
+            set.remove(withdrawalFuture);
+            if (set.isEmpty()) {
+                inFlightInstanceWithdrawals.remove(worldId, set);
+            }
+        });
+    }
+
+    private CompletableFuture<Void> awaitInstanceWithdrawals(@Nullable RaidInstanceManager.RaidInstance inst) {
+        if (inst == null || inst.world() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Set<CompletableFuture<Void>> set = inFlightInstanceWithdrawals.get(inst.world().getUID());
+        if (set == null || set.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<?>[] arr = set.toArray(CompletableFuture[]::new);
+        return arr.length == 0
+                ? CompletableFuture.completedFuture(null)
+                : CompletableFuture.allOf(arr).handle((ignored, err) -> (Void) null);
+    }
+
+    private CompletableFuture<Void> destroyInstanceWhenReady(
+            @Nullable RaidInstanceManager.RaidInstance inst,
+            @Nullable CompletableFuture<Void> priorWork,
+            @Nullable Location fallback) {
+        if (instanceManager == null || inst == null) {
+            return priorWork != null
+                    ? priorWork.handle((ignored, err) -> (Void) null)
+                    : CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<Void> base = priorWork == null
+                ? CompletableFuture.completedFuture(null)
+                : priorWork.handle((ignored, err) -> (Void) null);
+        return base.thenCompose(ignored -> awaitInstanceWithdrawals(inst))
+                .handle((ignored, err) -> (Void) null)
+                .thenCompose(ignored -> {
+                    CompletableFuture<Void> df = instanceManager.destroyInstance(inst, fallback);
+                    if (inst.world() != null) {
+                        Set<CompletableFuture<Void>> set = inFlightInstanceWithdrawals.get(inst.world().getUID());
+                        if (set != null && set.isEmpty()) {
+                            inFlightInstanceWithdrawals.remove(inst.world().getUID(), set);
+                        }
+                    }
+                    return df != null ? df.handle((v, dErr) -> (Void) null) : CompletableFuture.completedFuture(null);
+                });
     }
 
     private void teardownAfterAllParticipantsLeft(
@@ -2394,14 +2554,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         if (instanceManager != null) {
             RaidInstanceManager.RaidInstance targetInstance = instanceManager.activeInstance();
             if (targetInstance != null) {
-                endingFuture = endingFuture.handle((ignored, err) -> (Void) null)
-                        .thenCompose(ignored -> {
-                            CompletableFuture<Void> destroyFuture =
-                                    instanceManager.destroyInstance(targetInstance, defaultFallback);
-                            return destroyFuture != null
-                                    ? destroyFuture.handle((v, dErr) -> null)
-                                    : CompletableFuture.completedFuture(null);
-                        });
+                endingFuture = destroyInstanceWhenReady(targetInstance, endingFuture, defaultFallback);
             }
         }
         completeEndingWhenRolledBack(endingGeneration, endingFuture);
@@ -2429,7 +2582,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         CompletableFuture<Void> allTps = tpFutures.isEmpty()
                 ? CompletableFuture.completedFuture(null)
                 : CompletableFuture.allOf(tpFutures.toArray(CompletableFuture[]::new));
-        return allTps.handle((ignored, err) -> (Void) null)
+        return CompletableFuture.allOf(allTps, awaitInstanceWithdrawals(defeatedInstance))
+                .handle((ignored, err) -> (Void) null)
                 .thenCompose(ignored -> {
                     CompletableFuture<Void> df = instanceManager.destroyInstance(defeatedInstance, fallbackSpawn);
                     return df != null ? df.handle((v, dErr) -> null) : CompletableFuture.completedFuture(null);
@@ -3030,6 +3184,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
 
     private void abortOnBossSpawnFailure(World endWorld, long expectedGeneration) {
         long endingGeneration;
+        RaidInstanceManager.RaidInstance failedInstance = null;
+        Map<UUID, Location> abortReturns = new LinkedHashMap<>();
         synchronized (stateLock) {
             if (state != RaidState.ACTIVE || encounterGeneration.get() != expectedGeneration) {
                 return;
@@ -3039,7 +3195,26 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             awaitingInstanceEntry = false;
             endingGeneration = encounterGeneration.incrementAndGet();
             state = RaidState.ENDING;
+            abortReturns.putAll(activeReturnLocations);
+            for (RaidParticipant p : participants.values()) {
+                if (!abortReturns.containsKey(p.playerId()) && p.preEntryReturnLocation() != null) {
+                    abortReturns.put(p.playerId(), p.preEntryReturnLocation());
+                }
+            }
+            if (instanceManager != null) {
+                RaidInstanceManager.RaidInstance current = instanceManager.activeInstance();
+                DutyStandbySession currentStandby = this.standbySession;
+                boolean ownedByStandby = currentStandby != null && current != null && current.equals(currentStandby.instance());
+                if (current != null && !ownedByStandby
+                        && (endWorld.equals(current.world()) || instanceManager.isInstanceWorld(endWorld))) {
+                    failedInstance = current;
+                }
+            }
         }
+        World mainEnd = endWorldSupplier.get();
+        Location fallbackSpawn = mainEnd != null
+                ? regionService.safeZoneSpawnLocation(mainEnd)
+                : regionService.safeZoneSpawnLocation(endWorld);
         List<Player> viewers = onlinePlayersInWorld(endWorld);
         soulMarkerService.removeAllMarkers(viewers);
         cleanupEncounterSystems(viewers, true);
@@ -3047,10 +3222,21 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
                 combatMetricsTracker.snapshot();
         long completionSeq = completionSequence.incrementAndGet();
-        restoreAndResetParticipants(regionService.safeZoneSpawnLocation(endWorld));
+        if (failedInstance != null) {
+            restoreAndResetParticipants(null);
+        } else {
+            restoreAndResetParticipants(fallbackSpawn);
+        }
+        activeReturnLocations.clear();
         emitEncounterCompleted(EncounterOutcome.ABORTED, 0L, partySizeSnapshot, metricsSnapshot, completionSeq);
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
-        completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
+        RaidInstanceManager.RaidInstance destroyTarget = failedInstance;
+        CompletableFuture<Void> endingFuture = destroyTarget != null
+                ? rollbackFuture.handle((ignored, err) -> (Void) null)
+                        .thenCompose(ignored -> evacuateToIndividualReturnsThenDestroy(
+                                destroyTarget, abortReturns, fallbackSpawn))
+                : rollbackFuture;
+        completeEndingWhenRolledBack(endingGeneration, endingFuture);
     }
 
     private void tickEncounterSystems(World endWorld, List<Player> endPlayers, Set<UUID> channelingRevivers) {
@@ -3224,8 +3410,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             World fallbackEndWorld,
             Set<UUID> memberIds,
             Map<UUID, Location> returnLocations,
-            @Nullable RaidInstanceManager.RaidInstance instance
+            @Nullable RaidInstanceManager.RaidInstance instance,
+            CompletableFuture<Void> rollbackFuture
     ) {
+        private DutyStandbySession {
+            rollbackFuture = rollbackFuture == null ? CompletableFuture.completedFuture(null) : rollbackFuture;
+        }
     }
 
     private record PlayerSnapshot(

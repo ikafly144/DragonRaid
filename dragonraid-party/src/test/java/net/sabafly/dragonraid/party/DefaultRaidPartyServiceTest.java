@@ -250,4 +250,45 @@ class DefaultRaidPartyServiceTest {
         assertThrows(UnsupportedOperationException.class, () -> roParty.toggleChatChannel(leader));
         assertThrows(UnsupportedOperationException.class, () -> roParty.addListener(ev -> {}));
     }
+
+    @Test
+    void queriesRemainSideEffectFreeCreateDispatchesPriorExpiryOnFailureAndAcceptResetsChannel() {
+        AtomicLong clock = new AtomicLong(1_000L);
+        DefaultRaidPartyService service = new DefaultRaidPartyService(
+                8, 5_000L, 10_000L, PartyMembershipLockChecker.UNLOCKED, clock::get);
+        List<PartyChangeEvent> events = new ArrayList<>();
+        service.addListener(events::add);
+
+        UUID l1 = UUID.randomUUID();
+        UUID m1 = UUID.randomUUID();
+        RaidParty p1 = service.createParty(l1);
+        assertTrue(service.invite(l1, m1));
+        assertTrue(service.acceptInvite(m1, p1.partyId()));
+        service.setChatChannel(m1, PartyChatChannel.PARTY);
+        assertEquals(PartyChatChannel.PARTY, service.chatChannel(m1));
+
+        // m1 disconnects -> let seat expire -> pure queries do NOT mutate or emit events
+        assertTrue(service.markDisconnected(m1));
+        UUID invitee = UUID.randomUUID();
+        assertTrue(service.invite(l1, invitee));
+        clock.addAndGet(11_000L);
+        events.clear();
+
+        assertTrue(service.pendingInvites(invitee).isEmpty());
+        assertFalse(service.isDisconnected(m1));
+        assertTrue(service.disconnectedMemberIds(p1.partyId()).isEmpty());
+        assertTrue(events.isEmpty(), "Read queries must not emit PartyChangeEvents: " + events);
+
+        // createParty failing on l1 (already in p1) STILL dispatches completed SEAT_EXPIRED for m1
+        assertThrows(IllegalStateException.class, () -> service.createParty(l1));
+        assertTrue(events.stream().anyMatch(e -> e.type() == PartyChangeEvent.Type.SEAT_EXPIRED && m1.equals(e.targetId())));
+
+        // Explicit expireInvites cleans expired invite
+        assertEquals(1, service.expireInvites());
+
+        // m1 joining p1 again starts in GLOBAL chat channel cleanly
+        assertTrue(service.invite(l1, m1));
+        assertTrue(service.acceptInvite(m1, p1.partyId()));
+        assertEquals(PartyChatChannel.GLOBAL, service.chatChannel(m1));
+    }
 }

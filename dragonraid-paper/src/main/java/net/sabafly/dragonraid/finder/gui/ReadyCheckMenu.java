@@ -35,6 +35,7 @@ public final class ReadyCheckMenu implements InventoryHolder {
     private final FinderMenuFactory menuFactory;
     private final Function<UUID, @Nullable Player> playerLookup;
     private final Inventory inventory;
+    private volatile UUID sessionId;
 
     public ReadyCheckMenu(
             Player viewer,
@@ -49,6 +50,7 @@ public final class ReadyCheckMenu implements InventoryHolder {
         this.messageService = Objects.requireNonNull(messageService, "messageService");
         this.menuFactory = Objects.requireNonNull(menuFactory, "menuFactory");
         this.playerLookup = Objects.requireNonNull(playerLookup, "playerLookup");
+        this.sessionId = Objects.requireNonNull(session, "session").sessionId();
         this.inventory = menuFactory.createInventory(
                 this,
                 INVENTORY_SIZE,
@@ -66,7 +68,12 @@ public final class ReadyCheckMenu implements InventoryHolder {
         return viewer.getUniqueId();
     }
 
+    public UUID sessionId() {
+        return sessionId;
+    }
+
     public void refresh(ReadyCheckSession session, long nowMillis) {
+        this.sessionId = session.sessionId();
         inventory.clear();
         ItemStack border = menuFactory.createItem("BLACK_STAINED_GLASS_PANE", Component.text(" "), List.of(), false);
         for (int i = 0; i < 18; i++) {

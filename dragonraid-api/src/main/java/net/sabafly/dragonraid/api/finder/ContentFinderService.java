@@ -39,6 +39,10 @@ public interface ContentFinderService {
         return false;
     }
 
+    default boolean respondReadyCheck(UUID playerId, UUID expectedSessionId, boolean accepted) {
+        return respondReadyCheck(playerId, accepted);
+    }
+
     default boolean cancelReadyCheck(UUID actorId) {
         return false;
     }
