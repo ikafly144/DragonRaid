@@ -3,15 +3,27 @@ package net.sabafly.dragonraid;
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.PacketEventsAPI;
 import net.sabafly.dragonraid.achievement.DefaultRaidAchievementService;
-import net.sabafly.dragonraid.achievement.RaidAchievementService;
+import net.sabafly.dragonraid.api.achievement.AchievementDefinition;
+import net.sabafly.dragonraid.api.achievement.RaidAchievementService;
 import net.sabafly.dragonraid.api.economy.RaidEconomyService;
+import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.finder.ContentFinderService;
 import net.sabafly.dragonraid.api.finder.ContentUnlockService;
 import net.sabafly.dragonraid.api.item.RaidItemService;
 import net.sabafly.dragonraid.api.model.ActorModelService;
+import net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot;
+import net.sabafly.dragonraid.api.pack.ContentPackLoader;
 import net.sabafly.dragonraid.api.party.RaidPartyService;
+import net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy;
+import net.sabafly.dragonraid.api.progression.VanillaProgressionService;
+import net.sabafly.dragonraid.api.reward.ContentUnlockNotifier;
+import net.sabafly.dragonraid.api.reward.RaidRewardService;
+import net.sabafly.dragonraid.api.reward.RewardCurrencySink;
+import net.sabafly.dragonraid.api.reward.RewardItemDelivery;
+import net.sabafly.dragonraid.api.reward.RewardTable;
 import net.sabafly.dragonraid.api.script.EncounterBlueprintRegistry;
 import net.sabafly.dragonraid.api.script.GimmickActionRegistry;
+import net.sabafly.dragonraid.api.script.ScriptHookRegistry;
 import net.sabafly.dragonraid.api.service.RaidServiceRegistry;
 import net.sabafly.dragonraid.api.stat.RaidStatService;
 import net.sabafly.dragonraid.boss.DragonBossController;
@@ -37,31 +49,49 @@ import net.sabafly.dragonraid.item.DefaultRaidItemService;
 import net.sabafly.dragonraid.model.DefaultActorModelService;
 import net.sabafly.dragonraid.party.DefaultRaidPartyService;
 import net.sabafly.dragonraid.permission.RaidPermissions;
+import net.sabafly.dragonraid.progression.DefaultVanillaEndProgressionPolicy;
+import net.sabafly.dragonraid.progression.FoliaVanillaProgressionService;
+import net.sabafly.dragonraid.progression.PlayerProgressionJoinListener;
+import net.sabafly.dragonraid.progression.VanillaEndPortalListener;
 import net.sabafly.dragonraid.protection.ArenaProtectionListener;
 import net.sabafly.dragonraid.protection.TemporaryBlockTracker;
 import net.sabafly.dragonraid.region.DefaultRaidRegionService;
 import net.sabafly.dragonraid.region.RaidRegionService;
 import net.sabafly.dragonraid.reward.DefaultRaidRewardService;
-import net.sabafly.dragonraid.reward.RaidRewardService;
+import net.sabafly.dragonraid.reward.DefaultRewardApplier;
+import net.sabafly.dragonraid.reward.FoliaRewardItemDelivery;
+import net.sabafly.dragonraid.reward.PureRewardTableEvaluator;
+import net.sabafly.dragonraid.reward.RewardDispatchListener;
 import net.sabafly.dragonraid.scheduler.FoliaRaidScheduler;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.script.DefaultEncounterBlueprintRegistry;
 import net.sabafly.dragonraid.script.DefaultGimmickActionRegistry;
+import net.sabafly.dragonraid.script.DefaultScriptHookRegistry;
+import net.sabafly.dragonraid.script.pack.DefaultContentPackLoader;
 import net.sabafly.dragonraid.stat.DefaultRaidStatService;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
+import net.sabafly.dragonraid.storage.PointTransactionResult;
 import net.sabafly.dragonraid.storage.RaidRecoveryRepository;
+import net.sabafly.dragonraid.storage.SqliteCurrencyLedgerStore;
 import net.sabafly.dragonraid.storage.SqliteDatabase;
 import net.sabafly.dragonraid.storage.SqlitePlayerDataRepository;
 import net.sabafly.dragonraid.storage.SqliteRaidRecoveryRepository;
+import net.sabafly.dragonraid.visual.PacketEventsContentUnlockNotifier;
 import net.sabafly.dragonraid.visual.PacketEventsSoulMarkerService;
 import net.sabafly.dragonraid.visual.PacketEventsTelegraphService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
 import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import java.nio.file.Path;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Main Folia plugin entrypoint for DragonRaid.
@@ -86,7 +116,9 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private ActorModelService actorModelService;
     private EncounterBlueprintRegistry blueprintRegistry;
     private GimmickActionRegistry gimmickActionRegistry;
+    private ScriptHookRegistry scriptHookRegistry;
     private DefaultRaidRewardService rewardService;
+    private RewardDispatchListener rewardDispatchListener;
     private DefaultRaidAchievementService achievementService;
     private RaidPartyService partyService;
     private RaidItemService itemService;
@@ -94,6 +126,12 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private ContentFinderService contentFinderService;
     private RaidEconomyService economyService;
     private RaidStatService statService;
+    private VanillaProgressionService vanillaProgressionService;
+    private DefaultVanillaEndProgressionPolicy vanillaEndProgressionPolicy;
+    private ContentUnlockNotifier contentUnlockNotifier;
+    private RewardItemDelivery rewardItemDelivery;
+    private ContentPackLoader contentPackLoader;
+    private ExecutorService scriptHookExecutor;
 
     @Override
     public void onEnable() {
@@ -144,14 +182,121 @@ public final class DragonRaidPlugin extends JavaPlugin {
             this.actorModelService = new DefaultActorModelService(getLogger());
             this.blueprintRegistry = new DefaultEncounterBlueprintRegistry();
             this.gimmickActionRegistry = new DefaultGimmickActionRegistry();
-            this.rewardService = new DefaultRaidRewardService();
-            this.achievementService = new DefaultRaidAchievementService();
+            this.scriptHookRegistry = new DefaultScriptHookRegistry();
             this.partyService = new DefaultRaidPartyService();
             this.itemService = new DefaultRaidItemService();
-            this.contentUnlockService = new DefaultContentUnlockService();
+            this.contentUnlockService = new DefaultContentUnlockService(playerDataRepository, System::currentTimeMillis, getLogger());
             this.contentFinderService = new DefaultContentFinderService(contentUnlockService, partyService, itemService);
-            this.economyService = new DefaultRaidEconomyService();
+            this.economyService = new DefaultRaidEconomyService(
+                    new SqliteCurrencyLedgerStore(playerDataRepository, System::currentTimeMillis)
+            );
             this.statService = new DefaultRaidStatService();
+            this.vanillaProgressionService = new FoliaVanillaProgressionService(
+                configManager,
+                raidScheduler,
+                getServer()::getWorld,
+                getLogger()
+            );
+            this.contentUnlockNotifier = new PacketEventsContentUnlockNotifier(
+                messageService,
+                raidScheduler,
+                getServer()::getPlayer,
+                getLogger()
+            );
+            this.rewardItemDelivery = new FoliaRewardItemDelivery(
+                raidScheduler,
+                getServer()::getPlayer,
+                itemService,
+                getLogger()
+            );
+            RewardCurrencySink currencySink = new RewardCurrencySink() {
+                @Override
+                public CompletableFuture<Boolean> grantCurrency(
+                        UUID playerId,
+                        @Nullable String playerName,
+                        String currencyId,
+                        long amount) {
+                    return grantCurrencyIdempotent(playerId, playerName, currencyId, amount, null, 0L);
+                }
+
+                @Override
+                public CompletableFuture<Boolean> grantCurrencyIdempotent(
+                        UUID playerId,
+                        @Nullable String playerName,
+                        String currencyId,
+                        long amount,
+                        @Nullable String idempotencyKey,
+                        long claimedAtEpochMillis) {
+                    if (economyService.getCurrency(currencyId).isPresent()) {
+                        return economyService.depositIdempotentAsync(
+                                playerId, playerName, currencyId, amount, idempotencyKey, claimedAtEpochMillis);
+                    }
+                    return playerDataRepository.addCurrencyWithCapsIdempotent(
+                                    playerId, playerName, currencyId, amount,
+                                    0L, 0L, "unbounded", idempotencyKey, claimedAtEpochMillis)
+                            .thenApply(PointTransactionResult::success);
+                }
+            };
+            this.achievementService = new DefaultRaidAchievementService(
+                playerDataRepository,
+                scriptHookRegistry,
+                serviceRegistry,
+                event -> raidScheduler.runGlobal(() -> getServer().getPluginManager().callEvent(event)),
+                System::currentTimeMillis,
+                getLogger()
+            );
+            this.achievementService.setCatalogSnapshotSupplier(
+                () -> this.contentPackLoader != null ? this.contentPackLoader.catalogSnapshot() : ContentPackCatalogSnapshot.empty()
+            );
+            this.scriptHookExecutor = Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "DragonRaid-Script");
+                thread.setDaemon(true);
+                return thread;
+            });
+            DefaultRewardApplier rewardApplier = new DefaultRewardApplier(
+                contentUnlockService,
+                contentFinderService,
+                contentUnlockNotifier,
+                currencySink,
+                rewardItemDelivery,
+                scriptHookRegistry,
+                playerDataRepository,
+                serviceRegistry,
+                System::currentTimeMillis,
+                getLogger(),
+                scriptHookExecutor
+            );
+            this.rewardService = new DefaultRaidRewardService(
+                new PureRewardTableEvaluator(scriptHookRegistry, serviceRegistry),
+                rewardApplier
+            );
+            this.rewardDispatchListener = new RewardDispatchListener(
+                rewardService,
+                contentFinderService,
+                achievementService,
+                contentUnlockService,
+                playerDataRepository,
+                System::currentTimeMillis,
+                getLogger(),
+                () -> this.contentPackLoader != null ? this.contentPackLoader.catalogSnapshot() : ContentPackCatalogSnapshot.empty()
+            );
+            this.vanillaEndProgressionPolicy = new DefaultVanillaEndProgressionPolicy(
+                playerDataRepository,
+                contentUnlockService,
+                achievementService,
+                vanillaProgressionService,
+                scriptHookRegistry,
+                serviceRegistry,
+                getLogger()
+            );
+            this.contentPackLoader = new DefaultContentPackLoader(
+                getDataPath().resolve("contents"),
+                contentFinderService,
+                achievementService,
+                rewardService,
+                vanillaEndProgressionPolicy,
+                getLogger()
+            );
 
             this.regionService = new DefaultRaidRegionService(configManager, raidScheduler);
             this.temporaryBlockTracker = new TemporaryBlockTracker();
@@ -177,12 +322,14 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 instanceManager,
                 getLogger()
             );
+            this.encounterManager.setVanillaEndProgressionPolicy(vanillaEndProgressionPolicy);
 
             serviceRegistry.register(RaidScheduler.class, raidScheduler);
             serviceRegistry.register(RaidInstanceManager.class, instanceManager);
             serviceRegistry.register(ActorModelService.class, actorModelService);
             serviceRegistry.register(EncounterBlueprintRegistry.class, blueprintRegistry);
             serviceRegistry.register(GimmickActionRegistry.class, gimmickActionRegistry);
+            serviceRegistry.register(ScriptHookRegistry.class, scriptHookRegistry);
             serviceRegistry.register(RaidRewardService.class, rewardService);
             serviceRegistry.register(RaidAchievementService.class, achievementService);
             serviceRegistry.register(RaidPartyService.class, partyService);
@@ -191,11 +338,46 @@ public final class DragonRaidPlugin extends JavaPlugin {
             serviceRegistry.register(ContentFinderService.class, contentFinderService);
             serviceRegistry.register(RaidEconomyService.class, economyService);
             serviceRegistry.register(RaidStatService.class, statService);
+            serviceRegistry.register(VanillaProgressionService.class, vanillaProgressionService);
+            serviceRegistry.register(VanillaEndProgressionPolicy.class, vanillaEndProgressionPolicy);
+            serviceRegistry.register(ContentUnlockNotifier.class, contentUnlockNotifier);
+            serviceRegistry.register(RewardItemDelivery.class, rewardItemDelivery);
+            serviceRegistry.register(ContentPackLoader.class, contentPackLoader);
             serviceRegistry.register(SpatialTelegraphService.class, telegraphService);
+
+            vanillaEndProgressionPolicy.loadServerMilestones().join();
+            try {
+                contentPackLoader.reload();
+            } catch (RuntimeException ex) {
+                vanillaEndProgressionPolicy.markPackLoadFailed(ex.getMessage());
+                getLogger().log(Level.SEVERE, "Failed to load Content Packs during startup; vanilla End entry fails closed until reload succeeds", ex);
+            }
+
             raidScheduler.runGlobal(() -> encounterManager.recoverPendingBlockRollbacks(getServer()::getWorld));
 
-            getServer().getPluginManager().registerEvents(rewardService, this);
+            VanillaEndPortalListener endPortalListener = new VanillaEndPortalListener(
+                achievementService,
+                vanillaEndProgressionPolicy,
+                instanceManager,
+                messageService,
+                getLogger()
+            );
+            PlayerProgressionJoinListener progressionJoinListener = new PlayerProgressionJoinListener(
+                playerDataRepository,
+                achievementService,
+                contentUnlockService,
+                vanillaEndProgressionPolicy,
+                endPortalListener,
+                rewardService,
+                rewardDispatchListener,
+                getLogger()
+            );
+
+            getServer().getPluginManager().registerEvents(rewardDispatchListener, this);
             getServer().getPluginManager().registerEvents(achievementService, this);
+            getServer().getPluginManager().registerEvents(vanillaEndProgressionPolicy, this);
+            getServer().getPluginManager().registerEvents(endPortalListener, this);
+            getServer().getPluginManager().registerEvents(progressionJoinListener, this);
             getServer().getPluginManager().registerEvents(
                 new ArenaProtectionListener(
                     configManager,
@@ -217,12 +399,22 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 raidScheduler,
                 playerDataRepository,
                 getLogger(),
-                encounterManager
+                name -> java.util.Optional.ofNullable(getServer().getPlayerExact(name)),
+                encounterManager,
+                contentPackLoader,
+                contentUnlockService,
+                achievementService,
+                vanillaEndProgressionPolicy,
+                vanillaProgressionService,
+                rewardService
             );
             new DragonRaidCommandRegistrar(
                 commandHandler,
                 () -> getServer().getOnlinePlayers().stream().map(Player::getName).toList(),
-                () -> configManager.rewardsConfig().currencies().keySet()
+                () -> configManager.rewardsConfig().currencies().keySet(),
+                () -> contentFinderService.allContents().stream().map(ContentEntrySpec::contentId).toList(),
+                () -> achievementService.definitions().stream().map(AchievementDefinition::id).toList(),
+                () -> rewardService.tables().stream().map(RewardTable::id).toList()
             ).register(this);
 
             logPacketEventsStatus();
@@ -244,6 +436,17 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 getLogger().log(Level.WARNING, "Failed to shut down raid encounter manager", ex);
             }
         }
+        if (scriptHookExecutor != null) {
+            scriptHookExecutor.shutdown();
+            try {
+                if (!scriptHookExecutor.awaitTermination(3L, TimeUnit.SECONDS)) {
+                    scriptHookExecutor.shutdownNow();
+                }
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                scriptHookExecutor.shutdownNow();
+            }
+        }
         // Close repositories and shared database first so queued/sync DB writes flush before asyncScheduler tasks cancel.
         if (playerDataRepository != null) {
             try {
@@ -257,6 +460,13 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 sqliteDatabase.close();
             } catch (Exception ex) {
                 getLogger().log(Level.WARNING, "Failed to close SQLite database during shutdown", ex);
+            }
+        }
+        if (vanillaProgressionService instanceof FoliaVanillaProgressionService foliaVanillaProgression) {
+            try {
+                foliaVanillaProgression.cancelPendingTasks();
+            } catch (RuntimeException ex) {
+                getLogger().log(Level.WARNING, "Failed to cancel pending vanilla progression tasks during shutdown", ex);
             }
         }
         if (raidScheduler != null) {

@@ -272,7 +272,12 @@ class FoliaRaidSchedulerTest {
     void taskHandleCancelAndIsCancelledDelegateToScheduledTask() {
         ScheduledTask scheduledTask = mock(ScheduledTask.class);
         when(globalRegionScheduler.run(eq(plugin), any())).thenReturn(scheduledTask);
-        when(scheduledTask.isCancelled()).thenReturn(false, true);
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        org.mockito.Mockito.doAnswer(inv -> {
+            cancelled.set(true);
+            return null;
+        }).when(scheduledTask).cancel();
+        when(scheduledTask.isCancelled()).thenAnswer(inv -> cancelled.get());
 
         TaskHandle handle = scheduler.runGlobal(() -> {});
         assertFalse(handle.isCancelled());
@@ -382,5 +387,18 @@ class FoliaRaidSchedulerTest {
 
         verify(scheduledTask, never()).cancel();
         assertNotNull(handle);
+    }
+
+    @Test
+    void registerTask_withPreCancelledDelegate_firesOnCancelOnce() {
+        ScheduledTask cancelledDelegate = mock(ScheduledTask.class);
+        when(cancelledDelegate.isCancelled()).thenReturn(true);
+        when(globalRegionScheduler.run(eq(plugin), any())).thenReturn(cancelledDelegate);
+
+        TaskHandle handle = scheduler.runGlobal(() -> {});
+        assertTrue(handle.isCancelled());
+        AtomicInteger callbackCount = new AtomicInteger();
+        handle.onCancel(callbackCount::incrementAndGet);
+        assertEquals(1, callbackCount.get());
     }
 }

@@ -25,6 +25,12 @@ public final class RaidPermissions {
     public static final String ADMIN_RESET = "dragonraid.admin.reset";
     public static final String ADMIN_POINTS = "dragonraid.admin.points";
     public static final String ADMIN_RELOAD = "dragonraid.admin.reload";
+    public static final String ADMIN_PACKS = "dragonraid.admin.packs";
+    public static final String ADMIN_UNLOCK = "dragonraid.admin.unlock";
+    public static final String ADMIN_ACHIEVEMENT = "dragonraid.admin.achievement";
+    public static final String ADMIN_PROGRESSION = "dragonraid.admin.progression";
+    public static final String ADMIN_REWARD = "dragonraid.admin.reward";
+    public static final String BYPASS_END_GATE = "dragonraid.bypass.end_gate";
 
     private static final String ADMIN_PREFIX = ADMIN + ".";
 
@@ -36,12 +42,18 @@ public final class RaidPermissions {
         SHOP,
         STATS,
         STATS_OTHERS,
+        BYPASS_END_GATE,
         ADMIN,
         ADMIN_REGION,
         ADMIN_START,
         ADMIN_RESET,
         ADMIN_POINTS,
-        ADMIN_RELOAD
+        ADMIN_RELOAD,
+        ADMIN_PACKS,
+        ADMIN_UNLOCK,
+        ADMIN_ACHIEVEMENT,
+        ADMIN_PROGRESSION,
+        ADMIN_REWARD
     );
 
     private static final List<String> ADMIN_SUB_NODES = List.of(
@@ -49,7 +61,12 @@ public final class RaidPermissions {
         ADMIN_START,
         ADMIN_RESET,
         ADMIN_POINTS,
-        ADMIN_RELOAD
+        ADMIN_RELOAD,
+        ADMIN_PACKS,
+        ADMIN_UNLOCK,
+        ADMIN_ACHIEVEMENT,
+        ADMIN_PROGRESSION,
+        ADMIN_REWARD
     );
 
     private RaidPermissions() {
@@ -135,12 +152,18 @@ public final class RaidPermissions {
         registerIfAbsent(pluginManager, SHOP, "Allows opening the DragonRaid reward shop", PermissionDefault.TRUE, Map.of());
         registerIfAbsent(pluginManager, STATS, "Allows viewing own DragonRaid stats", PermissionDefault.TRUE, Map.of());
         registerIfAbsent(pluginManager, STATS_OTHERS, "Allows viewing other players' DragonRaid stats", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, BYPASS_END_GATE, "Allows bypassing vanilla End portal entry restrictions", PermissionDefault.FALSE, Map.of());
 
         registerIfAbsent(pluginManager, ADMIN_REGION, "Allows configuring DragonRaid regions", PermissionDefault.OP, Map.of());
         registerIfAbsent(pluginManager, ADMIN_START, "Allows force-starting a DragonRaid", PermissionDefault.OP, Map.of());
         registerIfAbsent(pluginManager, ADMIN_RESET, "Allows force-resetting a DragonRaid", PermissionDefault.OP, Map.of());
         registerIfAbsent(pluginManager, ADMIN_POINTS, "Allows modifying player DragonRaid points", PermissionDefault.OP, Map.of());
         registerIfAbsent(pluginManager, ADMIN_RELOAD, "Allows reloading DragonRaid configuration", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, ADMIN_PACKS, "Allows inspecting loaded DragonRaid content packs", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, ADMIN_UNLOCK, "Allows managing player content unlocks", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, ADMIN_ACHIEVEMENT, "Allows managing player achievements", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, ADMIN_PROGRESSION, "Allows inspecting vanilla progression policy status", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, ADMIN_REWARD, "Allows inspecting, simulating, and granting reward tables", PermissionDefault.OP, Map.of());
 
         Map<String, Boolean> adminChildren = new LinkedHashMap<>();
         for (String node : ADMIN_SUB_NODES) {

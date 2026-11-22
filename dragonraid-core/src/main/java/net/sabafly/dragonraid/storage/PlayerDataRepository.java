@@ -4,16 +4,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import net.sabafly.dragonraid.api.progression.PlayerProgressionRepository;
 
 /**
  * Asynchronous repository contract for DragonRaid player statistics, virtual points,
- * and named reward currencies.
+ * named reward currencies, and player progression state.
  *
  * <p>All methods return {@link CompletableFuture} instances executed on the repository's
  * configured async executor so callers can safely bridge results back to Folia region/entity
  * schedulers.
  */
-public interface PlayerDataRepository extends AutoCloseable {
+public interface PlayerDataRepository extends PlayerProgressionRepository, AutoCloseable {
 
     /**
      * Finds stored statistics for the given player UUID.
@@ -102,6 +103,49 @@ public interface PlayerDataRepository extends AutoCloseable {
         String currencyId,
         long amount
     );
+
+    /**
+     * Atomically checks {@code maxBalance} and {@code weeklyCap} (when {@code > 0}) and adds
+     * {@code amount} to the player's SQLite currency balance within a single transaction.
+     */
+    default CompletableFuture<PointTransactionResult> addCurrencyWithCaps(
+        UUID uuid,
+        String lastKnownName,
+        String currencyId,
+        long amount,
+        long maxBalance,
+        long weeklyCap,
+        String weekKey
+    ) {
+        if (maxBalance > 0L || weeklyCap > 0L) {
+            return CompletableFuture.failedFuture(
+                    new UnsupportedOperationException("Currency caps are not supported by this repository"));
+        }
+        return addCurrency(uuid, lastKnownName, currencyId, amount);
+    }
+
+    /**
+     * Atomically checks optional {@code idempotencyClaimKey}, {@code maxBalance}, and
+     * {@code weeklyCap}, adds {@code amount} to {@code player_currencies}, records weekly
+     * earnings, and persists {@code idempotencyClaimKey} within a single transaction.
+     */
+    default CompletableFuture<PointTransactionResult> addCurrencyWithCapsIdempotent(
+        UUID uuid,
+        String lastKnownName,
+        String currencyId,
+        long amount,
+        long maxBalance,
+        long weeklyCap,
+        String weekKey,
+        String idempotencyClaimKey,
+        long claimedAtEpochMillis
+    ) {
+        if (idempotencyClaimKey != null && !idempotencyClaimKey.isBlank()) {
+            return CompletableFuture.failedFuture(
+                    new UnsupportedOperationException("Idempotent currency deposit is not supported by this repository"));
+        }
+        return addCurrencyWithCaps(uuid, lastKnownName, currencyId, amount, maxBalance, weeklyCap, weekKey);
+    }
 
     /**
      * Atomically deducts from a named currency balance if sufficient funds exist.

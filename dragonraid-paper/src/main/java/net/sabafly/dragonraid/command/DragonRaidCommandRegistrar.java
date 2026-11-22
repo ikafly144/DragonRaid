@@ -4,14 +4,18 @@ import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import com.mojang.brigadier.tree.LiteralCommandNode;
+import net.sabafly.dragonraid.command.RaidCommandHandler.AchievementAction;
 import net.sabafly.dragonraid.command.RaidCommandHandler.Difficulty;
 import net.sabafly.dragonraid.command.RaidCommandHandler.PointsAction;
 import net.sabafly.dragonraid.command.RaidCommandHandler.RegionAction;
+import net.sabafly.dragonraid.command.RaidCommandHandler.RewardAction;
+import net.sabafly.dragonraid.command.RaidCommandHandler.UnlockAction;
 import net.sabafly.dragonraid.permission.RaidPermissions;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
@@ -53,6 +57,9 @@ public final class DragonRaidCommandRegistrar {
     private final RaidCommandHandler handler;
     private final Supplier<Collection<String>> playerNameSupplier;
     private final Supplier<Collection<String>> currencySupplier;
+    private final Supplier<Collection<String>> contentIdSupplier;
+    private final Supplier<Collection<String>> achievementIdSupplier;
+    private final Supplier<Collection<String>> rewardTableIdSupplier;
 
     /**
      * Creates a registrar using online Bukkit players and default currency IDs for tab completion.
@@ -60,7 +67,7 @@ public final class DragonRaidCommandRegistrar {
      * @param handler the command handler port
      */
     public DragonRaidCommandRegistrar(RaidCommandHandler handler) {
-        this(handler, DragonRaidCommandRegistrar::onlinePlayerNames, () -> DEFAULT_CURRENCIES);
+        this(handler, DragonRaidCommandRegistrar::onlinePlayerNames, () -> DEFAULT_CURRENCIES, List::of, List::of, List::of);
     }
 
     /**
@@ -75,9 +82,33 @@ public final class DragonRaidCommandRegistrar {
         Supplier<Collection<String>> playerNameSupplier,
         Supplier<Collection<String>> currencySupplier
     ) {
+        this(handler, playerNameSupplier, currencySupplier, List::of, List::of, List::of);
+    }
+
+    public DragonRaidCommandRegistrar(
+        RaidCommandHandler handler,
+        Supplier<Collection<String>> playerNameSupplier,
+        Supplier<Collection<String>> currencySupplier,
+        Supplier<Collection<String>> contentIdSupplier,
+        Supplier<Collection<String>> achievementIdSupplier
+    ) {
+        this(handler, playerNameSupplier, currencySupplier, contentIdSupplier, achievementIdSupplier, List::of);
+    }
+
+    public DragonRaidCommandRegistrar(
+        RaidCommandHandler handler,
+        Supplier<Collection<String>> playerNameSupplier,
+        Supplier<Collection<String>> currencySupplier,
+        Supplier<Collection<String>> contentIdSupplier,
+        Supplier<Collection<String>> achievementIdSupplier,
+        Supplier<Collection<String>> rewardTableIdSupplier
+    ) {
         this.handler = Objects.requireNonNull(handler, "handler");
         this.playerNameSupplier = Objects.requireNonNull(playerNameSupplier, "playerNameSupplier");
         this.currencySupplier = Objects.requireNonNull(currencySupplier, "currencySupplier");
+        this.contentIdSupplier = Objects.requireNonNull(contentIdSupplier, "contentIdSupplier");
+        this.achievementIdSupplier = Objects.requireNonNull(achievementIdSupplier, "achievementIdSupplier");
+        this.rewardTableIdSupplier = Objects.requireNonNull(rewardTableIdSupplier, "rewardTableIdSupplier");
     }
 
     /**
@@ -202,7 +233,12 @@ public final class DragonRaidCommandRegistrar {
             .then(buildAdminStartNode())
             .then(buildAdminResetNode())
             .then(buildAdminPointsNode())
-            .then(buildAdminReloadNode());
+            .then(buildAdminReloadNode())
+            .then(buildAdminPacksNode())
+            .then(buildAdminUnlockNode())
+            .then(buildAdminAchievementNode())
+            .then(buildAdminProgressionNode())
+            .then(buildAdminRewardNode());
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> buildAdminRegionNode() {
@@ -315,8 +351,8 @@ public final class DragonRaidCommandRegistrar {
                         handler.adminPoints(ctx.getSource().getSender(), action, target, null, amount);
                         return Command.SINGLE_SUCCESS;
                     }))
-                .then(Commands.argument("currency", StringArgumentType.word())
-                    .suggests((ctx, builder) -> suggestMatching(currencySupplier.get(), builder))
+                .then(Commands.argument("currency", StringArgumentType.string())
+                    .suggests((ctx, builder) -> suggestMatchingEscaped(currencySupplier.get(), builder))
                     .then(Commands.argument("amount", IntegerArgumentType.integer(minAmount))
                         .executes(ctx -> {
                             String target = StringArgumentType.getString(ctx, "player");
@@ -334,6 +370,125 @@ public final class DragonRaidCommandRegistrar {
                 handler.adminReload(ctx.getSource().getSender());
                 return Command.SINGLE_SUCCESS;
             });
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildAdminPacksNode() {
+        return Commands.literal("packs")
+            .requires(source -> RaidPermissions.hasPermission(source.getSender(), RaidPermissions.ADMIN_PACKS))
+            .executes(ctx -> {
+                handler.adminPacks(ctx.getSource().getSender());
+                return Command.SINGLE_SUCCESS;
+            });
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildAdminUnlockNode() {
+        return Commands.literal("unlock")
+            .requires(source -> RaidPermissions.hasPermission(source.getSender(), RaidPermissions.ADMIN_UNLOCK))
+            .then(buildUnlockMutationNode(UnlockAction.GRANT))
+            .then(buildUnlockMutationNode(UnlockAction.REVOKE))
+            .then(Commands.literal(UnlockAction.LIST.cliName())
+                .then(Commands.argument("player", StringArgumentType.word())
+                    .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
+                    .executes(ctx -> {
+                        String target = StringArgumentType.getString(ctx, "player");
+                        handler.adminUnlock(ctx.getSource().getSender(), UnlockAction.LIST, target, null);
+                        return Command.SINGLE_SUCCESS;
+                    })));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildUnlockMutationNode(UnlockAction action) {
+        return Commands.literal(action.cliName())
+            .then(Commands.argument("player", StringArgumentType.word())
+                .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
+                .then(Commands.argument("contentId", StringArgumentType.string())
+                    .suggests((ctx, builder) -> suggestMatchingEscaped(contentIdSupplier.get(), builder))
+                    .executes(ctx -> {
+                        String target = StringArgumentType.getString(ctx, "player");
+                        String contentId = StringArgumentType.getString(ctx, "contentId");
+                        handler.adminUnlock(ctx.getSource().getSender(), action, target, contentId);
+                        return Command.SINGLE_SUCCESS;
+                    })));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildAdminAchievementNode() {
+        return Commands.literal("achievement")
+            .requires(source -> RaidPermissions.hasPermission(source.getSender(), RaidPermissions.ADMIN_ACHIEVEMENT))
+            .then(Commands.literal(AchievementAction.GRANT.cliName())
+                .then(Commands.argument("player", StringArgumentType.word())
+                    .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
+                    .then(Commands.argument("achievementId", StringArgumentType.string())
+                        .suggests((ctx, builder) -> suggestMatchingEscaped(achievementIdSupplier.get(), builder))
+                        .executes(ctx -> {
+                            String target = StringArgumentType.getString(ctx, "player");
+                            String achievementId = StringArgumentType.getString(ctx, "achievementId");
+                            handler.adminAchievement(
+                                ctx.getSource().getSender(),
+                                AchievementAction.GRANT,
+                                target,
+                                achievementId
+                            );
+                            return Command.SINGLE_SUCCESS;
+                        }))))
+            .then(Commands.literal(AchievementAction.LIST.cliName())
+                .then(Commands.argument("player", StringArgumentType.word())
+                    .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
+                    .executes(ctx -> {
+                        String target = StringArgumentType.getString(ctx, "player");
+                        handler.adminAchievement(
+                            ctx.getSource().getSender(),
+                            AchievementAction.LIST,
+                            target,
+                            null
+                        );
+                        return Command.SINGLE_SUCCESS;
+                    })));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildAdminProgressionNode() {
+        return Commands.literal("progression")
+            .requires(source -> RaidPermissions.hasPermission(source.getSender(), RaidPermissions.ADMIN_PROGRESSION))
+            .then(Commands.literal("status")
+                .executes(ctx -> {
+                    handler.adminProgressionStatus(ctx.getSource().getSender());
+                    return Command.SINGLE_SUCCESS;
+                }));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildAdminRewardNode() {
+        return Commands.literal("reward")
+            .requires(source -> RaidPermissions.hasPermission(source.getSender(), RaidPermissions.ADMIN_REWARD))
+            .then(Commands.literal(RewardAction.LIST.cliName())
+                .executes(ctx -> {
+                    handler.adminReward(ctx.getSource().getSender(), RewardAction.LIST, null, null, null);
+                    return Command.SINGLE_SUCCESS;
+                }))
+            .then(buildRewardTargetNode(RewardAction.SIMULATE, true))
+            .then(buildRewardTargetNode(RewardAction.GRANT, false));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> buildRewardTargetNode(RewardAction action, boolean allowSeed) {
+        var playerNode = Commands.argument("player", StringArgumentType.word())
+            .suggests((ctx, builder) -> suggestMatching(playerNameSupplier.get(), builder))
+            .executes(ctx -> {
+                String tableId = StringArgumentType.getString(ctx, "tableId");
+                String target = StringArgumentType.getString(ctx, "player");
+                handler.adminReward(ctx.getSource().getSender(), action, tableId, target, null);
+                return Command.SINGLE_SUCCESS;
+            });
+        if (allowSeed) {
+            playerNode = playerNode.then(Commands.argument("seed", LongArgumentType.longArg())
+                .executes(ctx -> {
+                    String tableId = StringArgumentType.getString(ctx, "tableId");
+                    String target = StringArgumentType.getString(ctx, "player");
+                    long seed = LongArgumentType.getLong(ctx, "seed");
+                    handler.adminReward(ctx.getSource().getSender(), action, tableId, target, seed);
+                    return Command.SINGLE_SUCCESS;
+                }));
+        }
+        return Commands.literal(action.cliName())
+            .then(Commands.argument("tableId", StringArgumentType.string())
+                .suggests((ctx, builder) -> suggestMatchingEscaped(rewardTableIdSupplier.get(), builder))
+                .then(playerNode));
     }
 
     private int requirePlayer(CommandSourceStack source, Consumer<Player> action) {
@@ -358,6 +513,26 @@ public final class DragonRaidCommandRegistrar {
         for (String candidate : candidates) {
             if (candidate.toLowerCase(Locale.ROOT).startsWith(remaining)) {
                 builder.suggest(candidate);
+            }
+        }
+        return builder.buildFuture();
+    }
+
+    private static CompletableFuture<Suggestions> suggestMatchingEscaped(
+        Collection<String> candidates,
+        SuggestionsBuilder builder
+    ) {
+        String rawRemaining = builder.getRemaining();
+        String remainingLower = rawRemaining.toLowerCase(Locale.ROOT);
+        String unquotedLower = (!rawRemaining.isEmpty()
+                && (rawRemaining.charAt(0) == '"' || rawRemaining.charAt(0) == '\''))
+                ? remainingLower.substring(1)
+                : remainingLower;
+        for (String candidate : candidates) {
+            String escaped = StringArgumentType.escapeIfRequired(candidate);
+            if (candidate.toLowerCase(Locale.ROOT).startsWith(unquotedLower)
+                    || escaped.toLowerCase(Locale.ROOT).startsWith(remainingLower)) {
+                builder.suggest(escaped);
             }
         }
         return builder.buildFuture();

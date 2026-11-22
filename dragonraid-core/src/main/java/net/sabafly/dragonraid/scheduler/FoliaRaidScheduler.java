@@ -4,6 +4,7 @@ import io.papermc.paper.threadedregions.scheduler.AsyncScheduler;
 import io.papermc.paper.threadedregions.scheduler.GlobalRegionScheduler;
 import io.papermc.paper.threadedregions.scheduler.RegionScheduler;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -29,7 +30,7 @@ public final class FoliaRaidScheduler implements RaidScheduler {
     private final GlobalRegionScheduler globalRegionScheduler;
     private final RegionScheduler regionScheduler;
     private final AsyncScheduler asyncScheduler;
-    private final Set<ScheduledTask> activeTasks = ConcurrentHashMap.newKeySet();
+    private final Set<TrackedTask> activeTasks = ConcurrentHashMap.newKeySet();
     private final Executor asyncExecutor = command -> {
         Objects.requireNonNull(command, "command");
         runAsync(command);
@@ -244,8 +245,7 @@ public final class FoliaRaidScheduler implements RaidScheduler {
 
     @Override
     public void cancelAll() {
-        for (ScheduledTask task : List.copyOf(activeTasks)) {
-            activeTasks.remove(task);
+        for (TrackedTask task : List.copyOf(activeTasks)) {
             task.cancel();
         }
         globalRegionScheduler.cancelTasks(plugin);
@@ -254,9 +254,9 @@ public final class FoliaRaidScheduler implements RaidScheduler {
 
     private TaskHandle scheduleTracked(Runnable task, Function<Consumer<ScheduledTask>, ScheduledTask> call) {
         Objects.requireNonNull(task, "task");
-        AtomicBoolean completed = new AtomicBoolean(false);
-        ScheduledTask scheduled = call.apply(wrapTask(task, completed));
-        return registerTask(scheduled, completed);
+        TrackedTask tracked = new TrackedTask(activeTasks);
+        ScheduledTask scheduled = call.apply(wrapTask(task, tracked));
+        return registerTask(scheduled, tracked);
     }
 
     private TaskHandle scheduleEntityTracked(
@@ -267,53 +267,57 @@ public final class FoliaRaidScheduler implements RaidScheduler {
     ) {
         Objects.requireNonNull(entity, "entity");
         Objects.requireNonNull(task, "task");
-        AtomicBoolean completed = new AtomicBoolean(false);
-        AtomicReference<ScheduledTask> scheduledRef = new AtomicReference<>();
+        TrackedTask tracked = new TrackedTask(activeTasks);
         Runnable wrappedRetired = () -> {
+            tracked.markFinishedOrRetired();
             try {
                 if (retired != null) {
                     retired.run();
                 }
             } finally {
-                completed.set(true);
-                ScheduledTask st = scheduledRef.get();
-                if (st != null) {
-                    activeTasks.remove(st);
-                }
+                activeTasks.remove(tracked);
             }
         };
-        ScheduledTask scheduled = call.apply(wrapTask(task, completed), wrappedRetired);
-        if (scheduled != null) {
-            scheduledRef.set(scheduled);
-        }
-        return registerTask(scheduled, completed);
+        ScheduledTask scheduled = call.apply(wrapTask(task, tracked), wrappedRetired);
+        return registerTask(scheduled, tracked);
     }
 
-    private Consumer<ScheduledTask> wrapTask(Runnable task, AtomicBoolean completed) {
+    private Consumer<ScheduledTask> wrapTask(Runnable task, TrackedTask tracked) {
         return scheduledTask -> {
+            boolean repeating = scheduledTask != null && scheduledTask.isRepeatingTask();
+            if (!repeating) {
+                tracked.markFinishedOrRetired();
+            }
             try {
                 task.run();
             } finally {
-                if (!scheduledTask.isRepeatingTask()) {
-                    completed.set(true);
-                    activeTasks.remove(scheduledTask);
+                if (!repeating) {
+                    activeTasks.remove(tracked);
                 }
             }
         };
     }
 
-    private TaskHandle registerTask(ScheduledTask scheduled, AtomicBoolean completed) {
+    private TaskHandle registerTask(ScheduledTask scheduled, TrackedTask tracked) {
         if (scheduled == null) {
             return TaskHandle.retired();
         }
-        if (!completed.get()) {
-            activeTasks.add(scheduled);
-            // Guard against synchronous completion between scheduling and add.
-            if (completed.get()) {
-                activeTasks.remove(scheduled);
+        tracked.attach(scheduled);
+        if (scheduled.isCancelled()) {
+            tracked.markCancelledFromDelegate();
+            return new FoliaTaskHandle(tracked);
+        }
+        if (!tracked.isDone()) {
+            activeTasks.add(tracked);
+            // Guard against synchronous completion or cancellation between scheduling and add.
+            if (tracked.isDone()) {
+                activeTasks.remove(tracked);
+            } else if (scheduled.isCancelled()) {
+                activeTasks.remove(tracked);
+                tracked.markCancelledFromDelegate();
             }
         }
-        return new FoliaTaskHandle(scheduled, activeTasks);
+        return new FoliaTaskHandle(tracked);
     }
 
     private static void requirePositive(long value, String name) {
@@ -328,25 +332,133 @@ public final class FoliaRaidScheduler implements RaidScheduler {
         }
     }
 
+    private static final class TrackedTask {
+
+        private final Set<TrackedTask> registry;
+        private final AtomicReference<ScheduledTask> delegateRef = new AtomicReference<>();
+        private final AtomicBoolean finished = new AtomicBoolean(false);
+        private final AtomicBoolean cancelled = new AtomicBoolean(false);
+        private final List<Runnable> cancelCallbacks = new ArrayList<>();
+
+        private TrackedTask(Set<TrackedTask> registry) {
+            this.registry = registry;
+        }
+
+        private void attach(ScheduledTask delegate) {
+            delegateRef.set(delegate);
+        }
+
+        private void markFinishedOrRetired() {
+            finished.set(true);
+            synchronized (cancelCallbacks) {
+                cancelCallbacks.clear();
+            }
+        }
+
+        private boolean isDone() {
+            return finished.get() || cancelled.get();
+        }
+
+        private void cancel() {
+            registry.remove(this);
+            ScheduledTask delegate = delegateRef.get();
+            if (delegate != null) {
+                delegate.cancel();
+            }
+            if (!finished.get() && cancelled.compareAndSet(false, true)) {
+                fireCancelCallbacks(null);
+            }
+        }
+
+        private void markCancelledFromDelegate() {
+            registry.remove(this);
+            if (!finished.get() && cancelled.compareAndSet(false, true)) {
+                fireCancelCallbacks(null);
+            }
+        }
+
+        private void fireCancelCallbacks(Runnable extraCallback) {
+            List<Runnable> callbacks;
+            synchronized (cancelCallbacks) {
+                callbacks = new ArrayList<>(cancelCallbacks.size() + (extraCallback != null ? 1 : 0));
+                callbacks.addAll(cancelCallbacks);
+                cancelCallbacks.clear();
+            }
+            if (extraCallback != null) {
+                callbacks.add(extraCallback);
+            }
+            for (Runnable callback : callbacks) {
+                try {
+                    callback.run();
+                } catch (RuntimeException ignored) {
+                    // Do not abort subsequent cancellation listeners.
+                }
+            }
+        }
+
+        private boolean isCancelled() {
+            if (cancelled.get()) {
+                return true;
+            }
+            ScheduledTask delegate = delegateRef.get();
+            return delegate != null && delegate.isCancelled();
+        }
+
+        private void onCancel(Runnable callback) {
+            if (callback == null || finished.get()) {
+                return;
+            }
+            boolean runSingleImmediately = false;
+            boolean drainAllIncludingExtra = false;
+            synchronized (cancelCallbacks) {
+                if (finished.get()) {
+                    return;
+                }
+                if (cancelled.get()) {
+                    runSingleImmediately = true;
+                } else {
+                    ScheduledTask delegate = delegateRef.get();
+                    if (delegate != null && delegate.isCancelled()) {
+                        registry.remove(this);
+                        if (cancelled.compareAndSet(false, true)) {
+                            drainAllIncludingExtra = true;
+                        } else {
+                            runSingleImmediately = true;
+                        }
+                    } else {
+                        cancelCallbacks.add(callback);
+                    }
+                }
+            }
+            if (drainAllIncludingExtra) {
+                fireCancelCallbacks(callback);
+            } else if (runSingleImmediately) {
+                callback.run();
+            }
+        }
+    }
+
     private static final class FoliaTaskHandle implements TaskHandle {
 
-        private final ScheduledTask delegate;
-        private final Set<ScheduledTask> activeTasks;
+        private final TrackedTask tracked;
 
-        private FoliaTaskHandle(ScheduledTask delegate, Set<ScheduledTask> activeTasks) {
-            this.delegate = delegate;
-            this.activeTasks = activeTasks;
+        private FoliaTaskHandle(TrackedTask tracked) {
+            this.tracked = tracked;
         }
 
         @Override
         public void cancel() {
-            activeTasks.remove(delegate);
-            delegate.cancel();
+            tracked.cancel();
         }
 
         @Override
         public boolean isCancelled() {
-            return delegate.isCancelled();
+            return tracked.isCancelled();
+        }
+
+        @Override
+        public void onCancel(Runnable callback) {
+            tracked.onCancel(callback);
         }
     }
 }

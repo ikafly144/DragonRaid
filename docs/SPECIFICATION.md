@@ -80,7 +80,7 @@ flowchart TD
 | `dragonraid-party` | パーティ管理（結成・招待・リーダー委譲・キック）、パーティチャット（`/pc`・チャンネル切替）、PacketEvents 右サイドバー FF14 風パーティリスト HUD |
 | `dragonraid-finder` | FF14 風コンテンツファインダー GUI、ソロ／事前結成パーティ申請（野良オートマッチングなし）、解放条件＆最低平均 `iLvl` チェック、突入確認（レディチェック／「シャキーン！」）→ インスタンス突入 |
 | `dragonraid-achievement` | データドリブン実績・条件トリガーエンジン（`END_PORTAL_TOUCH`、`ENCOUNTER_CLEAR`、`SERVER_FIRST`、`NO_DEATH`、スクリプト条件） |
-| `dragonraid-reward` | イベント駆動リワード付与ディスパッチャ（`content-unlock`・仮想通貨・装備ドロップ・アイテム付与・完了時スクリプト呼び出し） |
+| `dragonraid-reward` | Loot Table 型純粋報酬評価エンジン＆副作用アプライヤ（`RewardTable` / `RewardContext` → `RewardBundle` → `RewardApplier`、クロス・パック `inject-into` 拡張、解放・仮想通貨・アイテム・スクリプト付与） |
 | `dragonraid-economy` | 複数仮想通貨台帳（アラガントームストーン風週獲得上限・所持上限対応・SQLite 永続化）およびデータドリブン交換ショップ GUI 基盤 |
 | `dragonraid-item` | カスタム装備・アイテム基盤（アイテムレベル `iLvl`・装備部位・固有アクティブ/パッシブスキル・カスタムエンチャント/レリック・PDC 識別） |
 | `dragonraid-stat` | プレイヤー＆エネミーのカスタムステータス／属性集計、時限バフ/デバフスタック、与ダメ/被ダメ/回復補正エンジン |
@@ -94,10 +94,10 @@ flowchart TD
 サーバー管理者は `plugins/DragonRaid/contents/<pack-id>/` 配下にコンテンツ一式を配置する。
 
 - `pack.yml`（パック ID・有効/無効フラグ・メタ情報）
-- `contents/`（コンテンツファインダーへ登録するコンテンツ定義：表示名、推奨/最大人数、必要 `min-iLvl`、必要アンロックキー、タイムライン/スクリプト参照、インスタンス設定）
+- `contents/`（コンテンツファインダーへ登録するコンテンツ定義：表示名、推奨/最大人数、必要 `min-iLvl`、必要アンロックキー、クリア時呼び出し報酬テーブル `clear-rewards`、タイムライン/スクリプト参照、インスタンス設定）
 - `enemies/`（データドリブン `RaidEnemyDefinition` 定義）
-- `achievements/`（アチーブメントトリガー定義：例 `END_PORTAL_TOUCH`, `ENCOUNTER_CLEAR`, `SERVER_FIRST`）
-- `rewards/`（アチーブメント達成・クリア時リワード定義：`unlock-content`, 通貨付与, アイテムドロップ, スクリプトフック）
+- `achievements/`（アチーブメントトリガー定義：`END_PORTAL_TOUCH`, `ENCOUNTER_CLEAR`, `SERVER_FIRST` 等、および達成時呼び出し報酬テーブル `rewards`）
+- `rewards/`（Loot Table 型純粋報酬テーブル `reward-tables`［`pools` / `rolls` / `conditions` / `functions` / `TABLE_REF`］および他パック既存テーブルへ pool を差し込むクロス・パック拡張 `extensions`［`inject-into`］）
 - `items/` & `shops/`（カスタム装備/`iLvl`/ステータス、交換ショップ定義）
 - `scripts/`（`.raid.kts` によるカスタムギミック・タイムライン・バニラ進行連携フック）
 
@@ -117,18 +117,27 @@ sequenceDiagram
     P->>VP: エンドポータルブロックに接触
     VP->>VP: ServerFirst達成/対象コンテンツクリアまでバニラエンド侵入を抑制可
     VP->>ACH: END_PORTAL_TOUCH トリガー発火
-    ACH->>REW: AchievementUnlockedEvent
-    REW->>CF: unlock-content 付与 + 開放演出 (Title / Sound)
+    ACH->>REW: 呼び側指定 RewardTable 評価 (evaluate -> apply)
+    REW->>CF: ContentUnlockGrant 付与 + 開放演出 (Title / Sound / Toast)
     P->>CF: CF GUI からソロ or 事前結成PTで申請 (解放 & iLvl 検証)
     CF-->>P: 突入確認ポップ (シャキーン! + レディチェック)
     P->>CF: 全員承諾
     CF->>INST: 専用インスタンスワールド生成 & 一括転送
     INST->>SCR: スクリプトDSLでタイムライン/ギミック/エネミー実行
+    SCR->>REW: 討伐時 clear-rewards テーブル評価・付与 (RewardContext -> RewardBundle -> Apply)
     SCR->>VP: 討伐時バニラ進行フック (DragonBattle討伐同期・エンドゲートウェイ拡張・侵入解禁)
 ```
 
 - **バニラエンド進行 SPI（`VanillaEndProgressionPolicy` / `VanillaProgressionService`）**:
   - サーバー側スクリプト／コンテンツパック定義から、「誰かが Server First で指定レイドをクリアするまでバニラエンド到達不可」「Normal 討伐時にバニラエンド本島の `DragonBattle` を撃破済み状態に同期し、既存のエンドゲートウェイ／帰還ポータル解放やゲートウェイ拡張を実行する」といった制御をプラグイン本体改修なしに記述できる。
+  - **`preserve-vanilla-progression: true` 時のレガシーフォールバック抑止基準**: パックに当該勝利へ適用可能なワールド進行フック（`syncDragonBattleDefeated` / `generateExitPortal` / `removeLiveVanillaDragon` / `spawnGatewayCount > 0` のいずれかを有効化した `clear-hooks`）が存在し、今回選択されたか既完了・請求済みの `server-first-only: true` フックによって遭遇のバニラ進行がパック管理下にある場合、従来のレガシーフォールバックは抑止される。スクリプト専用フックのみ、または未請求・未適用で `first-clear-only` により周回スキップされた場合はレガシーフォールバックを許可する。
+  - パックの初回ロードに失敗した場合、正常な再読み込みが完了するまでバニラエンド進入ゲートは **fail-closed（進入拒否）** 状態を維持する（正常ロードの結果ルールが空である場合とは明確に区別する）。
+  - `clear-hooks` の `server-first-only` 実行履歴は配列位置ではなく安定したフック `id`（未指定時は型タグ付き決定論的ダイジェスト）をキーとしてサブステップおよび `server_milestone_state`（`:gateway_target` 等）単位で永続化され、部分失敗からの再開・サーバー再起動後レジューム・順序変更に耐える。既存データベースから移行した旧位置キーについても同一位置の既完了フックを安定キーへ互換移行する。
+  - **永続リワードプランと冪等配送（`player_reward_plans` / join 復旧 / スレッド境界）**:
+    - バケット化された `claimKey` 付き報酬（`SERVER_FIRST` 条件付き無キー・プール用の内部合成キー `__sys:sf:...` を含む）はスキーマバージョン `"v": 1` JSON として `player_reward_plans` に保存され、未知スキーマ版は無害にスキップされる。アイテム部分配送残数・通貨の単一トランザクション冪等入金（`grantCurrencyIdempotent`）を保ちつつ、ログイン時に未完了 `SERVER_FIRST` 実績・未完了リワードプラン・遭遇サーバー初回ディスパッチを 1 回ずつ再試行する。M2 で未実装の `CUSTOM_ITEM` を含むプランは削除せず保持し、M5 導入時のログインで自動配送される。永続的失敗時の警告ログはプラン単位で抑制（初回 `WARNING`、以後 `FINE`）される。
+    - Bukkit 進行イベント（`AchievementUnlockedEvent` / `RaidEncounterCompletedEvent`）は `GlobalRegionScheduler` 上で発火し、報酬 `SCRIPT_HOOK` アクションは SQLite 非同期ワーカーやリージョンスレッドから分離した専用デーモンスレッドプール（`DragonRaid-Script`）上で実行する。
+  - **遭遇別初回クリア履歴（`player_encounter_clears`）**: SQLite 初期化マイグレーション `m2_migrate_legacy_encounter_clears_v1` により、既存の `player_stats`（`normal_clears > 0` / `hard_clears > 0`）をそれぞれ `dragon_normal` / `dragon_hard` として `player_encounter_clears` へ 1 回限り冪等移行する。新規に追加したコンテンツパック固有の遭遇 ID に対する `FIRST_CLEAR` 判定は、M2 導入（`player_encounter_clears` 有効化）以降の討伐から個別に記録される。
+  - **名前空間付き ID とコマンド補完**: コンテンツ／実績／報酬テーブル／通貨の各 ID には `:` を含む名前空間形式を許容し、コマンド上では Brigadier 引用符文字列引数と自動エスケープタブ補完（`StringArgumentType.escapeIfRequired`）で選択・実行できる。
 
 ---
 

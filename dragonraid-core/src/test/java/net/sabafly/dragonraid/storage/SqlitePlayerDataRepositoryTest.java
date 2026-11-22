@@ -12,14 +12,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -397,5 +401,236 @@ class SqlitePlayerDataRepositoryTest {
 
         assertThrows(CancellationException.class, () -> first.get(2, TimeUnit.SECONDS));
         assertThrows(CancellationException.class, () -> second.get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void persistsAchievementsUnlocksRewardsClearsAndConcurrentServerFirst() throws Exception {
+        Path dbFile = tempDir.resolve("progression.db");
+        SqlitePlayerDataRepository repo = openRepository("progression.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // Achievements
+        assertTrue(repo.grantAchievement(alice, "Alice", "touch_end_portal", 1000L).join());
+        assertFalse(repo.grantAchievement(alice, "Alice", "touch_end_portal", 2000L).join());
+        assertTrue(repo.hasAchievement(alice, "touch_end_portal").join());
+        assertEquals(Set.of("touch_end_portal"), repo.loadAchievements(alice).join());
+
+        // Content unlocks + revoke
+        assertTrue(repo.grantContentUnlock(alice, "Alice", "ender_dragon_normal", 1000L).join());
+        assertFalse(repo.grantContentUnlock(alice, "Alice", "ender_dragon_normal", 1500L).join());
+        assertTrue(repo.hasContentUnlock(alice, "ender_dragon_normal").join());
+        assertEquals(Set.of("ender_dragon_normal"), repo.loadUnlockedContents(alice).join());
+        assertTrue(repo.revokeContentUnlock(alice, "ender_dragon_normal").join());
+        assertFalse(repo.hasContentUnlock(alice, "ender_dragon_normal").join());
+        assertTrue(repo.grantContentUnlock(alice, "Alice", "ender_dragon_hard", 3000L).join());
+
+        // Claimed rewards
+        assertTrue(repo.tryClaimReward(alice, "Alice", "unlock_normal_on_portal", 1000L).join());
+        assertFalse(repo.tryClaimReward(alice, "Alice", "unlock_normal_on_portal", 2000L).join());
+        assertTrue(repo.tryClaimReward(alice, "Alice", "sf_bonus", 2500L).join());
+        assertTrue(repo.hasClaimedReward(alice, "unlock_normal_on_portal").join());
+        assertEquals(Set.of("unlock_normal_on_portal", "sf_bonus"), repo.loadClaimedRewards(alice).join());
+
+        // Per-encounter clears
+        assertTrue(repo.recordEncounterClear(alice, "Alice", "ender_dragon_normal", 200_000L, 1000L).join());
+        assertFalse(repo.recordEncounterClear(alice, "Alice", "ender_dragon_normal", 150_000L, 2000L).join());
+        assertTrue(repo.hasClearedEncounter(alice, "ender_dragon_normal").join());
+        assertEquals(Set.of("ender_dragon_normal"), repo.loadClearedEncounters(alice).join());
+
+        // Concurrent server-first atomicity
+        int threads = 8;
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger wins = new AtomicInteger(0);
+        ExecutorService racePool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                UUID winner = (i % 2 == 0) ? alice : bob;
+                futures.add(racePool.submit((Callable<Void>) () -> {
+                    ready.countDown();
+                    start.await(2, TimeUnit.SECONDS);
+                    if (repo.tryClaimServerFirst("encounter:ender_dragon_normal", List.of(winner), 5000L).join()) {
+                        wins.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            assertTrue(ready.await(2, TimeUnit.SECONDS));
+            start.countDown();
+            for (Future<?> f : futures) {
+                f.get(5, TimeUnit.SECONDS);
+            }
+            assertEquals(1, wins.get());
+        } finally {
+            racePool.shutdownNow();
+            racePool.awaitTermination(2, TimeUnit.SECONDS);
+        }
+
+        repo.close();
+        repository = null;
+
+        // Reopen DB and verify persistence
+        try (SqlitePlayerDataRepository reopened = new SqlitePlayerDataRepository(dbFile, 2, executor)) {
+            assertTrue(reopened.hasAchievement(alice, "touch_end_portal").join());
+            assertTrue(reopened.hasContentUnlock(alice, "ender_dragon_hard").join());
+            assertFalse(reopened.hasContentUnlock(alice, "ender_dragon_normal").join());
+            assertTrue(reopened.hasClaimedReward(alice, "unlock_normal_on_portal").join());
+            assertEquals(Set.of("unlock_normal_on_portal", "sf_bonus"), reopened.loadClaimedRewards(alice).join());
+            assertTrue(reopened.hasClearedEncounter(alice, "ender_dragon_normal").join());
+            assertTrue(reopened.isServerFirstAchieved("encounter:ender_dragon_normal").join());
+            assertTrue(reopened.loadAllServerMilestones().join().contains("encounter:ender_dragon_normal"));
+        }
+    }
+
+    @Test
+    void addCurrencyWithCaps_enforcesMaxBalanceAndWeeklyCapAtomically() {
+        SqlitePlayerDataRepository repo = openRepository("currency_caps.db");
+        UUID alice = UUID.randomUUID();
+
+        PointTransactionResult first = repo.addCurrencyWithCaps(alice, "Alice", "coin", 60L, 100L, 80L, "2026-W47").join();
+        assertTrue(first.success());
+        assertEquals(60L, first.newBalance());
+
+        // Exceeding weekly cap rejects without modifying balance
+        PointTransactionResult overWeekly = repo.addCurrencyWithCaps(alice, "Alice", "coin", 30L, 100L, 80L, "2026-W47").join();
+        assertFalse(overWeekly.success());
+        assertEquals(FailureReason.BALANCE_OVERFLOW, overWeekly.failureReason());
+        assertEquals(60L, repo.getCurrencyBalance(alice, "coin").join());
+
+        // Reaching exact weekly cap succeeds
+        PointTransactionResult exactWeekly = repo.addCurrencyWithCaps(alice, "Alice", "coin", 20L, 100L, 80L, "2026-W47").join();
+        assertTrue(exactWeekly.success());
+        assertEquals(80L, exactWeekly.newBalance());
+
+        // New week resets weekly quota, but maxBalance=100 still blocks +30 (80+30 > 100)
+        PointTransactionResult overMax = repo.addCurrencyWithCaps(alice, "Alice", "coin", 30L, 100L, 80L, "2026-W48").join();
+        assertFalse(overMax.success());
+        assertEquals(FailureReason.BALANCE_OVERFLOW, overMax.failureReason());
+        assertEquals(80L, repo.getCurrencyBalance(alice, "coin").join());
+
+        PointTransactionResult exactMax = repo.addCurrencyWithCaps(alice, "Alice", "coin", 20L, 100L, 80L, "2026-W48").join();
+        assertTrue(exactMax.success());
+        assertEquals(100L, exactMax.newBalance());
+    }
+
+    @Test
+    void legacyClearMigration_populatesClearsOnceAndSkipsOnSubsequentOpens() throws Exception {
+        Path dbFile = tempDir.resolve("legacy_migration.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // Construct a pre-M2 SQLite database with normal_clears/hard_clears populated
+        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate("""
+                    CREATE TABLE player_stats (
+                        uuid TEXT PRIMARY KEY,
+                        last_known_name TEXT,
+                        virtual_points INTEGER NOT NULL DEFAULT 0,
+                        total_earned_points INTEGER NOT NULL DEFAULT 0,
+                        normal_clears INTEGER NOT NULL DEFAULT 0,
+                        hard_clears INTEGER NOT NULL DEFAULT 0,
+                        best_normal_time_ms INTEGER,
+                        best_hard_time_ms INTEGER,
+                        total_deaths INTEGER NOT NULL DEFAULT 0,
+                        total_revives INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                    )
+                    """);
+            stmt.executeUpdate("INSERT INTO player_stats (uuid, last_known_name, normal_clears, hard_clears) VALUES ('"
+                    + alice + "', 'Alice', 2, 1)");
+            stmt.executeUpdate("INSERT INTO player_stats (uuid, last_known_name, normal_clears, hard_clears) VALUES ('"
+                    + bob + "', 'Bob', 1, 0)");
+        }
+
+        try (SqlitePlayerDataRepository repo = new SqlitePlayerDataRepository(dbFile, 2, Runnable::run)) {
+            assertEquals(java.util.Set.of("dragon_normal", "dragon_hard"), repo.loadClearedEncounters(alice).join());
+            assertEquals(java.util.Set.of("dragon_normal"), repo.loadClearedEncounters(bob).join());
+        }
+
+        // Remove migrated clear rows directly; reopening must NOT re-run m2_migrate_legacy_encounter_clears_v1
+        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate("DELETE FROM player_encounter_clears WHERE uuid = '" + bob + "'");
+        }
+
+        try (SqlitePlayerDataRepository reopened = new SqlitePlayerDataRepository(dbFile, 2, Runnable::run)) {
+            assertTrue(reopened.loadClearedEncounters(bob).join().isEmpty());
+            assertEquals(java.util.Set.of("dragon_normal", "dragon_hard"), reopened.loadClearedEncounters(alice).join());
+        }
+    }
+
+    @Test
+    void serverFirstPendingRecipients_resumesIncompleteAndPreventsDuplicates() {
+        SqlitePlayerDataRepository repo = openRepository("sf_pending.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+        UUID charlie = UUID.randomUUID();
+
+        java.util.Set<UUID> initial = repo.claimOrResumeServerFirstRecipients(
+                "ach:server_first_normal", List.of(alice, bob), 1000L).join();
+        assertEquals(java.util.Set.of(alice, bob), initial);
+        assertEquals(List.of(alice, bob), repo.loadServerMilestoneParticipants("ach:server_first_normal").join());
+
+        // Mark Alice completed; Bob remains pending
+        repo.completeServerFirstRecipient("ach:server_first_normal", alice).join();
+        java.util.Set<UUID> resumed = repo.claimOrResumeServerFirstRecipients(
+                "ach:server_first_normal", List.of(alice, bob), 2000L).join();
+        assertEquals(java.util.Set.of(bob), resumed);
+
+        // Mark Bob completed; subsequent claims (or unrelated party) yield nothing
+        repo.completeServerFirstRecipient("ach:server_first_normal", bob).join();
+        assertTrue(repo.claimOrResumeServerFirstRecipients(
+                "ach:server_first_normal", List.of(alice, bob, charlie), 3000L).join().isEmpty());
+    }
+
+    @Test
+    void rewardPlans_serverMilestoneState_pendingQueries_andIdempotentCurrencyWithWeeklyAccrual() {
+        SqlitePlayerDataRepository repo = openRepository("plans_idem.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // Durable reward plans CRUD + server milestone state
+        assertTrue(repo.saveRewardPlanIfAbsent(alice, "Alice", "plan_1", "{\"v\":1}", 100L).join());
+        assertFalse(repo.saveRewardPlanIfAbsent(alice, "Alice", "plan_1", "{\"v\":2}", 200L).join());
+        assertEquals("{\"v\":1}", repo.loadRewardPlan(alice, "plan_1").join().orElseThrow());
+        repo.updateRewardPlanProgress(alice, "plan_1", "{\"v\":1,\"step\":1}", 300L).join();
+        assertEquals(Map.of("plan_1", "{\"v\":1,\"step\":1}"), repo.loadAllRewardPlans(alice).join());
+        repo.deleteRewardPlan(alice, "plan_1").join();
+        assertTrue(repo.loadRewardPlan(alice, "plan_1").join().isEmpty());
+
+        repo.saveServerMilestoneState("m1:gw_target", "5", 400L).join();
+        assertEquals("5", repo.loadServerMilestoneState("m1:gw_target").join().orElseThrow());
+
+        repo.claimOrResumeServerFirstRecipients("achievement:sf1", List.of(alice, bob), 500L).join();
+        repo.completeServerFirstRecipient("achievement:sf1", alice).join();
+        assertEquals(Set.of(bob), repo.loadPendingServerFirstRecipients("achievement:sf1").join());
+        assertEquals(Set.of("achievement:sf1"), repo.loadPendingServerFirstMilestones(bob).join());
+        assertTrue(repo.loadPendingServerFirstMilestones(alice).join().isEmpty());
+
+        // Atomic idempotent currency deposit + weekly accrual when weeklyCap == 0 (#31)
+        PointTransactionResult first = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 40L, 200L, 0L, "2026-W47", "idem:k1", 600L).join();
+        assertTrue(first.success());
+        assertEquals(40L, first.newBalance());
+
+        // Duplicate idempotency key succeeds without double-crediting
+        PointTransactionResult dup = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 40L, 200L, 0L, "2026-W47", "idem:k1", 700L).join();
+        assertTrue(dup.success());
+        assertEquals(40L, dup.newBalance());
+
+        // Now enforce weeklyCap=60 on the same week -> previous 40L accrual counts! (+20 allowed, +30 capped)
+        PointTransactionResult overCap = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 30L, 200L, 60L, "2026-W47", "idem:k2", 800L).join();
+        assertFalse(overCap.success());
+        assertEquals(FailureReason.BALANCE_OVERFLOW, overCap.failureReason());
+
+        PointTransactionResult fitCap = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 20L, 200L, 60L, "2026-W47", "idem:k2", 900L).join();
+        assertTrue(fitCap.success());
+        assertEquals(60L, fitCap.newBalance());
     }
 }
