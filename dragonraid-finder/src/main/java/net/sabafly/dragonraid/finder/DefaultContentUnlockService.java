@@ -60,18 +60,11 @@ public final class DefaultContentUnlockService implements ContentUnlockService {
 
     @Override
     public boolean unlock(UUID playerId, String playerName, String contentId) {
-        CompletableFuture<Boolean> future = unlockAsync(playerId, playerName, contentId);
-        if (future.isDone()) {
-            if (future.isCompletedExceptionally()) {
-                return false;
-            }
-            return Boolean.TRUE.equals(future.join());
+        if (repository != null) {
+            throw new UnsupportedOperationException(
+                    "Synchronous unlock() is unsupported with a persistent repository; use unlockAsync()");
         }
-        future.exceptionally(ex -> {
-            logger.log(Level.WARNING, "Async content unlock failed for " + playerId + ": " + contentId, ex);
-            return false;
-        });
-        return false;
+        return Boolean.TRUE.equals(unlockAsync(playerId, playerName, contentId).join());
     }
 
     @Override
@@ -112,21 +105,14 @@ public final class DefaultContentUnlockService implements ContentUnlockService {
 
     @Override
     public boolean revoke(UUID playerId, String contentId) {
+        if (repository != null) {
+            throw new UnsupportedOperationException(
+                    "Synchronous revoke() is unsupported with a persistent repository; use revokeAsync()");
+        }
         if (playerId == null || contentId == null || contentId.isBlank()) {
             return false;
         }
-        CompletableFuture<Boolean> future = revokeAsync(playerId, contentId);
-        if (future.isDone()) {
-            if (future.isCompletedExceptionally()) {
-                return false;
-            }
-            return Boolean.TRUE.equals(future.join());
-        }
-        future.exceptionally(ex -> {
-            logger.log(Level.WARNING, "Async content revoke failed for " + playerId + ": " + contentId, ex);
-            return false;
-        });
-        return false;
+        return Boolean.TRUE.equals(revokeAsync(playerId, contentId).join());
     }
 
     @Override

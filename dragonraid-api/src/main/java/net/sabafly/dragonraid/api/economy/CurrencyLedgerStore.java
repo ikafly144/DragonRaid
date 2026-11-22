@@ -15,11 +15,29 @@ public interface CurrencyLedgerStore {
 
     boolean withdraw(UUID playerId, String currencyId, long amount);
 
+    default CompletableFuture<Long> balanceAsync(UUID playerId, String currencyId) {
+        return CompletableFuture.completedFuture(balance(playerId, currencyId));
+    }
+
     default CompletableFuture<Boolean> depositWithCapsAsync(
             UUID playerId,
             @Nullable String playerName,
             CurrencyDefinition definition,
             long amount) {
         return CompletableFuture.completedFuture(depositWithCaps(playerId, playerName, definition, amount));
+    }
+
+    default CompletableFuture<Boolean> depositWithCapsIdempotentAsync(
+            UUID playerId,
+            @Nullable String playerName,
+            CurrencyDefinition definition,
+            long amount,
+            @Nullable String idempotencyKey,
+            long claimedAtEpochMillis) {
+        return depositWithCapsAsync(playerId, playerName, definition, amount);
+    }
+
+    default CompletableFuture<Boolean> withdrawAsync(UUID playerId, String currencyId, long amount) {
+        return CompletableFuture.completedFuture(withdraw(playerId, currencyId, amount));
     }
 }

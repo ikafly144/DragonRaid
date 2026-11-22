@@ -234,4 +234,118 @@ class RewardDispatchListenerTest {
                     .grants().isEmpty());
         }
     }
+
+    @Test
+    void propagatesServerFirstCompleteFailure_preventsInMemoryConcurrentDoubleGrant_resumesOnJoin_andChecksGeneration()
+            throws Exception {
+        UUID aliceId = UUID.randomUUID();
+        AtomicLong clock = new AtomicLong(40_000L);
+        ScriptHookRegistry scriptHooks = mock(ScriptHookRegistry.class);
+        RaidServiceRegistry registry = new DefaultRaidServiceRegistry();
+
+        // #19: completeServerFirstRecipient failure must propagate out of dispatchEncounterRewards
+        net.sabafly.dragonraid.api.progression.PlayerProgressionRepository failingCompleteRepo =
+                mock(net.sabafly.dragonraid.api.progression.PlayerProgressionRepository.class);
+        when(failingCompleteRepo.loadClaimedRewards(aliceId)).thenReturn(CompletableFuture.completedFuture(Set.of()));
+        when(failingCompleteRepo.claimOrResumeServerFirstRecipients(
+                org.mockito.ArgumentMatchers.eq("reward_clear_server_first:raid_err"),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(Set.of(aliceId)));
+        when(failingCompleteRepo.completeServerFirstRecipient("reward_clear_server_first:raid_err", aliceId))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("recipient complete db error")));
+        DefaultContentFinderService finderErr = new DefaultContentFinderService(new DefaultContentUnlockService());
+        DefaultRaidRewardService rewErr = new DefaultRaidRewardService();
+        RewardTable emptySfTable = new RewardTable("err_tbl", List.of(
+                RewardPool.allOf("p", null, List.of(), List.of(RewardEntrySpec.empty(1)))));
+        ContentPackCatalogSnapshot errCat = new ContentPackCatalogSnapshot(
+                1L,
+                Map.of("raid_err", new ContentEntrySpec("raid_err", "k", "raid_err", "", 1, 8, 0, List.of("err_tbl"))),
+                Map.of(),
+                Map.of("err_tbl", emptySfTable),
+                List.of());
+        RewardDispatchListener errListener = new RewardDispatchListener(
+                rewErr, finderErr, null, null, failingCompleteRepo, clock::get, Logger.getLogger("test"), () -> errCat);
+        EncounterResultSnapshot errSnap = new EncounterResultSnapshot(
+                "raid_err", EncounterDifficulty.NORMAL, EncounterOutcome.VICTORY, 10_000L, true, 1,
+                Map.of(aliceId, new ParticipantCombatMetrics(aliceId, "Alice", Map.of(), Map.of(), Map.of(), 0, 0, 0)),
+                Set.of(aliceId));
+        org.junit.jupiter.api.Assertions.assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> errListener.dispatchEncounterRewards(errSnap).join());
+
+        // #20 & #21: in-memory atomic in-flight reservation + fail restore + join-time resume without duplicating repeatable drops
+        CompletableFuture<Boolean> delayedItem = new CompletableFuture<>();
+        AtomicInteger sfItemRequests = new AtomicInteger();
+        AtomicInteger repCurrencyCalls = new AtomicInteger();
+        DefaultContentUnlockService unlockInMem = new DefaultContentUnlockService();
+        DefaultContentFinderService finderInMem = new DefaultContentFinderService(unlockInMem);
+        RewardCurrencySink inMemSink = (uid, name, cid, amt) -> {
+            repCurrencyCalls.incrementAndGet();
+            return CompletableFuture.completedFuture(true);
+        };
+        RewardItemDelivery slowDelivery = mock(RewardItemDelivery.class);
+        when(slowDelivery.deliverVanillaItemDetailed(aliceId, "NETHERITE_INGOT", 1))
+                .thenAnswer(inv -> {
+                    int call = sfItemRequests.incrementAndGet();
+                    return call == 1
+                            ? delayedItem.thenApply(ok -> ok
+                                    ? net.sabafly.dragonraid.api.reward.ItemDeliveryResult.full(1)
+                                    : net.sabafly.dragonraid.api.reward.ItemDeliveryResult.failed(1))
+                            : CompletableFuture.completedFuture(
+                                    net.sabafly.dragonraid.api.reward.ItemDeliveryResult.full(1));
+                });
+
+        DefaultRaidRewardService rewInMem = new DefaultRaidRewardService(
+                unlockInMem, finderInMem, null, inMemSink, slowDelivery,
+                scriptHooks, null, registry, clock::get, Logger.getLogger("test"));
+        RewardTable mixedSfTable = new RewardTable("sf_keyless_tbl", List.of(
+                RewardPool.allOf("rep", null, List.of(), List.of(
+                        RewardEntrySpec.currency("rep_coin", RollRange.exact(5), 1, List.of(), List.of()))),
+                RewardPool.allOf("sf_pool", null, List.of(RewardConditionSpec.serverFirst()), List.of(
+                        RewardEntrySpec.vanillaItem("NETHERITE_INGOT", RollRange.exact(1), 1, List.of(), List.of())))
+        ));
+        rewInMem.replacePackTables(List.of(mixedSfTable), List.of());
+
+        // #41: catalog returns gen1 initially without entry, advances to gen2 during fallback -> retry picks gen2
+        AtomicInteger supplyCount = new AtomicInteger();
+        ContentPackCatalogSnapshot gen1Empty = new ContentPackCatalogSnapshot(1L, Map.of(), Map.of(), Map.of(), List.of());
+        ContentPackCatalogSnapshot gen2Full = new ContentPackCatalogSnapshot(
+                2L,
+                Map.of("raid_mem", new ContentEntrySpec("raid_mem", "k", "raid_mem", "", 1, 8, 0, List.of("sf_keyless_tbl"))),
+                Map.of(),
+                Map.of("sf_keyless_tbl", mixedSfTable),
+                List.of());
+        RewardDispatchListener inMemListener = new RewardDispatchListener(
+                rewInMem, finderInMem, null, unlockInMem, null, clock::get, Logger.getLogger("test"),
+                () -> supplyCount.getAndIncrement() == 0 ? gen1Empty : gen2Full);
+
+        EncounterResultSnapshot memSnap = new EncounterResultSnapshot(
+                "raid_mem", EncounterDifficulty.NORMAL, EncounterOutcome.VICTORY, 10_000L, true, 1,
+                Map.of(aliceId, new ParticipantCombatMetrics(aliceId, "Alice", Map.of(), Map.of(), Map.of(), 0, 0, 0)),
+                Set.of(aliceId));
+
+        CompletableFuture<List<RewardApplyResult>> firstInFlight = inMemListener.dispatchEncounterRewards(memSnap);
+        // Overlapping concurrent dispatch while #1 is in-flight -> Alice must NOT receive second serverFirst=true
+        CompletableFuture<List<RewardApplyResult>> overlappingFuture = inMemListener.dispatchEncounterRewards(memSnap);
+        assertEquals(1, sfItemRequests.get()); // still only 1 NETHERITE_INGOT attempt
+
+        // Fail #1's delayed delivery -> Alice returns to inMemoryPendingServerFirst; bounded timeouts prevent hang
+        delayedItem.complete(false);
+        assertEquals(1, firstInFlight.get(5, java.util.concurrent.TimeUnit.SECONDS).size());
+        List<RewardApplyResult> overlapping = overlappingFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        assertEquals(1, overlapping.size());
+        assertEquals(1, sfItemRequests.get());
+        int repCallsAfterTwoDispatches = repCurrencyCalls.get();
+
+        // Join-time resume delivers ONLY pending claim-keyed SF item (no extra rep_coin!)
+        List<RewardApplyResult> joinResumed = inMemListener.resumePendingServerFirst(aliceId, "Alice").join();
+        assertEquals(1, joinResumed.size());
+        assertEquals(1, joinResumed.getFirst().appliedGrants().size());
+        assertEquals(repCallsAfterTwoDispatches, repCurrencyCalls.get());
+        assertEquals(2, sfItemRequests.get());
+
+        // Subsequent join finds nothing pending
+        assertTrue(inMemListener.resumePendingServerFirst(aliceId, "Alice").join().isEmpty());
+    }
 }

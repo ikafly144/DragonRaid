@@ -585,4 +585,52 @@ class SqlitePlayerDataRepositoryTest {
         assertTrue(repo.claimOrResumeServerFirstRecipients(
                 "ach:server_first_normal", List.of(alice, bob, charlie), 3000L).join().isEmpty());
     }
+
+    @Test
+    void rewardPlans_serverMilestoneState_pendingQueries_andIdempotentCurrencyWithWeeklyAccrual() {
+        SqlitePlayerDataRepository repo = openRepository("plans_idem.db");
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // Durable reward plans CRUD + server milestone state
+        assertTrue(repo.saveRewardPlanIfAbsent(alice, "Alice", "plan_1", "{\"v\":1}", 100L).join());
+        assertFalse(repo.saveRewardPlanIfAbsent(alice, "Alice", "plan_1", "{\"v\":2}", 200L).join());
+        assertEquals("{\"v\":1}", repo.loadRewardPlan(alice, "plan_1").join().orElseThrow());
+        repo.updateRewardPlanProgress(alice, "plan_1", "{\"v\":1,\"step\":1}", 300L).join();
+        assertEquals(Map.of("plan_1", "{\"v\":1,\"step\":1}"), repo.loadAllRewardPlans(alice).join());
+        repo.deleteRewardPlan(alice, "plan_1").join();
+        assertTrue(repo.loadRewardPlan(alice, "plan_1").join().isEmpty());
+
+        repo.saveServerMilestoneState("m1:gw_target", "5", 400L).join();
+        assertEquals("5", repo.loadServerMilestoneState("m1:gw_target").join().orElseThrow());
+
+        repo.claimOrResumeServerFirstRecipients("achievement:sf1", List.of(alice, bob), 500L).join();
+        repo.completeServerFirstRecipient("achievement:sf1", alice).join();
+        assertEquals(Set.of(bob), repo.loadPendingServerFirstRecipients("achievement:sf1").join());
+        assertEquals(Set.of("achievement:sf1"), repo.loadPendingServerFirstMilestones(bob).join());
+        assertTrue(repo.loadPendingServerFirstMilestones(alice).join().isEmpty());
+
+        // Atomic idempotent currency deposit + weekly accrual when weeklyCap == 0 (#31)
+        PointTransactionResult first = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 40L, 200L, 0L, "2026-W47", "idem:k1", 600L).join();
+        assertTrue(first.success());
+        assertEquals(40L, first.newBalance());
+
+        // Duplicate idempotency key succeeds without double-crediting
+        PointTransactionResult dup = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 40L, 200L, 0L, "2026-W47", "idem:k1", 700L).join();
+        assertTrue(dup.success());
+        assertEquals(40L, dup.newBalance());
+
+        // Now enforce weeklyCap=60 on the same week -> previous 40L accrual counts! (+20 allowed, +30 capped)
+        PointTransactionResult overCap = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 30L, 200L, 60L, "2026-W47", "idem:k2", 800L).join();
+        assertFalse(overCap.success());
+        assertEquals(FailureReason.BALANCE_OVERFLOW, overCap.failureReason());
+
+        PointTransactionResult fitCap = repo.addCurrencyWithCapsIdempotent(
+                alice, "Alice", "silver", 20L, 200L, 60L, "2026-W47", "idem:k2", 900L).join();
+        assertTrue(fitCap.success());
+        assertEquals(60L, fitCap.newBalance());
+    }
 }

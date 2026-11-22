@@ -7,9 +7,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.random.RandomGenerator;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Loot-Table-style pure reward evaluator and side-effect applier SPI.
@@ -103,5 +105,9 @@ public interface RaidRewardService {
 
     default CompletableFuture<RewardApplyResult> evaluateAndApplyAll(Collection<String> tableIds, RewardContext context) {
         return evaluateAndApplyAll(tableIds, context, ThreadLocalRandom.current());
+    }
+
+    default CompletableFuture<List<RewardApplyResult>> resumePendingPlans(UUID playerId, @Nullable String playerName) {
+        return CompletableFuture.completedFuture(List.of());
     }
 }

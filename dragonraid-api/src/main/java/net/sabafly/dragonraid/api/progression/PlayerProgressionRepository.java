@@ -2,6 +2,8 @@ package net.sabafly.dragonraid.api.progression;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -102,4 +104,52 @@ public interface PlayerProgressionRepository {
     CompletableFuture<Boolean> hasClearedEncounter(UUID uuid, String encounterId);
 
     CompletableFuture<Set<String>> loadClearedEncounters(UUID uuid);
+
+    default CompletableFuture<Optional<String>> loadRewardPlan(UUID playerId, String planKey) {
+        return CompletableFuture.completedFuture(Optional.empty());
+    }
+
+    default CompletableFuture<Boolean> saveRewardPlanIfAbsent(
+            UUID playerId,
+            @Nullable String lastKnownName,
+            String planKey,
+            String planJson,
+            long createdAtEpochMillis) {
+        return CompletableFuture.completedFuture(false);
+    }
+
+    default CompletableFuture<Void> updateRewardPlanProgress(
+            UUID playerId,
+            String planKey,
+            String planJson,
+            long updatedAtEpochMillis) {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    default CompletableFuture<Void> deleteRewardPlan(UUID playerId, String planKey) {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    default CompletableFuture<Map<String, String>> loadAllRewardPlans(UUID playerId) {
+        return CompletableFuture.completedFuture(Map.of());
+    }
+
+    default CompletableFuture<Set<String>> loadPendingServerFirstMilestones(UUID playerId) {
+        return CompletableFuture.completedFuture(Set.of());
+    }
+
+    default CompletableFuture<Set<UUID>> loadPendingServerFirstRecipients(String milestoneKey) {
+        return CompletableFuture.completedFuture(Set.of());
+    }
+
+    default CompletableFuture<Optional<String>> loadServerMilestoneState(String milestoneKey) {
+        return CompletableFuture.completedFuture(Optional.empty());
+    }
+
+    default CompletableFuture<Void> saveServerMilestoneState(
+            String milestoneKey,
+            String stateValue,
+            long updatedAtEpochMillis) {
+        return CompletableFuture.completedFuture(null);
+    }
 }

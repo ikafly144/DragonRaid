@@ -19,6 +19,10 @@ public interface RaidEconomyService {
 
     long balance(UUID playerId, String currencyId);
 
+    default CompletableFuture<Long> balanceAsync(UUID playerId, String currencyId) {
+        return CompletableFuture.completedFuture(balance(playerId, currencyId));
+    }
+
     boolean deposit(UUID playerId, String currencyId, long amount);
 
     default CompletableFuture<Boolean> depositAsync(
@@ -29,5 +33,19 @@ public interface RaidEconomyService {
         return CompletableFuture.completedFuture(deposit(playerId, currencyId, amount));
     }
 
+    default CompletableFuture<Boolean> depositIdempotentAsync(
+            UUID playerId,
+            @Nullable String playerName,
+            String currencyId,
+            long amount,
+            @Nullable String idempotencyKey,
+            long claimedAtEpochMillis) {
+        return depositAsync(playerId, playerName, currencyId, amount);
+    }
+
     boolean withdraw(UUID playerId, String currencyId, long amount);
+
+    default CompletableFuture<Boolean> withdrawAsync(UUID playerId, String currencyId, long amount) {
+        return CompletableFuture.completedFuture(withdraw(playerId, currencyId, amount));
+    }
 }

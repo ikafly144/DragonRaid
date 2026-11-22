@@ -30,6 +30,7 @@ import net.sabafly.dragonraid.config.RegionConfig.Shape;
 import net.sabafly.dragonraid.config.RegionConfig.SpawnPoint;
 import net.sabafly.dragonraid.encounter.RaidEncounterManager;
 import net.sabafly.dragonraid.i18n.MessageService;
+import net.sabafly.dragonraid.reward.PureRewardTableEvaluator;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.storage.PlayerDataRepository;
 import net.sabafly.dragonraid.storage.PlayerRaidStats;
@@ -1011,6 +1012,9 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                                     Placeholder.unparsed("player", identity.name())
                                 );
                             } else {
+                                List<String> publicBundleClaims = bundle.claimKeys().stream()
+                                        .filter(k -> !k.startsWith(PureRewardTableEvaluator.INTERNAL_SF_CLAIM_PREFIX))
+                                        .toList();
                                 messageService.send(
                                     sender,
                                     "command.reward-simulate-result",
@@ -1018,9 +1022,9 @@ public final class DefaultRaidCommandHandler implements RaidCommandHandler {
                                     Placeholder.unparsed("player", identity.name()),
                                     Placeholder.unparsed("seed", seed != null ? seed.toString() : "random"),
                                     Placeholder.unparsed("grants", formatGrantSummary(bundle.grants())),
-                                    Placeholder.unparsed("claims", bundle.claimKeys().isEmpty()
+                                    Placeholder.unparsed("claims", publicBundleClaims.isEmpty()
                                             ? "none"
-                                            : String.join(", ", bundle.claimKeys()))
+                                            : String.join(", ", publicBundleClaims))
                                 );
                             }
                         } else {

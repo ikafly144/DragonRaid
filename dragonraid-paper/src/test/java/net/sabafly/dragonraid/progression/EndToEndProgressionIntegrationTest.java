@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -363,6 +364,64 @@ class EndToEndProgressionIntegrationTest {
             ach2.evaluateEncounterCompleted(bobClear).join();
             assertFalse(ach2.hasUnlocked(bobId, "server_first_normal"));
         }
+    }
+
+    @Test
+    void playerProgressionJoinListener_sequentiallyWarmsCachesAndResumesAllPendingState() {
+        UUID alice = UUID.randomUUID();
+        org.bukkit.entity.Player player = mock(org.bukkit.entity.Player.class);
+        when(player.getUniqueId()).thenReturn(alice);
+        when(player.getName()).thenReturn("Alice");
+
+        List<String> callOrder = new java.util.concurrent.CopyOnWriteArrayList<>();
+        net.sabafly.dragonraid.storage.PlayerDataRepository repo = mock(net.sabafly.dragonraid.storage.PlayerDataRepository.class);
+        when(repo.updateLastKnownName(alice, "Alice")).thenAnswer(inv -> {
+            callOrder.add("name");
+            return CompletableFuture.completedFuture(null);
+        });
+        RaidAchievementService achSvc = mock(RaidAchievementService.class);
+        when(achSvc.loadPlayer(alice)).thenAnswer(inv -> {
+            callOrder.add("loadAch");
+            return CompletableFuture.completedFuture(Set.of());
+        });
+        when(achSvc.resumePendingServerFirst(alice, "Alice")).thenAnswer(inv -> {
+            callOrder.add("resumeAchSf");
+            return CompletableFuture.completedFuture(List.of());
+        });
+        ContentUnlockService unlockSvc = mock(ContentUnlockService.class);
+        when(unlockSvc.loadPlayer(alice)).thenAnswer(inv -> {
+            callOrder.add("loadUnlock");
+            return CompletableFuture.completedFuture(Set.of());
+        });
+        DefaultVanillaEndProgressionPolicy policy = mock(DefaultVanillaEndProgressionPolicy.class);
+        when(policy.loadPlayerClears(alice)).thenAnswer(inv -> {
+            callOrder.add("loadClears");
+            return CompletableFuture.completedFuture(Set.of());
+        });
+        RaidRewardService rewSvc = mock(RaidRewardService.class);
+        when(rewSvc.resumePendingPlans(alice, "Alice")).thenAnswer(inv -> {
+            callOrder.add("resumePlans");
+            return CompletableFuture.completedFuture(List.of());
+        });
+        RewardDispatchListener dispatchListener = mock(RewardDispatchListener.class);
+        when(dispatchListener.resumePendingServerFirst(alice, "Alice")).thenAnswer(inv -> {
+            callOrder.add("resumeDispatchSf");
+            return CompletableFuture.completedFuture(List.of());
+        });
+
+        PlayerProgressionJoinListener listener = new PlayerProgressionJoinListener(
+                repo, achSvc, unlockSvc, policy, null, rewSvc, dispatchListener, Logger.getLogger("join-test"));
+        listener.onPlayerJoin(new org.bukkit.event.player.PlayerJoinEvent(player, net.kyori.adventure.text.Component.empty()));
+
+        assertTrue(callOrder.containsAll(List.of("name", "loadAch", "loadUnlock", "loadClears")));
+        int warmupMaxIdx = Math.max(callOrder.indexOf("loadAch"),
+                Math.max(callOrder.indexOf("loadUnlock"), callOrder.indexOf("loadClears")));
+        int resumeAchIdx = callOrder.indexOf("resumeAchSf");
+        int resumePlansIdx = callOrder.indexOf("resumePlans");
+        int resumeDispatchIdx = callOrder.indexOf("resumeDispatchSf");
+        assertTrue(resumeAchIdx > warmupMaxIdx);
+        assertTrue(resumePlansIdx > resumeAchIdx);
+        assertTrue(resumeDispatchIdx > resumePlansIdx);
     }
 
     private static void writeDemoContentPack(Path dir) throws Exception {

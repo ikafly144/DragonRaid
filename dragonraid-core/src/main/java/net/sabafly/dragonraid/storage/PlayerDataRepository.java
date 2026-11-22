@@ -117,7 +117,34 @@ public interface PlayerDataRepository extends PlayerProgressionRepository, AutoC
         long weeklyCap,
         String weekKey
     ) {
+        if (maxBalance > 0L || weeklyCap > 0L) {
+            return CompletableFuture.failedFuture(
+                    new UnsupportedOperationException("Currency caps are not supported by this repository"));
+        }
         return addCurrency(uuid, lastKnownName, currencyId, amount);
+    }
+
+    /**
+     * Atomically checks optional {@code idempotencyClaimKey}, {@code maxBalance}, and
+     * {@code weeklyCap}, adds {@code amount} to {@code player_currencies}, records weekly
+     * earnings, and persists {@code idempotencyClaimKey} within a single transaction.
+     */
+    default CompletableFuture<PointTransactionResult> addCurrencyWithCapsIdempotent(
+        UUID uuid,
+        String lastKnownName,
+        String currencyId,
+        long amount,
+        long maxBalance,
+        long weeklyCap,
+        String weekKey,
+        String idempotencyClaimKey,
+        long claimedAtEpochMillis
+    ) {
+        if (idempotencyClaimKey != null && !idempotencyClaimKey.isBlank()) {
+            return CompletableFuture.failedFuture(
+                    new UnsupportedOperationException("Idempotent currency deposit is not supported by this repository"));
+        }
+        return addCurrencyWithCaps(uuid, lastKnownName, currencyId, amount, maxBalance, weeklyCap, weekKey);
     }
 
     /**

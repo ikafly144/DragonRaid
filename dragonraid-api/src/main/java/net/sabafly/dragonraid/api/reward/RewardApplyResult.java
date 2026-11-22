@@ -12,7 +12,8 @@ public record RewardApplyResult(
         List<RewardGrant> appliedGrants,
         Set<String> newlyClaimedKeys,
         Set<String> skippedClaimKeys,
-        List<RewardGrant> failedGrants
+        List<RewardGrant> failedGrants,
+        Set<String> failedClaimKeys
 ) {
 
     public RewardApplyResult {
@@ -21,6 +22,16 @@ public record RewardApplyResult(
         newlyClaimedKeys = newlyClaimedKeys == null ? Set.of() : Set.copyOf(newlyClaimedKeys);
         skippedClaimKeys = skippedClaimKeys == null ? Set.of() : Set.copyOf(skippedClaimKeys);
         failedGrants = failedGrants == null ? List.of() : List.copyOf(failedGrants);
+        failedClaimKeys = failedClaimKeys == null ? Set.of() : Set.copyOf(failedClaimKeys);
+    }
+
+    public RewardApplyResult(
+            RewardBundle evaluated,
+            List<RewardGrant> appliedGrants,
+            Set<String> newlyClaimedKeys,
+            Set<String> skippedClaimKeys,
+            List<RewardGrant> failedGrants) {
+        this(evaluated, appliedGrants, newlyClaimedKeys, skippedClaimKeys, failedGrants, Set.of());
     }
 
     public RewardApplyResult(
@@ -28,10 +39,14 @@ public record RewardApplyResult(
             List<RewardGrant> appliedGrants,
             Set<String> newlyClaimedKeys,
             Set<String> skippedClaimKeys) {
-        this(evaluated, appliedGrants, newlyClaimedKeys, skippedClaimKeys, List.of());
+        this(evaluated, appliedGrants, newlyClaimedKeys, skippedClaimKeys, List.of(), Set.of());
+    }
+
+    public boolean hasFailures() {
+        return !failedGrants.isEmpty() || !failedClaimKeys.isEmpty();
     }
 
     public static RewardApplyResult empty(RewardBundle bundle) {
-        return new RewardApplyResult(bundle, List.of(), Set.of(), Set.of(), List.of());
+        return new RewardApplyResult(bundle, List.of(), Set.of(), Set.of(), List.of(), Set.of());
     }
 }

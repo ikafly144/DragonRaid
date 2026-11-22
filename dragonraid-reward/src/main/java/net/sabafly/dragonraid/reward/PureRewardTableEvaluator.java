@@ -15,6 +15,7 @@ import net.sabafly.dragonraid.api.reward.CurrencyGrant;
 import net.sabafly.dragonraid.api.reward.CustomItemGrant;
 import net.sabafly.dragonraid.api.reward.RewardBundle;
 import net.sabafly.dragonraid.api.reward.RewardConditionSpec;
+import net.sabafly.dragonraid.api.reward.RewardConditionType;
 import net.sabafly.dragonraid.api.reward.RewardContext;
 import net.sabafly.dragonraid.api.reward.RewardEntrySpec;
 import net.sabafly.dragonraid.api.reward.RewardFunctionSpec;
@@ -36,6 +37,9 @@ import org.jetbrains.annotations.Nullable;
 public final class PureRewardTableEvaluator {
 
     public static final int MAX_NESTING_DEPTH = 16;
+    public static final int MAX_EVALUATED_ENTRIES = 10_000;
+    public static final int MAX_GENERATED_GRANTS = 10_000;
+    public static final String INTERNAL_SF_CLAIM_PREFIX = "__sys:sf:";
 
     private final @Nullable ScriptHookRegistry scriptHookRegistry;
     private final @Nullable RaidServiceRegistry serviceRegistry;
@@ -68,7 +72,8 @@ public final class PureRewardTableEvaluator {
 
         List<RewardGrant> grants = new ArrayList<>();
         Set<String> activeStack = new LinkedHashSet<>();
-        evaluateTable(tableLookup, root, context, random, activeStack, 0, null, grants);
+        EvaluationBudget budget = new EvaluationBudget();
+        evaluateTable(tableLookup, root, context, random, activeStack, 0, null, budget, grants);
         return new RewardBundle(normalizedRoot, context.playerId(), grants);
     }
 
@@ -83,15 +88,25 @@ public final class PureRewardTableEvaluator {
         if (tableIds == null || tableIds.isEmpty()) {
             return RewardBundle.empty("", context.playerId());
         }
-        RewardBundle combined = null;
+        EvaluationBudget budget = new EvaluationBudget();
+        List<RewardGrant> grants = new ArrayList<>();
+        StringBuilder rootIds = new StringBuilder();
         for (String tableId : tableIds) {
             if (tableId == null || tableId.isBlank()) {
                 continue;
             }
-            RewardBundle next = evaluate(tableLookup, tableId, context, random);
-            combined = combined == null ? next : combined.merge(next);
+            String normalizedRoot = tableId.trim();
+            RewardTable root = tableLookup.apply(normalizedRoot)
+                    .orElseThrow(() -> new IllegalArgumentException("Unknown reward table: " + normalizedRoot));
+            evaluateTable(tableLookup, root, context, random, new LinkedHashSet<>(), 0, null, budget, grants);
+            if (!rootIds.isEmpty()) {
+                rootIds.append(',');
+            }
+            rootIds.append(normalizedRoot);
         }
-        return combined == null ? RewardBundle.empty("", context.playerId()) : combined;
+        return rootIds.isEmpty()
+                ? RewardBundle.empty("", context.playerId())
+                : new RewardBundle(rootIds.toString(), context.playerId(), grants);
     }
 
     private void evaluateTable(
@@ -102,6 +117,7 @@ public final class PureRewardTableEvaluator {
             Set<String> activeStack,
             int depth,
             @Nullable String inheritedClaimKey,
+            EvaluationBudget budget,
             List<RewardGrant> out) {
         if (depth > MAX_NESTING_DEPTH) {
             throw new IllegalStateException(
@@ -112,8 +128,17 @@ public final class PureRewardTableEvaluator {
                     "Circular reward table reference detected: " + String.join(" -> ", activeStack) + " -> " + table.id());
         }
         try {
-            for (RewardPool pool : table.pools()) {
+            List<RewardPool> pools = table.pools();
+            for (int poolIndex = 0; poolIndex < pools.size(); poolIndex++) {
+                RewardPool pool = pools.get(poolIndex);
+                String poolKeySegment = pool.id().isBlank() ? "#" + poolIndex : pool.id();
                 String effectiveClaimKey = pool.claimKey() != null ? pool.claimKey() : inheritedClaimKey;
+                if (effectiveClaimKey == null
+                        && context.serverFirst()
+                        && hasServerFirstCondition(pool.conditions())) {
+                    effectiveClaimKey = INTERNAL_SF_CLAIM_PREFIX
+                            + resolveSourceScope(context, table) + ":" + table.id() + ":" + poolKeySegment;
+                }
                 if (effectiveClaimKey != null && context.claimedKeys().contains(effectiveClaimKey)) {
                     continue;
                 }
@@ -135,22 +160,31 @@ public final class PureRewardTableEvaluator {
                 int totalRolls = rawTotalRolls <= 0.0 ? 0 : (int) rawTotalRolls;
 
                 for (int rollIndex = 0; rollIndex < totalRolls; rollIndex++) {
-                    List<RewardEntrySpec> eligible = filterEligibleEntries(pool.entries(), context, random);
+                    List<IndexedEntry> eligible = filterEligibleEntries(pool.entries(), context, random);
                     if (eligible.isEmpty()) {
                         continue;
                     }
                     if (pool.mode() == RewardPoolMode.ALL) {
-                        for (RewardEntrySpec entry : eligible) {
+                        for (IndexedEntry indexed : eligible) {
+                            String entryClaimKey = resolveEntryClaimKey(
+                                    effectiveClaimKey, context, table, poolKeySegment, indexed.index(), indexed.entry());
+                            if (entryClaimKey != null && context.claimedKeys().contains(entryClaimKey)) {
+                                continue;
+                            }
                             evaluateEntry(
-                                    tableLookup, pool, entry, context, random,
-                                    activeStack, depth, effectiveClaimKey, out);
+                                    tableLookup, table.id(), pool, indexed.entry(), context, random,
+                                    activeStack, depth, entryClaimKey, budget, out);
                         }
                     } else {
-                        RewardEntrySpec picked = pickWeighted(eligible, context.luck(), random);
+                        IndexedEntry picked = pickWeighted(eligible, context.luck(), random);
                         if (picked != null) {
-                            evaluateEntry(
-                                    tableLookup, pool, picked, context, random,
-                                    activeStack, depth, effectiveClaimKey, out);
+                            String entryClaimKey = resolveEntryClaimKey(
+                                    effectiveClaimKey, context, table, poolKeySegment, picked.index(), picked.entry());
+                            if (entryClaimKey == null || !context.claimedKeys().contains(entryClaimKey)) {
+                                evaluateEntry(
+                                        tableLookup, table.id(), pool, picked.entry(), context, random,
+                                        activeStack, depth, entryClaimKey, budget, out);
+                            }
                         }
                     }
                 }
@@ -160,28 +194,32 @@ public final class PureRewardTableEvaluator {
         }
     }
 
-    private List<RewardEntrySpec> filterEligibleEntries(
+    private record IndexedEntry(int index, RewardEntrySpec entry) {
+    }
+
+    private List<IndexedEntry> filterEligibleEntries(
             List<RewardEntrySpec> entries,
             RewardContext context,
             RandomGenerator random) {
-        List<RewardEntrySpec> eligible = new ArrayList<>(entries.size());
-        for (RewardEntrySpec entry : entries) {
+        List<IndexedEntry> eligible = new ArrayList<>(entries.size());
+        for (int i = 0; i < entries.size(); i++) {
+            RewardEntrySpec entry = entries.get(i);
             if (allConditionsMatch(entry.conditions(), context, random)) {
-                eligible.add(entry);
+                eligible.add(new IndexedEntry(i, entry));
             }
         }
         return eligible;
     }
 
-    private static @Nullable RewardEntrySpec pickWeighted(
-            List<RewardEntrySpec> entries,
+    private static @Nullable IndexedEntry pickWeighted(
+            List<IndexedEntry> entries,
             double luck,
             RandomGenerator random) {
         double[] weights = new double[entries.size()];
         double totalWeight = 0.0;
         int lastPositiveIndex = -1;
         for (int i = 0; i < entries.size(); i++) {
-            RewardEntrySpec entry = entries.get(i);
+            RewardEntrySpec entry = entries.get(i).entry();
             double w = Math.max(0.0, entry.weight() + entry.quality() * luck);
             weights[i] = w;
             if (w > 0.0) {
@@ -208,6 +246,7 @@ public final class PureRewardTableEvaluator {
 
     private void evaluateEntry(
             Function<String, Optional<RewardTable>> tableLookup,
+            String tableId,
             RewardPool pool,
             RewardEntrySpec entry,
             RewardContext context,
@@ -215,7 +254,10 @@ public final class PureRewardTableEvaluator {
             Set<String> activeStack,
             int depth,
             @Nullable String effectiveClaimKey,
+            EvaluationBudget budget,
             List<RewardGrant> out) {
+        String location = tableId + "/" + (pool.id().isBlank() ? "<unnamed>" : pool.id());
+        budget.consumeEntry(location);
         switch (entry.type()) {
             case EMPTY -> {
                 // Intentionally produces no grant.
@@ -225,7 +267,7 @@ public final class PureRewardTableEvaluator {
                         .orElseThrow(() -> new IllegalArgumentException(
                                 "Unknown referenced reward table: " + entry.target()));
                 List<RewardGrant> subGrants = new ArrayList<>();
-                evaluateTable(tableLookup, nested, context, random, activeStack, depth + 1, effectiveClaimKey, subGrants);
+                evaluateTable(tableLookup, nested, context, random, activeStack, depth + 1, effectiveClaimKey, budget, subGrants);
                 if (entry.functions().isEmpty() && pool.functions().isEmpty()) {
                     out.addAll(subGrants);
                 } else {
@@ -240,22 +282,22 @@ public final class PureRewardTableEvaluator {
             case CURRENCY -> {
                 long amount = resolveFinalAmount(entry.amount().roll(random), entry.functions(), pool.functions(), context, random);
                 if (amount > 0L) {
-                    out.add(new CurrencyGrant(entry.target(), amount, effectiveClaimKey));
+                    recordGrant(out, new CurrencyGrant(entry.target(), amount, effectiveClaimKey), budget, location);
                 }
             }
             case VANILLA_ITEM -> {
                 long amount = resolveFinalAmount(entry.amount().roll(random), entry.functions(), pool.functions(), context, random);
                 if (amount > 0L) {
-                    out.add(new VanillaItemGrant(entry.target(), clampItemAmount(amount), effectiveClaimKey));
+                    recordGrant(out, new VanillaItemGrant(entry.target(), clampItemAmount(amount), effectiveClaimKey), budget, location);
                 }
             }
             case CUSTOM_ITEM -> {
                 long amount = resolveFinalAmount(entry.amount().roll(random), entry.functions(), pool.functions(), context, random);
                 if (amount > 0L) {
-                    out.add(new CustomItemGrant(entry.target(), clampItemAmount(amount), effectiveClaimKey));
+                    recordGrant(out, new CustomItemGrant(entry.target(), clampItemAmount(amount), effectiveClaimKey), budget, location);
                 }
             }
-            case UNLOCK_CONTENT -> out.add(new ContentUnlockGrant(
+            case UNLOCK_CONTENT -> recordGrant(out, new ContentUnlockGrant(
                     entry.target(),
                     entry.notifyPlayer(),
                     entry.titleKey(),
@@ -265,8 +307,79 @@ public final class PureRewardTableEvaluator {
                     entry.iconMaterial(),
                     entry.soundKey(),
                     effectiveClaimKey
-            ));
-            case SCRIPT_HOOK -> out.add(new ScriptHookGrant(entry.target(), entry.params(), effectiveClaimKey));
+            ), budget, location);
+            case SCRIPT_HOOK -> recordGrant(
+                    out, new ScriptHookGrant(entry.target(), entry.params(), effectiveClaimKey), budget, location);
+        }
+    }
+
+    private static void recordGrant(
+            List<RewardGrant> out,
+            RewardGrant grant,
+            EvaluationBudget budget,
+            String location) {
+        budget.consumeGrant(location);
+        out.add(grant);
+    }
+
+    private static @Nullable String resolveEntryClaimKey(
+            @Nullable String poolClaimKey,
+            RewardContext context,
+            RewardTable table,
+            String poolKeySegment,
+            int entryIndex,
+            RewardEntrySpec entry) {
+        if (poolClaimKey != null) {
+            return poolClaimKey;
+        }
+        if (context.serverFirst() && hasServerFirstCondition(entry.conditions())) {
+            return INTERNAL_SF_CLAIM_PREFIX
+                    + resolveSourceScope(context, table)
+                    + ":" + table.id()
+                    + ":" + poolKeySegment
+                    + "#e" + entryIndex;
+        }
+        return null;
+    }
+
+    private static boolean hasServerFirstCondition(List<RewardConditionSpec> conditions) {
+        for (RewardConditionSpec spec : conditions) {
+            if (spec.type() == RewardConditionType.SERVER_FIRST && !spec.negate()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String resolveSourceScope(RewardContext context, RewardTable table) {
+        if (!context.sourceType().isBlank() && !context.sourceId().isBlank()) {
+            return context.sourceType() + ":" + context.sourceId();
+        }
+        if (!context.sourceId().isBlank()) {
+            return context.sourceId();
+        }
+        if (!table.packId().isBlank()) {
+            return table.packId();
+        }
+        return "table";
+    }
+
+    private static final class EvaluationBudget {
+        private int evaluatedEntries;
+        private int generatedGrants;
+
+        void consumeEntry(String location) {
+            if (++evaluatedEntries > MAX_EVALUATED_ENTRIES) {
+                throw new IllegalStateException(
+                        "Reward table evaluation exceeded entry budget (" + MAX_EVALUATED_ENTRIES + ") at " + location);
+            }
+        }
+
+        void consumeGrant(String location) {
+            if (++generatedGrants > MAX_GENERATED_GRANTS) {
+                throw new IllegalStateException(
+                        "Reward table evaluation exceeded grant budget (" + MAX_GENERATED_GRANTS + ") at " + location);
+            }
         }
     }
 

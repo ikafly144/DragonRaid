@@ -265,15 +265,41 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
         long weeklyCap,
         String weekKey
     ) {
+        return addCurrencyWithCapsIdempotent(
+                uuid, lastKnownName, currencyId, amount, maxBalance, weeklyCap, weekKey, null, 0L);
+    }
+
+    @Override
+    public CompletableFuture<PointTransactionResult> addCurrencyWithCapsIdempotent(
+        UUID uuid,
+        @Nullable String lastKnownName,
+        String currencyId,
+        long amount,
+        long maxBalance,
+        long weeklyCap,
+        String weekKey,
+        @Nullable String idempotencyClaimKey,
+        long claimedAtEpochMillis
+    ) {
         Objects.requireNonNull(uuid, "uuid must not be null");
         String validCurrency = requireCurrencyId(currencyId);
         String validWeekKey = requireNonBlankId(weekKey, "weekKey");
+        @Nullable String validIdempotencyKey = (idempotencyClaimKey == null || idempotencyClaimKey.isBlank())
+                ? null
+                : idempotencyClaimKey.trim();
         if (maxBalance < 0L || weeklyCap < 0L) {
             throw new IllegalArgumentException("maxBalance and weeklyCap must be >= 0");
         }
         String normalizedName = normalizeName(lastKnownName);
         return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
             long current = queryCurrencyBalance(conn, uuid, validCurrency);
+            if (validIdempotencyKey != null && existsPlayerFlag(
+                    conn,
+                    "SELECT 1 FROM player_claimed_rewards WHERE uuid = ? AND reward_id = ?",
+                    uuid,
+                    validIdempotencyKey)) {
+                return PointTransactionResult.succeeded(current, current);
+            }
             if (amount <= 0L) {
                 return PointTransactionResult.failed(FailureReason.INVALID_AMOUNT, current);
             }
@@ -305,7 +331,7 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                 ps.setLong(4, amount);
                 ps.executeUpdate();
             }
-            if (weeklyCap > 0L) {
+            if (!"unbounded".equals(validWeekKey)) {
                 String weeklySql = """
                     INSERT INTO player_currency_weekly (uuid, currency_id, week_key, earned)
                     VALUES (?, ?, ?, ?)
@@ -319,6 +345,15 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                     ps.setLong(4, amount);
                     ps.executeUpdate();
                 }
+            }
+            if (validIdempotencyKey != null) {
+                insertPlayerFlag(
+                        conn,
+                        "INSERT OR IGNORE INTO player_claimed_rewards (uuid, reward_id, claimed_at) VALUES (?, ?, ?)",
+                        uuid,
+                        validIdempotencyKey,
+                        claimedAtEpochMillis
+                );
             }
             return PointTransactionResult.succeeded(current, current + amount);
         }));
@@ -540,6 +575,24 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                     CREATE TABLE IF NOT EXISTS schema_migrations (
                         migration_id TEXT PRIMARY KEY,
                         applied_at INTEGER NOT NULL
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS player_reward_plans (
+                        uuid TEXT NOT NULL,
+                        plan_key TEXT NOT NULL,
+                        plan_json TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY (uuid, plan_key),
+                        FOREIGN KEY (uuid) REFERENCES player_stats (uuid) ON DELETE CASCADE
+                    )
+                    """);
+                stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS server_milestone_state (
+                        milestone_key TEXT PRIMARY KEY,
+                        state_value TEXT NOT NULL,
+                        updated_at INTEGER NOT NULL
                     )
                     """);
                 boolean migratedLegacyClears = false;
@@ -949,6 +1002,178 @@ public final class SqlitePlayerDataRepository implements PlayerDataRepository {
                 "SELECT encounter_id FROM player_encounter_clears WHERE uuid = ?",
                 uuid
         )));
+    }
+
+    @Override
+    public CompletableFuture<Optional<String>> loadRewardPlan(UUID playerId, String planKey) {
+        Objects.requireNonNull(playerId, "playerId must not be null");
+        String normalizedKey = requireNonBlankId(planKey, "planKey");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT plan_json FROM player_reward_plans WHERE uuid = ? AND plan_key = ?")) {
+                ps.setString(1, playerId.toString());
+                ps.setString(2, normalizedKey);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+                }
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Boolean> saveRewardPlanIfAbsent(
+            UUID playerId,
+            @Nullable String lastKnownName,
+            String planKey,
+            String planJson,
+            long createdAtEpochMillis) {
+        Objects.requireNonNull(playerId, "playerId must not be null");
+        String normalizedKey = requireNonBlankId(planKey, "planKey");
+        Objects.requireNonNull(planJson, "planJson must not be null");
+        String normalizedName = normalizeName(lastKnownName);
+        return supplyAsync(() -> withWriteTransaction((conn, tx) -> {
+            ensurePlayerExists(conn, playerId, normalizedName);
+            try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT OR IGNORE INTO player_reward_plans (uuid, plan_key, plan_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """)) {
+                ps.setString(1, playerId.toString());
+                ps.setString(2, normalizedKey);
+                ps.setString(3, planJson);
+                ps.setLong(4, createdAtEpochMillis);
+                ps.setLong(5, createdAtEpochMillis);
+                return ps.executeUpdate() > 0;
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Void> updateRewardPlanProgress(
+            UUID playerId,
+            String planKey,
+            String planJson,
+            long updatedAtEpochMillis) {
+        Objects.requireNonNull(playerId, "playerId must not be null");
+        String normalizedKey = requireNonBlankId(planKey, "planKey");
+        Objects.requireNonNull(planJson, "planJson must not be null");
+        return runAsync(() -> withWriteTransaction((conn, tx) -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "UPDATE player_reward_plans SET plan_json = ?, updated_at = ? WHERE uuid = ? AND plan_key = ?")) {
+                ps.setString(1, planJson);
+                ps.setLong(2, updatedAtEpochMillis);
+                ps.setString(3, playerId.toString());
+                ps.setString(4, normalizedKey);
+                ps.executeUpdate();
+            }
+            return null;
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Void> deleteRewardPlan(UUID playerId, String planKey) {
+        Objects.requireNonNull(playerId, "playerId must not be null");
+        String normalizedKey = requireNonBlankId(planKey, "planKey");
+        return runAsync(() -> withWriteTransaction((conn, tx) -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "DELETE FROM player_reward_plans WHERE uuid = ? AND plan_key = ?")) {
+                ps.setString(1, playerId.toString());
+                ps.setString(2, normalizedKey);
+                ps.executeUpdate();
+            }
+            return null;
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Map<String, String>> loadAllRewardPlans(UUID playerId) {
+        Objects.requireNonNull(playerId, "playerId must not be null");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            Map<String, String> plans = new LinkedHashMap<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT plan_key, plan_json FROM player_reward_plans WHERE uuid = ? ORDER BY created_at ASC")) {
+                ps.setString(1, playerId.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        plans.put(rs.getString(1), rs.getString(2));
+                    }
+                }
+            }
+            return Collections.unmodifiableMap(plans);
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Set<String>> loadPendingServerFirstMilestones(UUID playerId) {
+        Objects.requireNonNull(playerId, "playerId must not be null");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            Set<String> keys = new LinkedHashSet<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT milestone_key FROM server_milestone_pending WHERE uuid = ? ORDER BY created_at ASC")) {
+                ps.setString(1, playerId.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        keys.add(rs.getString(1));
+                    }
+                }
+            }
+            return Collections.unmodifiableSet(keys);
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Set<UUID>> loadPendingServerFirstRecipients(String milestoneKey) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            Set<UUID> recipients = new LinkedHashSet<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT uuid FROM server_milestone_pending WHERE milestone_key = ? ORDER BY created_at ASC")) {
+                ps.setString(1, normalizedKey);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        recipients.add(UUID.fromString(rs.getString(1)));
+                    }
+                }
+            }
+            return Collections.unmodifiableSet(recipients);
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Optional<String>> loadServerMilestoneState(String milestoneKey) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        return supplyAsync(() -> withReadConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT state_value FROM server_milestone_state WHERE milestone_key = ?")) {
+                ps.setString(1, normalizedKey);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+                }
+            }
+        }));
+    }
+
+    @Override
+    public CompletableFuture<Void> saveServerMilestoneState(
+            String milestoneKey,
+            String stateValue,
+            long updatedAtEpochMillis) {
+        String normalizedKey = requireNonBlankId(milestoneKey, "milestoneKey");
+        Objects.requireNonNull(stateValue, "stateValue must not be null");
+        return runAsync(() -> withWriteTransaction((conn, tx) -> {
+            try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO server_milestone_state (milestone_key, state_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(milestone_key) DO UPDATE SET
+                    state_value = excluded.state_value,
+                    updated_at = excluded.updated_at
+                """)) {
+                ps.setString(1, normalizedKey);
+                ps.setString(2, stateValue);
+                ps.setLong(3, updatedAtEpochMillis);
+                ps.executeUpdate();
+            }
+            return null;
+        }));
     }
 
     private CompletableFuture<PlayerRaidStats> incrementCounter(

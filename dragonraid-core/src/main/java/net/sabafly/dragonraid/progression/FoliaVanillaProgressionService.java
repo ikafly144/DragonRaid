@@ -6,7 +6,6 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -35,8 +34,12 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
     private final Set<PendingOperation<?>> pendingOperations = ConcurrentHashMap.newKeySet();
 
     private static final class PendingOperation<T> {
+        private final Object lock = new Object();
         private final CompletableFuture<T> future;
-        private volatile @Nullable TaskHandle handle;
+        private @Nullable TaskHandle handle;
+        private @Nullable PendingOperation<?> child;
+        private boolean cancelled;
+        private boolean started;
 
         private PendingOperation(CompletableFuture<T> future) {
             this.future = future;
@@ -44,6 +47,72 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
 
         private CompletableFuture<T> future() {
             return future;
+        }
+
+        private void attachHandle(@Nullable TaskHandle taskHandle) {
+            boolean cancelNow;
+            synchronized (lock) {
+                this.handle = taskHandle;
+                cancelNow = cancelled && taskHandle != null && !taskHandle.isCancelled();
+            }
+            if (cancelNow) {
+                try {
+                    taskHandle.cancel();
+                } catch (RuntimeException ignored) {
+                    // Best-effort cancellation when shutdown raced with handle attachment.
+                }
+            }
+        }
+
+        private boolean tryBeginExecution() {
+            synchronized (lock) {
+                if (cancelled || future.isDone()) {
+                    return false;
+                }
+                started = true;
+                return true;
+            }
+        }
+
+        private boolean attachChild(PendingOperation<?> childOp) {
+            synchronized (lock) {
+                if (cancelled || future.isDone()) {
+                    return false;
+                }
+                this.child = childOp;
+                return true;
+            }
+        }
+
+        private boolean isCancelled() {
+            synchronized (lock) {
+                return cancelled;
+            }
+        }
+
+        private void cancel(CancellationException cause) {
+            @Nullable TaskHandle currentHandle;
+            @Nullable PendingOperation<?> currentChild;
+            synchronized (lock) {
+                if (cancelled) {
+                    future.completeExceptionally(cause);
+                    return;
+                }
+                cancelled = true;
+                currentHandle = this.handle;
+                currentChild = this.child;
+            }
+            if (currentHandle != null && !currentHandle.isCancelled()) {
+                try {
+                    currentHandle.cancel();
+                } catch (RuntimeException ignored) {
+                    // Best-effort cancellation during shutdown.
+                }
+            }
+            if (currentChild != null) {
+                currentChild.cancel(cause);
+            }
+            future.completeExceptionally(cause);
         }
     }
 
@@ -73,15 +142,7 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
         CancellationException cancelled = new CancellationException("VanillaProgressionService shut down before execution");
         for (PendingOperation<?> pending : List.copyOf(pendingOperations)) {
             pendingOperations.remove(pending);
-            TaskHandle handle = pending.handle;
-            if (handle != null && !handle.isCancelled()) {
-                try {
-                    handle.cancel();
-                } catch (RuntimeException ignored) {
-                    // Best-effort cancellation during shutdown.
-                }
-            }
-            pending.future().completeExceptionally(cancelled);
+            pending.cancel(cancelled);
         }
     }
 
@@ -96,7 +157,7 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
             return CompletableFuture.completedFuture(false);
         }
         Location origin = new Location(world, 0.0, 64.0, 0.0);
-        return dispatchRegion(origin, future -> {
+        return dispatchRegion(origin, (future, pending) -> {
             try {
                 DragonBattle battle = world.getEnderDragonBattle();
                 if (battle == null) {
@@ -110,9 +171,12 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
                     battle.setPreviouslyKilled(true);
                 }
                 if (removeLiveVanillaDragon) {
+                    if (pending.isCancelled() || future.isDone()) {
+                        return;
+                    }
                     EnderDragon liveDragon = battle.getEnderDragon();
                     if (liveDragon != null) {
-                        scheduleDragonRemoval(liveDragon).whenComplete((ignored, err) -> {
+                        scheduleDragonRemoval(liveDragon, pending).whenComplete((ignored, err) -> {
                             if (err != null) {
                                 future.completeExceptionally(err);
                             } else {
@@ -140,15 +204,17 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
         }
         World world = resolveEndWorld(endWorldName);
         if (world == null) {
-            return CompletableFuture.completedFuture(0);
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("End world unavailable for gateway expansion: " + endWorldName));
         }
         int effectiveMax = Math.min(maxGateways, VanillaClearHookSpec.MAX_VANILLA_GATEWAYS);
         Location origin = new Location(world, 0.0, 64.0, 0.0);
-        return dispatchRegion(origin, future -> {
+        return dispatchRegion(origin, (future, pending) -> {
             try {
                 DragonBattle battle = world.getEnderDragonBattle();
                 if (battle == null) {
-                    future.complete(0);
+                    future.completeExceptionally(
+                            new IllegalStateException("DragonBattle unavailable in world: " + world.getName()));
                     return;
                 }
                 int spawned = 0;
@@ -167,13 +233,52 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
     }
 
     @Override
+    public CompletableFuture<GatewayExpansionResult> expandEndGatewaysToTarget(
+            @Nullable String endWorldName,
+            int targetCount,
+            int maxGateways) {
+        if (maxGateways <= 0 || targetCount <= 0) {
+            return CompletableFuture.completedFuture(new GatewayExpansionResult(0, 0, Math.max(0, maxGateways)));
+        }
+        World world = resolveEndWorld(endWorldName);
+        if (world == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("End world unavailable for gateway expansion: " + endWorldName));
+        }
+        int effectiveMax = Math.min(maxGateways, VanillaClearHookSpec.MAX_VANILLA_GATEWAYS);
+        int effectiveTarget = Math.min(targetCount, effectiveMax);
+        Location origin = new Location(world, 0.0, 64.0, 0.0);
+        return dispatchRegion(origin, (future, pending) -> {
+            try {
+                DragonBattle battle = world.getEnderDragonBattle();
+                if (battle == null) {
+                    future.completeExceptionally(
+                            new IllegalStateException("DragonBattle unavailable in world: " + world.getName()));
+                    return;
+                }
+                int spawned = 0;
+                while (battle.getGatewayCount() < effectiveTarget) {
+                    if (!battle.spawnNewGateway()) {
+                        break;
+                    }
+                    spawned++;
+                }
+                future.complete(new GatewayExpansionResult(spawned, battle.getGatewayCount(), effectiveMax));
+            } catch (RuntimeException ex) {
+                logger.log(Level.WARNING, "Failed to expand vanilla End gateways to target " + effectiveTarget, ex);
+                future.completeExceptionally(ex);
+            }
+        });
+    }
+
+    @Override
     public CompletableFuture<Boolean> isVanillaDragonPreviouslyKilled(@Nullable String endWorldName) {
         World world = resolveEndWorld(endWorldName);
         if (world == null) {
             return CompletableFuture.completedFuture(false);
         }
         Location origin = new Location(world, 0.0, 64.0, 0.0);
-        return dispatchRegion(origin, future -> {
+        return dispatchRegion(origin, (future, pending) -> {
             try {
                 DragonBattle battle = world.getEnderDragonBattle();
                 future.complete(battle != null && battle.hasBeenPreviouslyKilled());
@@ -190,7 +295,7 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
             return CompletableFuture.completedFuture(0);
         }
         Location origin = new Location(world, 0.0, 64.0, 0.0);
-        return dispatchRegion(origin, future -> {
+        return dispatchRegion(origin, (future, pending) -> {
             try {
                 DragonBattle battle = world.getEnderDragonBattle();
                 future.complete(battle == null ? 0 : battle.getGatewayCount());
@@ -200,7 +305,12 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
         });
     }
 
-    private <T> CompletableFuture<T> dispatchRegion(Location origin, Consumer<CompletableFuture<T>> body) {
+    @FunctionalInterface
+    private interface RegionBody<T> {
+        void run(CompletableFuture<T> future, PendingOperation<T> pending);
+    }
+
+    private <T> CompletableFuture<T> dispatchRegion(Location origin, RegionBody<T> body) {
         CompletableFuture<T> future = new CompletableFuture<>();
         PendingOperation<T> pending = new PendingOperation<>(future);
         pendingOperations.add(pending);
@@ -208,23 +318,23 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
 
         try {
             TaskHandle handle = scheduler.runAtRegion(origin, () -> {
+                if (!pending.tryBeginExecution()) {
+                    return;
+                }
                 try {
-                    body.accept(future);
+                    body.run(future, pending);
                 } catch (Throwable ex) {
                     future.completeExceptionally(ex);
                 }
             });
-            pending.handle = handle;
+            pending.attachHandle(handle);
             if (handle == null) {
-                if (!future.isDone()) {
-                    future.completeExceptionally(new CancellationException("Region task handle was null"));
-                }
+                pending.cancel(new CancellationException("Region task handle was null"));
             } else {
-                handle.onCancel(() -> future.completeExceptionally(
+                handle.onCancel(() -> pending.cancel(
                         new CancellationException("Region task cancelled before execution")));
                 if (handle.isCancelled() && !future.isDone()) {
-                    future.completeExceptionally(
-                            new CancellationException("Region task was cancelled before scheduling returned"));
+                    pending.cancel(new CancellationException("Region task was cancelled before scheduling returned"));
                 }
             }
         } catch (Throwable ex) {
@@ -233,9 +343,14 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
         return future;
     }
 
-    private CompletableFuture<Void> scheduleDragonRemoval(EnderDragon liveDragon) {
+    private CompletableFuture<Void> scheduleDragonRemoval(EnderDragon liveDragon, PendingOperation<?> parentPending) {
         CompletableFuture<Void> removeFuture = new CompletableFuture<>();
         PendingOperation<Void> pending = new PendingOperation<>(removeFuture);
+        if (!parentPending.attachChild(pending)) {
+            removeFuture.completeExceptionally(
+                    new CancellationException("Parent progression task cancelled before dragon removal"));
+            return removeFuture;
+        }
         pendingOperations.add(pending);
         removeFuture.whenComplete((res, err) -> pendingOperations.remove(pending));
 
@@ -243,6 +358,9 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
             TaskHandle handle = scheduler.runAtEntity(
                     liveDragon,
                     () -> {
+                        if (!pending.tryBeginExecution()) {
+                            return;
+                        }
                         try {
                             liveDragon.remove();
                             removeFuture.complete(null);
@@ -253,17 +371,15 @@ public final class FoliaVanillaProgressionService implements VanillaProgressionS
                     // Entity retired before execution -> vanilla dragon is already gone.
                     () -> removeFuture.complete(null)
             );
-            pending.handle = handle;
+            pending.attachHandle(handle);
             if (handle == null || handle == TaskHandle.retired()) {
                 // Already retired prior to scheduling -> dragon is gone.
                 removeFuture.complete(null);
             } else {
-                handle.onCancel(() -> removeFuture.completeExceptionally(
+                handle.onCancel(() -> pending.cancel(
                         new CancellationException("Entity removal task cancelled before execution")));
                 if (handle.isCancelled() && !removeFuture.isDone()) {
-                    // Handle could be a custom cancelled handle; complete cleanly if retired, or fail if aborted.
-                    removeFuture.completeExceptionally(
-                            new CancellationException("Entity removal task was cancelled"));
+                    pending.cancel(new CancellationException("Entity removal task was cancelled"));
                 }
             }
         } catch (Throwable ex) {

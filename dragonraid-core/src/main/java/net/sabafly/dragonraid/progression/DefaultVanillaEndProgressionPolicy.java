@@ -9,10 +9,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -61,8 +63,10 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
     private volatile Map<String, VanillaProgressionRule> packRules = Map.of();
     private volatile boolean packLoadFailed;
     private final Set<String> achievedServerMilestones = ConcurrentHashMap.newKeySet();
+    private final Set<String> executedStepsInMemory = ConcurrentHashMap.newKeySet();
     private final Set<String> inFlightHooks = ConcurrentHashMap.newKeySet();
     private final Map<String, List<UUID>> inMemoryHookWinners = new ConcurrentHashMap<>();
+    private final Map<String, String> inMemoryMilestoneStates = new ConcurrentHashMap<>();
     private final Map<UUID, Set<String>> clearedEncountersCache = new ConcurrentHashMap<>();
 
     public DefaultVanillaEndProgressionPolicy(
@@ -220,6 +224,75 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
     }
 
     @Override
+    public boolean hasApplicableWorldProgressionHook(
+            String encounterId, @Nullable EncounterDifficulty difficulty, boolean firstClear) {
+        if (encounterId == null || encounterId.isBlank()) {
+            return false;
+        }
+        String normalizedId = encounterId.trim();
+        for (VanillaProgressionRule rule : sortedRules()) {
+            List<VanillaClearHookSpec> hooks = rule.clearHooks();
+            for (int index = 0; index < hooks.size(); index++) {
+                VanillaClearHookSpec hook = hooks.get(index);
+                if (!matchesEncounter(hook.encounterId(), normalizedId)) {
+                    continue;
+                }
+                if (hook.difficulty() != null && hook.difficulty() != difficulty) {
+                    continue;
+                }
+                if (!wantsWorldProgression(hook)) {
+                    continue;
+                }
+                if (!hook.serverFirstOnly()) {
+                    if (!hook.firstClearOnly() || firstClear) {
+                        return true;
+                    }
+                    continue;
+                }
+                if (!hook.firstClearOnly() || firstClear
+                        || hasCompletedOrClaimedServerFirstHook(rule.id(), index, hook, normalizedId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean wantsWorldProgression(VanillaClearHookSpec hook) {
+        return hook.syncDragonBattleDefeated()
+                || hook.generateExitPortal()
+                || hook.removeLiveVanillaDragon()
+                || hook.spawnGatewayCount() > 0;
+    }
+
+    private boolean hasCompletedOrClaimedServerFirstHook(
+            String ruleId,
+            int index,
+            VanillaClearHookSpec hook,
+            String encounterId) {
+        String hookKey = HOOK_MILESTONE_PREFIX + ruleId + ":id:" + hook.stableKey() + ":" + encounterId;
+        String doneKey = hookKey + ":done";
+        String claimKey = hookKey + ":claimed";
+        String legacyKey = HOOK_MILESTONE_PREFIX + ruleId + ":" + index + ":" + encounterId;
+        if (achievedServerMilestones.contains(doneKey)
+                || achievedServerMilestones.contains(claimKey)
+                || achievedServerMilestones.contains(legacyKey)) {
+            return true;
+        }
+        if (progressionRepository == null) {
+            return false;
+        }
+        try {
+            return Boolean.TRUE.equals(checkMilestoneRecorded(doneKey).get(2, TimeUnit.SECONDS))
+                    || Boolean.TRUE.equals(checkMilestoneRecorded(claimKey).get(2, TimeUnit.SECONDS))
+                    || Boolean.TRUE.equals(checkMilestoneRecorded(legacyKey).get(2, TimeUnit.SECONDS));
+        } catch (Exception ex) {
+            logger.log(Level.WARNING, "Failed to query server-first hook milestone state for fallback check", ex);
+            return false;
+        }
+    }
+
+    @Override
     public void markPackLoadFailed(@Nullable String reason) {
         this.packLoadFailed = true;
     }
@@ -306,13 +379,15 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
 
     private void recordClearMilestones(String encounterId, Collection<UUID> participantIds) {
         String milestoneKey = ENCOUNTER_MILESTONE_PREFIX + encounterId;
-        achievedServerMilestones.add(milestoneKey);
         if (progressionRepository != null) {
             progressionRepository.tryClaimServerFirst(milestoneKey, participantIds, clockMillis.getAsLong())
+                    .thenAccept(ignored -> achievedServerMilestones.add(milestoneKey))
                     .exceptionally(ex -> {
                         logger.log(Level.WARNING, "Failed to persist server milestone " + milestoneKey, ex);
-                        return false;
+                        return null;
                     });
+        } else {
+            achievedServerMilestones.add(milestoneKey);
         }
         for (UUID participantId : participantIds) {
             if (participantId != null) {
@@ -333,7 +408,6 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (VanillaProgressionRule rule : sortedRules()) {
             List<VanillaClearHookSpec> hooks = rule.clearHooks();
-            boolean ruleHasStableMilestones = hasStableHookMilestonesForRule(rule.id());
             for (int index = 0; index < hooks.size(); index++) {
                 VanillaClearHookSpec hook = hooks.get(index);
                 if (!matchesEncounter(hook.encounterId(), encounterId)) {
@@ -342,22 +416,20 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
                 if (hook.difficulty() != null && hook.difficulty() != difficulty) {
                     continue;
                 }
-                if (hook.firstClearOnly() && !firstClear) {
-                    continue;
-                }
+                boolean allowNewExecution = !hook.firstClearOnly() || firstClear;
                 if (hook.serverFirstOnly()) {
                     String hookKey = HOOK_MILESTONE_PREFIX + rule.id() + ":id:" + hook.stableKey() + ":" + encounterId;
                     String legacyKey = HOOK_MILESTONE_PREFIX + rule.id() + ":" + index + ":" + encounterId;
                     futures.add(executeResumableServerFirstHook(
                             hookKey,
                             legacyKey,
-                            ruleHasStableMilestones,
+                            allowNewExecution,
                             hook,
                             participantIds,
                             snapshot,
                             now
                     ));
-                } else {
+                } else if (allowNewExecution) {
                     futures.add(runClearHookStages(hook, participantIds, snapshot, null, now));
                 }
             }
@@ -370,7 +442,7 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
     private CompletableFuture<Void> executeResumableServerFirstHook(
             String hookKey,
             String legacyKey,
-            boolean ruleHasStableMilestones,
+            boolean allowNewClaim,
             VanillaClearHookSpec hook,
             Collection<UUID> participantIds,
             @Nullable EncounterResultSnapshot snapshot,
@@ -382,29 +454,63 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
             if (Boolean.TRUE.equals(done)) {
                 return CompletableFuture.completedFuture(null);
             }
-            CompletableFuture<Boolean> legacyCheck = !ruleHasStableMilestones
-                    ? checkMilestoneRecorded(legacyKey)
-                    : CompletableFuture.completedFuture(false);
-            return legacyCheck.thenCompose(legacyDone -> {
-                if (Boolean.TRUE.equals(legacyDone)) {
-                    // Migrate pre-PR legacy positional completion to stable hook ID without re-executing.
-                    return persistMilestoneStep(doneKey, participantIds, now);
+            return checkMilestoneRecorded(claimKey).thenCompose(alreadyClaimed -> {
+                if (Boolean.TRUE.equals(alreadyClaimed)) {
+                    if (!inFlightHooks.add(hookKey)) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return loadExistingHookWinners(claimKey, participantIds)
+                            .thenCompose(winners -> runClearHookStages(hook, winners, snapshot, hookKey, now)
+                                    .thenCompose(v -> persistMilestoneStep(doneKey, winners, now)))
+                            .whenComplete((v, err) -> {
+                                inFlightHooks.remove(hookKey);
+                                if (err != null) {
+                                    logger.log(Level.WARNING, "Server-first clear hook partially failed and remains resumable: " + hookKey, err);
+                                }
+                            })
+                            .exceptionally(ex -> null);
                 }
-                if (!inFlightHooks.add(hookKey)) {
-                    return CompletableFuture.completedFuture(null);
-                }
-                return claimOrLoadHookWinners(claimKey, participantIds, now)
-                        .thenCompose(winners -> runClearHookStages(hook, winners, snapshot, hookKey, now)
-                                .thenCompose(v -> persistMilestoneStep(doneKey, winners, now)))
-                        .whenComplete((v, err) -> {
-                            inFlightHooks.remove(hookKey);
-                            if (err != null) {
-                                logger.log(Level.WARNING, "Server-first clear hook partially failed and remains resumable: " + hookKey, err);
-                            }
-                        })
-                        .exceptionally(ex -> null);
+                return checkMilestoneRecorded(legacyKey).thenCompose(legacyDone -> {
+                    if (Boolean.TRUE.equals(legacyDone)) {
+                        // Migrate pre-PR legacy positional completion to stable hook ID per hook without re-executing.
+                        return persistMilestoneStep(doneKey, participantIds, now);
+                    }
+                    if (!allowNewClaim) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    if (!inFlightHooks.add(hookKey)) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return claimOrLoadHookWinners(claimKey, participantIds, now)
+                            .thenCompose(winners -> runClearHookStages(hook, winners, snapshot, hookKey, now)
+                                    .thenCompose(v -> persistMilestoneStep(doneKey, winners, now)))
+                            .whenComplete((v, err) -> {
+                                inFlightHooks.remove(hookKey);
+                                if (err != null) {
+                                    logger.log(Level.WARNING, "Server-first clear hook partially failed and remains resumable: " + hookKey, err);
+                                }
+                            })
+                            .exceptionally(ex -> null);
+                });
             });
         });
+    }
+
+    private CompletableFuture<Collection<UUID>> loadExistingHookWinners(
+            String claimKey,
+            Collection<UUID> fallbackParticipants) {
+        if (progressionRepository == null) {
+            return CompletableFuture.completedFuture(
+                    inMemoryHookWinners.getOrDefault(claimKey,
+                            fallbackParticipants == null ? List.of() : List.copyOf(fallbackParticipants)));
+        }
+        return progressionRepository.loadServerMilestoneParticipants(claimKey)
+                .thenApply(loaded -> {
+                    if (loaded != null && !loaded.isEmpty()) {
+                        return (Collection<UUID>) loaded;
+                    }
+                    return fallbackParticipants == null ? List.of() : List.copyOf(fallbackParticipants);
+                });
     }
 
     private CompletableFuture<Collection<UUID>> claimOrLoadHookWinners(
@@ -427,13 +533,7 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
                         return CompletableFuture.completedFuture(
                                 candidateParticipants == null ? List.of() : List.copyOf(candidateParticipants));
                     }
-                    return progressionRepository.loadServerMilestoneParticipants(claimKey)
-                            .thenApply(loaded -> {
-                                if (loaded != null && !loaded.isEmpty()) {
-                                    return (Collection<UUID>) loaded;
-                                }
-                                return candidateParticipants == null ? List.of() : List.copyOf(candidateParticipants);
-                            });
+                    return loadExistingHookWinners(claimKey, candidateParticipants);
                 });
     }
 
@@ -443,17 +543,31 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
             @Nullable EncounterResultSnapshot snapshot,
             @Nullable String hookKeyPrefix,
             long now) {
-        CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
-        boolean needsSync = vanillaProgressionService != null
-                && (hook.syncDragonBattleDefeated() || hook.generateExitPortal() || hook.removeLiveVanillaDragon());
-        boolean needsGateways = vanillaProgressionService != null && hook.spawnGatewayCount() > 0;
-        boolean needsScript = !hook.scriptHookId().isBlank() && scriptHookRegistry != null;
+        boolean wantsSync = hook.syncDragonBattleDefeated() || hook.generateExitPortal() || hook.removeLiveVanillaDragon();
+        boolean wantsGateways = hook.spawnGatewayCount() > 0;
+        boolean wantsScript = !hook.scriptHookId().isBlank();
 
-        if (needsSync) {
+        if ((wantsSync || wantsGateways) && vanillaProgressionService == null) {
+            CompletableFuture<Void> failed = CompletableFuture.failedFuture(
+                    new IllegalStateException("VanillaProgressionService unavailable for clear hook on " + hook.encounterId()));
+            return hookKeyPrefix == null ? swallowNonServerFirstFailure(failed) : failed;
+        }
+        if (wantsScript && scriptHookRegistry == null) {
+            CompletableFuture<Void> failed = CompletableFuture.failedFuture(
+                    new IllegalStateException("ScriptHookRegistry unavailable for clear hook script: " + hook.scriptHookId()));
+            return hookKeyPrefix == null ? swallowNonServerFirstFailure(failed) : failed;
+        }
+
+        CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
+
+        if (wantsSync) {
             String syncStepKey = hookKeyPrefix != null ? hookKeyPrefix + ":step:sync" : null;
             chain = chain.thenCompose(v -> checkMilestoneRecorded(syncStepKey).thenCompose(alreadyDone -> {
                 if (Boolean.TRUE.equals(alreadyDone)) {
                     return CompletableFuture.completedFuture(null);
+                }
+                if (syncStepKey != null && executedStepsInMemory.contains(syncStepKey)) {
+                    return persistMilestoneStep(syncStepKey, participantIds, now);
                 }
                 return vanillaProgressionService.synchronizeDragonDefeated(
                         hook.endWorldName(),
@@ -465,30 +579,55 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
                         return CompletableFuture.failedFuture(
                                 new IllegalStateException("DragonBattle synchronization returned false for " + hook.endWorldName()));
                     }
+                    if (syncStepKey != null) {
+                        executedStepsInMemory.add(syncStepKey);
+                    }
                     return persistMilestoneStep(syncStepKey, participantIds, now);
                 });
             }));
         }
 
-        if (needsGateways) {
+        if (wantsGateways) {
             String gatewayStepKey = hookKeyPrefix != null ? hookKeyPrefix + ":step:gateways" : null;
             chain = chain.thenCompose(v -> checkMilestoneRecorded(gatewayStepKey).thenCompose(alreadyDone -> {
                 if (Boolean.TRUE.equals(alreadyDone)) {
                     return CompletableFuture.completedFuture(null);
                 }
-                return vanillaProgressionService.expandEndGateways(
-                        hook.endWorldName(),
-                        hook.spawnGatewayCount(),
-                        hook.maxGateways()
-                ).thenCompose(count -> persistMilestoneStep(gatewayStepKey, participantIds, now));
+                if (gatewayStepKey != null && executedStepsInMemory.contains(gatewayStepKey)) {
+                    return persistMilestoneStep(gatewayStepKey, participantIds, now);
+                }
+                if (hookKeyPrefix == null) {
+                    return vanillaProgressionService.expandEndGateways(
+                            hook.endWorldName(),
+                            hook.spawnGatewayCount(),
+                            hook.maxGateways()
+                    ).thenAccept(spawned -> {});
+                }
+                String gatewayTargetKey = hookKeyPrefix + ":gateway_target";
+                return resolveOrPersistGatewayTarget(gatewayTargetKey, hook, now)
+                        .thenCompose(targetCount -> vanillaProgressionService
+                                .expandEndGatewaysToTarget(hook.endWorldName(), targetCount, hook.maxGateways())
+                                .thenCompose(result -> {
+                                    if (result == null || result.finalGatewayCount() < targetCount) {
+                                        int actual = result == null ? -1 : result.finalGatewayCount();
+                                        return CompletableFuture.failedFuture(new IllegalStateException(
+                                                "Gateway expansion did not reach target count " + targetCount
+                                                        + " (actual=" + actual + ") for " + hook.endWorldName()));
+                                    }
+                                    executedStepsInMemory.add(gatewayStepKey);
+                                    return persistMilestoneStep(gatewayStepKey, participantIds, now);
+                                }));
             }));
         }
 
-        if (needsScript) {
+        if (wantsScript) {
             String scriptStepKey = hookKeyPrefix != null ? hookKeyPrefix + ":step:script" : null;
             chain = chain.thenCompose(v -> checkMilestoneRecorded(scriptStepKey).thenCompose(alreadyDone -> {
                 if (Boolean.TRUE.equals(alreadyDone)) {
                     return CompletableFuture.completedFuture(null);
+                }
+                if (scriptStepKey != null && executedStepsInMemory.contains(scriptStepKey)) {
+                    return persistMilestoneStep(scriptStepKey, participantIds, now);
                 }
                 ScriptHookContext ctx = new ScriptHookContext(
                         serviceRegistry,
@@ -504,17 +643,69 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
                     return CompletableFuture.failedFuture(
                             new IllegalStateException("Unregistered progression script hook: " + hook.scriptHookId()));
                 }
+                if (executed && scriptStepKey != null) {
+                    executedStepsInMemory.add(scriptStepKey);
+                }
                 return persistMilestoneStep(scriptStepKey, participantIds, now);
             }));
         }
 
         if (hookKeyPrefix == null) {
-            return chain.exceptionally(ex -> {
-                logger.log(Level.WARNING, "Clear progression hook failed", ex);
-                return null;
-            });
+            return swallowNonServerFirstFailure(chain);
         }
         return chain;
+    }
+
+    private CompletableFuture<Void> swallowNonServerFirstFailure(CompletableFuture<Void> future) {
+        return future.exceptionally(ex -> {
+            logger.log(Level.WARNING, "Clear progression hook failed", ex);
+            return null;
+        });
+    }
+
+    private CompletableFuture<Integer> resolveOrPersistGatewayTarget(
+            String gatewayTargetKey,
+            VanillaClearHookSpec hook,
+            long now) {
+        String inMem = inMemoryMilestoneStates.get(gatewayTargetKey);
+        if (inMem != null) {
+            try {
+                return CompletableFuture.completedFuture(Integer.parseInt(inMem));
+            } catch (NumberFormatException ignored) {
+                inMemoryMilestoneStates.remove(gatewayTargetKey);
+            }
+        }
+        CompletableFuture<Optional<String>> loadedFuture = progressionRepository != null
+                ? progressionRepository.loadServerMilestoneState(gatewayTargetKey)
+                : CompletableFuture.completedFuture(Optional.empty());
+        return loadedFuture.thenCompose(loadedOpt -> {
+            if (loadedOpt != null && loadedOpt.isPresent()) {
+                try {
+                    int parsed = Integer.parseInt(loadedOpt.get().trim());
+                    inMemoryMilestoneStates.put(gatewayTargetKey, Integer.toString(parsed));
+                    return CompletableFuture.completedFuture(parsed);
+                } catch (NumberFormatException ignored) {
+                    // Fall through to recompute cleanly.
+                }
+            }
+            return vanillaProgressionService.getEndGatewayCount(hook.endWorldName()).thenCompose(current -> {
+                int effectiveMax = Math.min(hook.maxGateways(), VanillaClearHookSpec.MAX_VANILLA_GATEWAYS);
+                int cur = current == null ? 0 : current;
+                int target = cur >= effectiveMax
+                        ? cur
+                        : Math.min(cur + hook.spawnGatewayCount(), effectiveMax);
+                String encoded = Integer.toString(target);
+                if (progressionRepository != null) {
+                    return progressionRepository.saveServerMilestoneState(gatewayTargetKey, encoded, now)
+                            .thenApply(ignored -> {
+                                inMemoryMilestoneStates.put(gatewayTargetKey, encoded);
+                                return target;
+                            });
+                }
+                inMemoryMilestoneStates.put(gatewayTargetKey, encoded);
+                return CompletableFuture.completedFuture(target);
+            });
+        });
     }
 
     private CompletableFuture<Boolean> checkMilestoneRecorded(@Nullable String key) {
@@ -543,22 +734,15 @@ public final class DefaultVanillaEndProgressionPolicy implements VanillaEndProgr
         if (stepKey == null) {
             return CompletableFuture.completedFuture(null);
         }
-        achievedServerMilestones.add(stepKey);
         if (progressionRepository == null) {
+            achievedServerMilestones.add(stepKey);
             return CompletableFuture.completedFuture(null);
         }
         return progressionRepository.tryClaimServerFirst(stepKey, participantIds, now)
-                .thenApply(ignored -> null);
-    }
-
-    private boolean hasStableHookMilestonesForRule(String ruleId) {
-        String prefix = HOOK_MILESTONE_PREFIX + ruleId + ":id:";
-        for (String key : achievedServerMilestones) {
-            if (key.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
+                .thenApply(ignored -> {
+                    achievedServerMilestones.add(stepKey);
+                    return null;
+                });
     }
 
     private boolean isGateSatisfied(UUID playerId, VanillaProgressionRule rule, EndEntryGateSpec gate) {

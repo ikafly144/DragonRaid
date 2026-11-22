@@ -2,6 +2,7 @@ package net.sabafly.dragonraid.progression;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -101,8 +102,12 @@ class DefaultVanillaEndProgressionPolicyTest {
         VanillaProgressionService vanillaService = mock(VanillaProgressionService.class);
         when(vanillaService.synchronizeDragonDefeated(any(), anyBoolean(), anyBoolean(), anyBoolean()))
                 .thenReturn(CompletableFuture.completedFuture(true));
+        when(vanillaService.getEndGatewayCount(any()))
+                .thenReturn(CompletableFuture.completedFuture(0));
         when(vanillaService.expandEndGateways(any(), anyInt(), anyInt()))
                 .thenReturn(CompletableFuture.completedFuture(1));
+        when(vanillaService.expandEndGatewaysToTarget(any(), anyInt(), anyInt()))
+                .thenCallRealMethod();
 
         ScriptHookRegistry scriptHookRegistry = mock(ScriptHookRegistry.class);
         AtomicInteger hookCalls = new AtomicInteger();
@@ -399,6 +404,145 @@ class DefaultVanillaEndProgressionPolicyTest {
             policy.onEncounterCleared("legacy_enc", java.util.List.of(alice));
             // Must not run synchronizeDragonDefeated again because legacy key migrated
             org.junit.jupiter.api.Assertions.assertEquals(2, syncAttempts.get());
+
+            // #8 Legacy key checked independently per hook (not skipped due to sibling stable keys)
+            repo.tryClaimServerFirst("progression_hook:legacy_split:0:split_enc", java.util.List.of(alice), 200L).join();
+            net.sabafly.dragonraid.api.progression.VanillaClearHookSpec splitDone =
+                    new net.sabafly.dragonraid.api.progression.VanillaClearHookSpec(
+                            null, "split_enc", null, false, true, "world_the_end",
+                            true, false, false, 0, 20, null, java.util.Map.of());
+            net.sabafly.dragonraid.api.progression.VanillaClearHookSpec splitNew =
+                    new net.sabafly.dragonraid.api.progression.VanillaClearHookSpec(
+                            "split_new", "split_enc", null, false, true, "world_the_end",
+                            false, false, false, 1, 20, null, java.util.Map.of());
+            policy.replacePackRules(java.util.List.of(new net.sabafly.dragonraid.api.progression.VanillaProgressionRule(
+                    "legacy_split", 10,
+                    new net.sabafly.dragonraid.api.progression.EndEntryGateSpec(
+                            net.sabafly.dragonraid.api.progression.EndEntryGateMode.ALLOW, "", "", true, false),
+                    java.util.List.of(splitDone, splitNew))));
+            policy.loadServerMilestones().join();
+            org.mockito.Mockito.when(vanillaService.expandEndGatewaysToTarget(
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt()))
+                    .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(
+                            new net.sabafly.dragonraid.api.progression.VanillaProgressionService.GatewayExpansionResult(1, 5, 20)));
+            org.mockito.Mockito.when(vanillaService.getEndGatewayCount(org.mockito.ArgumentMatchers.any()))
+                    .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(4));
+            policy.onEncounterCleared("split_enc", java.util.List.of(alice));
+            org.junit.jupiter.api.Assertions.assertEquals(2, syncAttempts.get());
+            org.mockito.Mockito.verify(vanillaService).expandEndGatewaysToTarget("world_the_end", 5, 20);
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void worldProgressionD3_firstClearResume_missingServiceFailure_andGatewayTargetRestartResume(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path localTempDir) {
+        java.nio.file.Path dbFile = localTempDir.resolve("d3_gateway.db");
+        net.sabafly.dragonraid.api.progression.VanillaProgressionService vanillaService =
+                org.mockito.Mockito.mock(net.sabafly.dragonraid.api.progression.VanillaProgressionService.class);
+        java.util.concurrent.atomic.AtomicInteger syncCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger gateways = new java.util.concurrent.atomic.AtomicInteger(2);
+
+        org.mockito.Mockito.when(vanillaService.synchronizeDragonDefeated(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenAnswer(inv -> {
+                    syncCalls.incrementAndGet();
+                    return java.util.concurrent.CompletableFuture.completedFuture(true);
+                });
+        org.mockito.Mockito.when(vanillaService.getEndGatewayCount(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(inv -> java.util.concurrent.CompletableFuture.completedFuture(gateways.get()));
+        java.util.concurrent.atomic.AtomicInteger expandCalls = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.when(vanillaService.expandEndGatewaysToTarget(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenAnswer(inv -> {
+                    if (expandCalls.incrementAndGet() == 1) {
+                        return java.util.concurrent.CompletableFuture.failedFuture(
+                                new IllegalStateException("gateway transient failure"));
+                    }
+                    int target = inv.getArgument(1);
+                    int maxGw = inv.getArgument(2);
+                    int before = gateways.get();
+                    gateways.set(Math.max(before, target));
+                    return java.util.concurrent.CompletableFuture.completedFuture(
+                            new net.sabafly.dragonraid.api.progression.VanillaProgressionService.GatewayExpansionResult(
+                                    target - before, target, maxGw));
+                });
+
+        // #1 / #24 canonical type-tagged stableKey differentiates int vs String & preserves List order while sorting Sets
+        net.sabafly.dragonraid.api.progression.VanillaClearHookSpec intParamHook =
+                new net.sabafly.dragonraid.api.progression.VanillaClearHookSpec(
+                        null, "enc", null, false, true, "world_the_end", true, false, false, 0, 20, "hook",
+                        java.util.Map.of("x", 1, "tags", java.util.Set.of("b", "a"), "ord", java.util.List.of(1, 2)));
+        net.sabafly.dragonraid.api.progression.VanillaClearHookSpec strParamHook =
+                new net.sabafly.dragonraid.api.progression.VanillaClearHookSpec(
+                        null, "enc", null, false, true, "world_the_end", true, false, false, 0, 20, "hook",
+                        java.util.Map.of("x", "1", "tags", java.util.Set.of("a", "b"), "ord", java.util.List.of(1, 2)));
+        org.junit.jupiter.api.Assertions.assertNotEquals(intParamHook.stableKey(), strParamHook.stableKey());
+
+        try (net.sabafly.dragonraid.storage.SqlitePlayerDataRepository repo =
+                new net.sabafly.dragonraid.storage.SqlitePlayerDataRepository(dbFile, 2, Runnable::run)) {
+            // #5 Missing VanillaProgressionService fails hook without persisting :done
+            DefaultVanillaEndProgressionPolicy noSvcPolicy = new DefaultVanillaEndProgressionPolicy(
+                    repo, null, null, null, null, null, java.util.logging.Logger.getLogger("test"));
+            net.sabafly.dragonraid.api.progression.VanillaClearHookSpec firstOnlyGatewayHook =
+                    new net.sabafly.dragonraid.api.progression.VanillaClearHookSpec(
+                            "gw_hook", "enc_d3", net.sabafly.dragonraid.api.script.EncounterDifficulty.NORMAL,
+                            true, true, "world_the_end", false, false, false, 3, 20, null, java.util.Map.of());
+            noSvcPolicy.replacePackRules(java.util.List.of(new net.sabafly.dragonraid.api.progression.VanillaProgressionRule(
+                    "r1", 10,
+                    new net.sabafly.dragonraid.api.progression.EndEntryGateSpec(
+                            net.sabafly.dragonraid.api.progression.EndEntryGateMode.ALLOW, "", "", true, false),
+                    java.util.List.of(firstOnlyGatewayHook))));
+            java.util.UUID alice = java.util.UUID.randomUUID();
+            net.sabafly.dragonraid.api.event.EncounterResultSnapshot firstSnap =
+                    new net.sabafly.dragonraid.api.event.EncounterResultSnapshot(
+                            "enc_d3", net.sabafly.dragonraid.api.script.EncounterDifficulty.NORMAL,
+                            net.sabafly.dragonraid.api.event.EncounterOutcome.VICTORY, 50_000L, true, 1,
+                            java.util.Map.of(alice, new net.sabafly.dragonraid.api.event.ParticipantCombatMetrics(
+                                    alice, "Alice", java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), 0, 0, 0)),
+                            java.util.Set.of(alice));
+            noSvcPolicy.onEncounterClearedAsync(firstSnap, true).join();
+            assertTrue(repo.loadAllServerMilestones().join().stream().noneMatch(k -> k.endsWith(":done")));
+
+            // Now wire policy with real vanillaService -> :done not persisted yet, D3 allows legacy before unclaimed firstClear=false
+            DefaultVanillaEndProgressionPolicy policy = new DefaultVanillaEndProgressionPolicy(
+                    repo, null, null, vanillaService, null, null, java.util.logging.Logger.getLogger("test"));
+            policy.replacePackRules(java.util.List.of(new net.sabafly.dragonraid.api.progression.VanillaProgressionRule(
+                    "r1", 10,
+                    new net.sabafly.dragonraid.api.progression.EndEntryGateSpec(
+                            net.sabafly.dragonraid.api.progression.EndEntryGateMode.ALLOW, "", "", true, false),
+                    java.util.List.of(firstOnlyGatewayHook))));
+            policy.loadServerMilestones().join();
+
+            // D3: unclaimed firstClearOnly=true on firstClear=true -> applicable; once :claimed saved, firstClear=false resumes (#7) & suppresses legacy (D3)
+            assertTrue(policy.hasApplicableWorldProgressionHook(
+                    "enc_d3", net.sabafly.dragonraid.api.script.EncounterDifficulty.NORMAL, true));
+            policy.onEncounterClearedAsync(firstSnap, true).join();
+            assertTrue(repo.loadAllServerMilestones().join().stream().noneMatch(k -> k.endsWith(":done")));
+            // Claimed & target=5 saved, expandCalls #1 failed; repeat clear with firstClear=false resumes to target=5 (#7, #9, #10)
+            net.sabafly.dragonraid.api.event.EncounterResultSnapshot repeatSnap =
+                    new net.sabafly.dragonraid.api.event.EncounterResultSnapshot(
+                            "enc_d3", net.sabafly.dragonraid.api.script.EncounterDifficulty.NORMAL,
+                            net.sabafly.dragonraid.api.event.EncounterOutcome.VICTORY, 50_000L, false, 1,
+                            java.util.Map.of(alice, new net.sabafly.dragonraid.api.event.ParticipantCombatMetrics(
+                                    alice, "Alice", java.util.Map.of(), java.util.Map.of(), java.util.Map.of(), 0, 0, 0)),
+                            java.util.Set.of());
+            assertTrue(policy.hasApplicableWorldProgressionHook(
+                    "enc_d3", net.sabafly.dragonraid.api.script.EncounterDifficulty.NORMAL, false));
+
+            // Simulate server restart with new policy instance before repeat clear
+            DefaultVanillaEndProgressionPolicy restartedPolicy = new DefaultVanillaEndProgressionPolicy(
+                    repo, null, null, vanillaService, null, null, java.util.logging.Logger.getLogger("test"));
+            restartedPolicy.replacePackRules(java.util.List.of(new net.sabafly.dragonraid.api.progression.VanillaProgressionRule(
+                    "r1", 10,
+                    new net.sabafly.dragonraid.api.progression.EndEntryGateSpec(
+                            net.sabafly.dragonraid.api.progression.EndEntryGateMode.ALLOW, "", "", true, false),
+                    java.util.List.of(firstOnlyGatewayHook))));
+            restartedPolicy.loadServerMilestones().join();
+            gateways.set(3); // Even if baseline moved after restart, target remains 5 (not 3 + 3 = 6!)
+            restartedPolicy.onEncounterClearedAsync(repeatSnap, false).join();
+            assertEquals(5, gateways.get());
+            assertTrue(repo.loadAllServerMilestones().join().stream().anyMatch(k -> k.endsWith(":done")));
         }
     }
 }

@@ -132,6 +132,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     private volatile @Nullable RaidTimelineEngine activeTimeline;
     private final AtomicInteger remainingRevives = new AtomicInteger(0);
     private final AtomicLong encounterGeneration = new AtomicLong(0L);
+    private final AtomicLong completionSequence = new AtomicLong(0L);
+    private long lastPublishedCompletionSeq = 0L;
     private final AtomicInteger arenaUpdatesInFlight = new AtomicInteger(0);
     private volatile long combatStartedMillis;
     private volatile boolean awaitingInstanceEntry;
@@ -1303,9 +1305,10 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         int partySizeSnapshot = participants.size();
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
                 combatMetricsTracker.snapshot();
+        long completionSeq = completionSequence.incrementAndGet();
         restoreAndResetParticipants(safeSpawn);
         long wipeDuration = Math.max(0L, clockMillis.getAsLong() - combatStartedMillis);
-        emitEncounterCompleted(EncounterOutcome.WIPE, wipeDuration, partySizeSnapshot, metricsSnapshot);
+        emitEncounterCompleted(EncounterOutcome.WIPE, wipeDuration, partySizeSnapshot, metricsSnapshot, completionSeq);
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(targetWorld);
         completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
     }
@@ -1339,13 +1342,15 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         int partySizeSnapshot = participants.size();
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
                 combatMetricsTracker.snapshot();
+        long completionSeq = wasActiveOrWiping ? completionSequence.incrementAndGet() : 0L;
         restoreAndResetParticipants(safeSpawn);
         if (wasActiveOrWiping) {
             emitEncounterCompleted(
                     EncounterOutcome.ABORTED,
                     Math.max(0L, clockMillis.getAsLong() - combatStartedMillis),
                     partySizeSnapshot,
-                    metricsSnapshot
+                    metricsSnapshot,
+                    completionSeq
             );
         }
         if (instanceManager != null && targetInstance == null) {
@@ -1409,29 +1414,38 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         EncounterDifficulty victoryEncDiff = victoryBlueprint != null ? victoryBlueprint.difficulty()
                 : (difficulty == BossConfig.Difficulty.HARD ? EncounterDifficulty.HARD : EncounterDifficulty.NORMAL);
 
+        long victoryCompletionSeq = completionSequence.incrementAndGet();
+        boolean dragonHasOwnBattle = dragon.getDragonBattle() != null;
         CompletableFuture<Set<UUID>> firstClearIdsFuture = prepareVictoryCleanup(
-                dragon,
-                endWorld,
-                viewers,
                 difficulty,
                 durationMs,
-                victoryEncounterId,
-                victoryEncDiff
+                victoryEncounterId
         );
 
         // On victory, restore participant flags where they stand so they can collect drops/egg.
         restoreAndResetParticipants(null);
         firstClearIdsFuture.whenComplete((firstClearIds, err) -> {
             Set<UUID> safeFirstClears = (err != null || firstClearIds == null) ? Set.of() : firstClearIds;
-            emitEncounterCompleted(
-                    EncounterOutcome.VICTORY,
-                    victoryEncounterId,
-                    victoryEncDiff,
-                    durationMs,
-                    partySizeSnapshot,
-                    metricsSnapshot,
-                    safeFirstClears
-            );
+            scheduler.runGlobal(() -> {
+                if (configManager.pluginConfig().world().preserveVanillaProgression() && !dragonHasOwnBattle) {
+                    VanillaEndProgressionPolicy policy = this.vanillaEndProgressionPolicy;
+                    boolean anyFirstClear = !safeFirstClears.isEmpty();
+                    if (policy == null || !policy.hasApplicableWorldProgressionHook(
+                            victoryEncounterId, victoryEncDiff, anyFirstClear)) {
+                        runLegacyVanillaProgressionFallback(endWorld);
+                    }
+                }
+                emitEncounterCompleted(
+                        EncounterOutcome.VICTORY,
+                        victoryEncounterId,
+                        victoryEncDiff,
+                        durationMs,
+                        partySizeSnapshot,
+                        metricsSnapshot,
+                        safeFirstClears,
+                        victoryCompletionSeq
+                );
+            });
         });
 
         for (Player viewer : viewers) {
@@ -1790,7 +1804,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             EncounterOutcome outcome,
             long durationMs,
             int partySizeSnapshot,
-            Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot) {
+            Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot,
+            long completionSeq) {
         EncounterBlueprint blueprint = this.activeBlueprint;
         BossConfig.Difficulty diff = this.activeDifficulty;
         if (blueprint == null && diff == null) {
@@ -1800,7 +1815,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 : (diff == BossConfig.Difficulty.HARD ? "dragon_hard" : "dragon_normal");
         EncounterDifficulty encDiff = blueprint != null ? blueprint.difficulty()
                 : (diff == BossConfig.Difficulty.HARD ? EncounterDifficulty.HARD : EncounterDifficulty.NORMAL);
-        emitEncounterCompleted(outcome, encounterId, encDiff, durationMs, partySizeSnapshot, metricsSnapshot, Set.of());
+        emitEncounterCompleted(outcome, encounterId, encDiff, durationMs, partySizeSnapshot, metricsSnapshot, Set.of(), completionSeq);
     }
 
     private void emitEncounterCompleted(
@@ -1810,7 +1825,8 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             long durationMs,
             int partySizeSnapshot,
             Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot,
-            Set<UUID> firstClearPlayerIds) {
+            Set<UUID> firstClearPlayerIds,
+            long completionSeq) {
         Set<UUID> safeFirstClears = firstClearPlayerIds == null ? Set.of() : Set.copyOf(firstClearPlayerIds);
         EncounterResultSnapshot result = new EncounterResultSnapshot(
                 encounterId,
@@ -1822,7 +1838,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 metricsSnapshot,
                 safeFirstClears
         );
-        this.lastCompletedResult = result;
+        synchronized (stateLock) {
+            if (completionSeq > this.lastPublishedCompletionSeq) {
+                this.lastPublishedCompletionSeq = completionSeq;
+                this.lastCompletedResult = result;
+            }
+        }
         Consumer<EncounterResultSnapshot> sink = this.encounterCompletedSink;
         if (sink != null) {
             sink.accept(result);
@@ -2489,8 +2510,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         int partySizeSnapshot = participants.size();
         Map<UUID, net.sabafly.dragonraid.api.event.ParticipantCombatMetrics> metricsSnapshot =
                 combatMetricsTracker.snapshot();
+        long completionSeq = completionSequence.incrementAndGet();
         restoreAndResetParticipants(regionService.safeZoneSpawnLocation(endWorld));
-        emitEncounterCompleted(EncounterOutcome.ABORTED, 0L, partySizeSnapshot, metricsSnapshot);
+        emitEncounterCompleted(EncounterOutcome.ABORTED, 0L, partySizeSnapshot, metricsSnapshot, completionSeq);
         CompletableFuture<Void> rollbackFuture = rollbackBlocksIfConfigured(endWorld);
         completeEndingWhenRolledBack(endingGeneration, rollbackFuture);
     }
@@ -2523,13 +2545,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
     }
 
     private CompletableFuture<Set<UUID>> prepareVictoryCleanup(
-            EnderDragon dragon,
-            World endWorld,
-            List<Player> viewers,
             BossConfig.Difficulty difficulty,
             long durationMs,
-            String encounterId,
-            EncounterDifficulty encDiff) {
+            String encounterId) {
         List<CompletableFuture<Optional<UUID>>> clearFutures = new ArrayList<>();
         if (playerDataRepository != null) {
             Difficulty storageDifficulty = difficulty == BossConfig.Difficulty.HARD ? Difficulty.HARD : Difficulty.NORMAL;
@@ -2575,33 +2593,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             timeline.stop();
         }
         if (hudService != null) {
+            World endWorld = endWorldSupplier.get();
+            List<Player> viewers = endWorld != null ? onlinePlayersInWorld(endWorld) : onlineParticipantPlayers();
             hudService.clearAll(viewers);
         }
         if (bossController != null) {
             bossController.prepareForVanillaDefeat();
-        }
-        boolean legacyFallbackAllowed = configManager.pluginConfig().world().preserveVanillaProgression()
-                && dragon.getDragonBattle() == null
-                && (vanillaEndProgressionPolicy == null
-                        || !vanillaEndProgressionPolicy.hasMatchingClearHook(encounterId, encDiff));
-        if (legacyFallbackAllowed) {
-            World mainEnd = endWorldSupplier.get();
-            World progressionWorld = mainEnd != null ? mainEnd : endWorld;
-            DragonBattle battle = progressionWorld != null ? progressionWorld.getEnderDragonBattle() : null;
-            if (battle != null) {
-                Location portalAnchor = battle.getEndPortalLocation() != null
-                        ? battle.getEndPortalLocation()
-                        : new Location(progressionWorld, 0.0, 64.0, 0.0);
-                scheduler.runAtRegion(portalAnchor, () -> {
-                    if (battle.getEndPortalLocation() == null) {
-                        battle.generateEndPortal(true);
-                    }
-                    battle.spawnNewGateway();
-                    if (!battle.hasBeenPreviouslyKilled()) {
-                        battle.setPreviouslyKilled(true);
-                    }
-                });
-            }
         }
         if (clearFutures.isEmpty()) {
             return CompletableFuture.completedFuture(Set.of());
@@ -2614,6 +2611,26 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     }
                     return Set.copyOf(firstClearIds);
                 });
+    }
+
+    private void runLegacyVanillaProgressionFallback(World endWorld) {
+        World mainEnd = endWorldSupplier.get();
+        World progressionWorld = mainEnd != null ? mainEnd : endWorld;
+        DragonBattle battle = progressionWorld != null ? progressionWorld.getEnderDragonBattle() : null;
+        if (battle != null) {
+            Location portalAnchor = battle.getEndPortalLocation() != null
+                    ? battle.getEndPortalLocation()
+                    : new Location(progressionWorld, 0.0, 64.0, 0.0);
+            scheduler.runAtRegion(portalAnchor, () -> {
+                if (battle.getEndPortalLocation() == null) {
+                    battle.generateEndPortal(true);
+                }
+                battle.spawnNewGateway();
+                if (!battle.hasBeenPreviouslyKilled()) {
+                    battle.setPreviouslyKilled(true);
+                }
+            });
+        }
     }
 
     private CompletableFuture<Void> cleanupEncounterSystems(List<Player> viewers, boolean removeDragonIfSummoned) {

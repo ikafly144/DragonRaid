@@ -33,6 +33,7 @@ public final class SqliteDatabase implements AutoCloseable {
 
     private static final int BUSY_TIMEOUT_MS = 5000;
     private static final Duration DEFAULT_CLOSE_DRAIN_TIMEOUT = Duration.ofSeconds(5);
+    private static final ThreadLocal<Integer> DB_CALLBACK_DEPTH = ThreadLocal.withInitial(() -> 0);
 
     private final HikariDataSource dataSource;
     private final Executor asyncExecutor;
@@ -130,6 +131,13 @@ public final class SqliteDatabase implements AutoCloseable {
 
     public <T> CompletableFuture<T> supplyAsync(Supplier<T> supplier) {
         ensureAccepting();
+        if (DB_CALLBACK_DEPTH.get() > 0) {
+            try {
+                return CompletableFuture.completedFuture(supplier.get());
+            } catch (Throwable ex) {
+                return CompletableFuture.failedFuture(ex);
+            }
+        }
         CompletableFuture<Void> internalDone = new CompletableFuture<>();
         CompletableFuture<T> publicFuture = new CompletableFuture<>();
         PendingTask task = new PendingTask(internalDone, publicFuture);
@@ -146,12 +154,27 @@ public final class SqliteDatabase implements AutoCloseable {
                     internalDone.complete(null);
                     return;
                 }
+                int prevDepth = DB_CALLBACK_DEPTH.get();
+                DB_CALLBACK_DEPTH.set(prevDepth + 1);
+                T result = null;
+                Throwable failure = null;
                 try {
-                    T result = supplier.get();
-                    publicFuture.complete(result);
-                } catch (Throwable ex) {
-                    publicFuture.completeExceptionally(ex);
+                    try {
+                        result = supplier.get();
+                    } catch (Throwable ex) {
+                        failure = ex;
+                    }
+                    if (failure != null) {
+                        publicFuture.completeExceptionally(failure);
+                    } else {
+                        publicFuture.complete(result);
+                    }
                 } finally {
+                    if (prevDepth == 0) {
+                        DB_CALLBACK_DEPTH.remove();
+                    } else {
+                        DB_CALLBACK_DEPTH.set(prevDepth);
+                    }
                     internalDone.complete(null);
                 }
             });

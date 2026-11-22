@@ -61,4 +61,10 @@ public interface RaidAchievementService {
             boolean serverFirst,
             Map<String, Object> metadata
     );
+
+    default CompletableFuture<List<AchievementUnlockedEvent>> resumePendingServerFirst(
+            UUID playerId,
+            @Nullable String playerName) {
+        return CompletableFuture.completedFuture(List.of());
+    }
 }

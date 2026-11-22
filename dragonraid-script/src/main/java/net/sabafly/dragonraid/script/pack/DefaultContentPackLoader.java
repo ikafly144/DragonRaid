@@ -172,6 +172,18 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
             }
         }
 
+        for (ContentEntrySpec entry : stagedContents) {
+            if (!entry.blueprintId().equals(entry.contentId()) && seenContentIds.contains(entry.blueprintId())) {
+                throw new ContentPackException(
+                        "",
+                        contentsRoot,
+                        "contents",
+                        "Content blueprint-id '" + entry.blueprintId()
+                                + "' on content '" + entry.contentId()
+                                + "' collides with another content's id");
+            }
+        }
+
         validateRewardGraphAndReferences(
                 stagedContents,
                 stagedAchievements,
@@ -250,9 +262,14 @@ public final class DefaultContentPackLoader implements ContentPackLoader {
             mergedPools.put(table.id(), new ArrayList<>(table.pools()));
         }
 
-        List<RewardTableExtension> allExtensions = new ArrayList<>(rewardService.staticExtensions());
-        allExtensions.addAll(stagedExtensions);
-        List<RewardTableExtension> sortedExtensions = allExtensions.stream()
+        Map<String, RewardTableExtension> effectiveExtensionsById = new LinkedHashMap<>();
+        for (RewardTableExtension staticExt : rewardService.staticExtensions()) {
+            effectiveExtensionsById.put(staticExt.id(), staticExt);
+        }
+        for (RewardTableExtension stagedExt : stagedExtensions) {
+            effectiveExtensionsById.put(stagedExt.id(), stagedExt);
+        }
+        List<RewardTableExtension> sortedExtensions = effectiveExtensionsById.values().stream()
                 .sorted(Comparator.comparingInt(RewardTableExtension::priority)
                         .thenComparing(RewardTableExtension::packId)
                         .thenComparing(RewardTableExtension::id))

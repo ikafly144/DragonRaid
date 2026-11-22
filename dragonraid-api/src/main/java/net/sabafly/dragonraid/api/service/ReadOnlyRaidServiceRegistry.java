@@ -182,6 +182,11 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
         }
 
         @Override
+        public CompletableFuture<Long> balanceAsync(UUID playerId, String currencyId) {
+            return delegate.balanceAsync(playerId, currencyId);
+        }
+
+        @Override
         public boolean deposit(UUID playerId, String currencyId, long amount) {
             throw readOnlyError("RaidEconomyService.deposit");
         }
@@ -196,8 +201,24 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
         }
 
         @Override
+        public CompletableFuture<Boolean> depositIdempotentAsync(
+                UUID playerId,
+                @Nullable String playerName,
+                String currencyId,
+                long amount,
+                @Nullable String idempotencyKey,
+                long claimedAtEpochMillis) {
+            throw readOnlyError("RaidEconomyService.depositIdempotentAsync");
+        }
+
+        @Override
         public boolean withdraw(UUID playerId, String currencyId, long amount) {
             throw readOnlyError("RaidEconomyService.withdraw");
+        }
+
+        @Override
+        public CompletableFuture<Boolean> withdrawAsync(UUID playerId, String currencyId, long amount) {
+            throw readOnlyError("RaidEconomyService.withdrawAsync");
         }
     }
 
@@ -263,6 +284,12 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
                 boolean serverFirst,
                 Map<String, Object> metadata) {
             throw readOnlyError("RaidAchievementService.grantAchievement");
+        }
+
+        @Override
+        public CompletableFuture<List<AchievementUnlockedEvent>> resumePendingServerFirst(
+                UUID playerId, @Nullable String playerName) {
+            throw readOnlyError("RaidAchievementService.resumePendingServerFirst");
         }
     }
 
@@ -402,6 +429,12 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
                 RandomGenerator random) {
             throw readOnlyError("RaidRewardService.evaluateAndApplyAll");
         }
+
+        @Override
+        public CompletableFuture<List<RewardApplyResult>> resumePendingPlans(
+                UUID playerId, @Nullable String playerName) {
+            throw readOnlyError("RaidRewardService.resumePendingPlans");
+        }
     }
 
     private record ReadOnlyVanillaEndProgressionPolicy(VanillaEndProgressionPolicy delegate)
@@ -424,6 +457,12 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
         @Override
         public boolean hasMatchingClearHook(String encounterId, @Nullable EncounterDifficulty difficulty) {
             return delegate.hasMatchingClearHook(encounterId, difficulty);
+        }
+
+        @Override
+        public boolean hasApplicableWorldProgressionHook(
+                String encounterId, @Nullable EncounterDifficulty difficulty, boolean firstClear) {
+            return delegate.hasApplicableWorldProgressionHook(encounterId, difficulty, firstClear);
         }
 
         @Override

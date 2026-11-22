@@ -1,5 +1,7 @@
 package net.sabafly.dragonraid.api.util;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -159,7 +161,11 @@ public final class ImmutableSnapshots {
                 }
                 return Collections.unmodifiableList(copy);
             }
-            return value;
+            if (value instanceof CharSequence cs) {
+                return cs.toString();
+            }
+            throw new IllegalArgumentException(
+                    "Unsupported mutable or non-snapshot value type: " + value.getClass().getName());
         } finally {
             visiting.remove(value);
         }
@@ -175,6 +181,8 @@ public final class ImmutableSnapshots {
                 || value instanceof Long
                 || value instanceof Float
                 || value instanceof Double
+                || value.getClass() == BigInteger.class
+                || value.getClass() == BigDecimal.class
                 || value instanceof Enum<?>
                 || value instanceof UUID
                 || value instanceof Instant

@@ -108,11 +108,15 @@ class DefaultContentFinderServiceTest {
         unlockService.loadPlayer(alice).join();
         assertTrue(unlockService.isUnlocked(alice, "pack_normal"));
 
-        assertTrue(unlockService.unlock(alice, "Alice", "pack_hard"));
-        assertFalse(unlockService.unlock(alice, "Alice", "pack_hard"));
+        // A3: Sync unlock/revoke reject when backed by persistent repository; async variants succeed
+        assertThrows(UnsupportedOperationException.class, () -> unlockService.unlock(alice, "Alice", "pack_hard"));
+        assertThrows(UnsupportedOperationException.class, () -> unlockService.revoke(alice, "pack_normal"));
+
+        assertTrue(unlockService.unlockAsync(alice, "Alice", "pack_hard").join());
+        assertFalse(unlockService.unlockAsync(alice, "Alice", "pack_hard").join());
         verify(repo).grantContentUnlock(eq(alice), eq("Alice"), eq("pack_hard"), anyLong());
 
-        assertTrue(unlockService.revoke(alice, "pack_normal"));
+        assertTrue(unlockService.revokeAsync(alice, "pack_normal").join());
         assertFalse(unlockService.isUnlocked(alice, "pack_normal"));
         verify(repo).revokeContentUnlock(alice, "pack_normal");
 

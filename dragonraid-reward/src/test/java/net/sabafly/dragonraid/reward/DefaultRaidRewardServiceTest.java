@@ -31,6 +31,7 @@ import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.finder.ContentFinderService;
 import net.sabafly.dragonraid.api.finder.ContentUnlockService;
 import net.sabafly.dragonraid.api.progression.PlayerProgressionRepository;
+import net.sabafly.dragonraid.api.reward.ContentUnlockGrant;
 import net.sabafly.dragonraid.api.reward.ContentUnlockNotification;
 import net.sabafly.dragonraid.api.reward.ContentUnlockNotifier;
 import net.sabafly.dragonraid.api.reward.CurrencyGrant;
@@ -302,6 +303,7 @@ class DefaultRaidRewardServiceTest {
 
         UUID alice = UUID.randomUUID();
         Set<String> dbClaimed = ConcurrentHashMap.newKeySet();
+        stubPlanPersistence(repo, alice, new ConcurrentHashMap<>());
         when(repo.loadClaimedRewards(alice))
                 .thenAnswer(inv -> CompletableFuture.completedFuture(Set.copyOf(dbClaimed)));
         when(repo.tryClaimReward(eq(alice), eq("Alice"), any(), any(Long.class))).thenAnswer(inv -> {
@@ -314,10 +316,16 @@ class DefaultRaidRewardServiceTest {
                 .thenReturn(CompletableFuture.completedFuture(true), CompletableFuture.completedFuture(false));
         when(currencySink.grantCurrency(eq(alice), eq("Alice"), eq("dragon_token"), any(Long.class)))
                 .thenReturn(CompletableFuture.completedFuture(true));
+        when(currencySink.grantCurrencyIdempotent(any(), any(), any(), any(Long.class), any(), any(Long.class)))
+                .thenCallRealMethod();
         when(itemDelivery.deliverVanillaItem(alice, "DIAMOND", 3))
                 .thenReturn(CompletableFuture.completedFuture(true));
+        when(itemDelivery.deliverVanillaItemDetailed(any(), any(), any(Integer.class)))
+                .thenCallRealMethod();
         when(itemDelivery.deliverCustomItem(alice, "dragonscale_shield", 1))
                 .thenReturn(CompletableFuture.completedFuture(true));
+        when(itemDelivery.deliverCustomItemDetailed(any(), any(), any(Integer.class)))
+                .thenCallRealMethod();
         AtomicInteger hooks = new AtomicInteger();
         when(scriptHooks.executeAction(eq("bonus_hook"), any())).thenAnswer(inv -> {
             hooks.incrementAndGet();
@@ -437,6 +445,7 @@ class DefaultRaidRewardServiceTest {
         when(mutableRegistry.get(ContentUnlockService.class)).thenReturn(Optional.of(unlockService));
 
         Set<String> dbClaimed = ConcurrentHashMap.newKeySet();
+        stubPlanPersistence(repo, alice, new ConcurrentHashMap<>());
         when(repo.loadClaimedRewards(alice))
                 .thenAnswer(inv -> CompletableFuture.completedFuture(Set.copyOf(dbClaimed)));
         when(repo.tryClaimReward(eq(alice), eq("Alice"), any(), any(Long.class))).thenAnswer(inv -> {
@@ -457,9 +466,15 @@ class DefaultRaidRewardServiceTest {
         when(currencySink.grantCurrency(alice, "Alice", "dragon_token", 25L))
                 .thenReturn(CompletableFuture.completedFuture(true))
                 .thenReturn(CompletableFuture.completedFuture(false));
+        when(currencySink.grantCurrencyIdempotent(any(), any(), any(), any(Long.class), any(), any(Long.class)))
+                .thenCallRealMethod();
         when(itemDelivery.deliverVanillaItem(alice, "DIAMOND", 2))
                 .thenReturn(CompletableFuture.completedFuture(false))
                 .thenReturn(CompletableFuture.completedFuture(true));
+        when(itemDelivery.deliverVanillaItemDetailed(any(), any(), any(Integer.class)))
+                .thenCallRealMethod();
+        when(itemDelivery.deliverCustomItemDetailed(any(), any(), any(Integer.class)))
+                .thenCallRealMethod();
         when(scriptHooks.executeAction(eq("missing_action"), any()))
                 .thenReturn(false)
                 .thenReturn(true);
@@ -521,5 +536,209 @@ class DefaultRaidRewardServiceTest {
                         List.of(), List.of(RewardEntrySpec.currency("gold", RollRange.exact(1), 1, List.of(), List.of())), List.of())
         ));
         assertTrue(evaluator.evaluate(id -> Optional.of(negativeLuckTable), "neg_tbl", luckyCtx, new Random(1L)).isEmpty());
+    }
+
+    @Test
+    void round2Budget_syntheticServerFirst_iterativeDfs_durablePlan_partialItems_andImmutableSnapshots() {
+        UUID alice = UUID.randomUUID();
+        RewardContext aliceCtx = RewardContext.builder(alice)
+                .playerName("Alice")
+                .sourceType("ENCOUNTER_CLEAR")
+                .sourceId("dragon_normal")
+                .serverFirst(true)
+                .build();
+
+        // #14: Shared evaluation budget aborted across evaluateAll / multi-roll before returning bundle
+        PureRewardTableEvaluator budgetEvaluator = new PureRewardTableEvaluator();
+        RewardTable heavyTable = new RewardTable("heavy", List.of(
+                new RewardPool("p", RewardPoolMode.ALL, RollRange.exact(6000), 0.0, null,
+                        List.of(), List.of(RewardEntrySpec.currency("coin", RollRange.exact(1), 1, List.of(), List.of())), List.of())
+        ));
+        assertThrows(IllegalStateException.class, () -> budgetEvaluator.evaluateAll(
+                id -> Optional.of(heavyTable), List.of("heavy", "heavy"), aliceCtx, new Random(1L)));
+
+        // #39: Deep non-cyclic chain (500 tables) passes iterative DFS without StackOverflowError
+        DefaultRaidRewardService deepService = new DefaultRaidRewardService();
+        List<RewardTable> deepChain = new ArrayList<>();
+        for (int i = 0; i < 500; i++) {
+            String next = (i + 1 < 500) ? "t_" + (i + 1) : null;
+            RewardEntrySpec entry = next != null
+                    ? RewardEntrySpec.tableRef(next, 1, 0.0, List.of(), List.of())
+                    : RewardEntrySpec.currency("coin", RollRange.exact(1), 1, List.of(), List.of());
+            deepChain.add(new RewardTable("t_" + i, List.of(
+                    RewardPool.allOf("p", null, List.of(), List.of(entry)))));
+        }
+        deepService.replacePackTables(deepChain, List.of());
+        assertEquals(500, deepService.tables().size());
+
+        // D4: Synthetic __sys:sf:... key generated for keyless SERVER_FIRST pool, deduplicated silently, and hidden from public claim sets
+        RewardTable keylessSfTable = new RewardTable("sf_keyless", List.of(
+                RewardPool.allOf("sf_pool", null, List.of(RewardConditionSpec.serverFirst()),
+                        List.of(RewardEntrySpec.currency("sf_coin", RollRange.exact(5), 1, List.of(), List.of())))
+        ));
+        RewardBundle sfBundle = budgetEvaluator.evaluate(id -> Optional.of(keylessSfTable), "sf_keyless", aliceCtx, new Random(1L));
+        assertEquals(1, sfBundle.claimKeys().size());
+        String synKey = sfBundle.claimKeys().iterator().next();
+        assertTrue(synKey.startsWith(PureRewardTableEvaluator.INTERNAL_SF_CLAIM_PREFIX));
+
+        // #15, #16, #18, #22, #38, D1, D2, D4 with explicit in-memory repo tracking reward plans & failures
+        PlayerProgressionRepository planRepo = mock(PlayerProgressionRepository.class);
+        Map<String, String> storedPlans = new java.util.concurrent.ConcurrentHashMap<>();
+        Set<String> repoClaimed = ConcurrentHashMap.newKeySet();
+        java.util.concurrent.atomic.AtomicBoolean failClaimOnce = new java.util.concurrent.atomic.AtomicBoolean(false);
+        when(planRepo.loadClaimedRewards(alice))
+                .thenAnswer(inv -> CompletableFuture.completedFuture(Set.copyOf(repoClaimed)));
+        when(planRepo.tryClaimReward(eq(alice), eq("Alice"), any(), any(Long.class))).thenAnswer(inv -> {
+            if (failClaimOnce.compareAndSet(true, false)) {
+                return CompletableFuture.failedFuture(new IllegalStateException("claim db error"));
+            }
+            return CompletableFuture.completedFuture(repoClaimed.add(inv.getArgument(2)));
+        });
+        when(planRepo.loadRewardPlan(eq(alice), any())).thenAnswer(inv ->
+                CompletableFuture.completedFuture(Optional.ofNullable(storedPlans.get(inv.<String>getArgument(1)))));
+        when(planRepo.saveRewardPlanIfAbsent(eq(alice), any(), any(), any(), any(Long.class))).thenAnswer(inv -> {
+            String key = inv.getArgument(2);
+            String json = inv.getArgument(3);
+            return CompletableFuture.completedFuture(storedPlans.putIfAbsent(key, json) == null);
+        });
+        when(planRepo.updateRewardPlanProgress(eq(alice), any(), any(), any(Long.class))).thenAnswer(inv -> {
+            storedPlans.put(inv.getArgument(1), inv.getArgument(2));
+            return CompletableFuture.completedFuture(null);
+        });
+        when(planRepo.deleteRewardPlan(eq(alice), any())).thenAnswer(inv -> {
+            storedPlans.remove(inv.<String>getArgument(1));
+            return CompletableFuture.completedFuture(null);
+        });
+        when(planRepo.loadAllRewardPlans(alice)).thenAnswer(inv ->
+                CompletableFuture.completedFuture(Map.copyOf(storedPlans)));
+
+        RewardCurrencySink idempotentSink = mock(RewardCurrencySink.class);
+        when(idempotentSink.grantCurrencyIdempotent(eq(alice), eq("Alice"), eq("sf_coin"), eq(5L), any(), any(Long.class)))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        when(idempotentSink.grantCurrencyIdempotent(eq(alice), eq("Alice"), eq("gold"), eq(10L), any(), any(Long.class)))
+                .thenReturn(CompletableFuture.completedFuture(true));
+
+        RewardItemDelivery partialDelivery = mock(RewardItemDelivery.class);
+        // #22: first deliverVanillaItemDetailed(10) returns partial(10, 6); retry asks ONLY for remaining 4 -> full(4)
+        when(partialDelivery.deliverVanillaItemDetailed(alice, "DIAMOND", 10))
+                .thenReturn(CompletableFuture.completedFuture(
+                        net.sabafly.dragonraid.api.reward.ItemDeliveryResult.partial(10, 6)));
+        when(partialDelivery.deliverVanillaItemDetailed(alice, "DIAMOND", 4))
+                .thenReturn(CompletableFuture.completedFuture(
+                        net.sabafly.dragonraid.api.reward.ItemDeliveryResult.full(4)));
+        when(partialDelivery.deliverCustomItemDetailed(alice, "m2_relic", 1))
+                .thenReturn(CompletableFuture.completedFuture(
+                        net.sabafly.dragonraid.api.reward.ItemDeliveryResult.failed(1)));
+
+        ContentUnlockService unlockSvc = mock(ContentUnlockService.class);
+        when(unlockSvc.unlockAsync(alice, "Alice", "hard_mode"))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        ContentUnlockNotifier failingNotifier = (uid, note) -> {
+            throw new IllegalStateException("toast packet failed");
+        };
+        ScriptHookRegistry scriptHooks = mock(ScriptHookRegistry.class);
+        Set<String> scriptThreads = ConcurrentHashMap.newKeySet();
+        when(scriptHooks.executeAction(eq("async_hook"), any())).thenAnswer(inv -> {
+            scriptThreads.add(Thread.currentThread().getName());
+            return true;
+        });
+        when(scriptHooks.executeAction(eq("sync_boom"), any()))
+                .thenThrow(new IllegalStateException("sync throw from script hook"));
+
+        java.util.concurrent.ExecutorService customExec = java.util.concurrent.Executors.newSingleThreadExecutor(
+                r -> new Thread(r, "test-script-exec"));
+        try {
+            DefaultRewardApplier applier = new DefaultRewardApplier(
+                    unlockSvc, null, failingNotifier, idempotentSink, partialDelivery, scriptHooks,
+                    planRepo, null, () -> 5000L, Logger.getLogger("test"), customExec);
+
+            // Synthetic __sys:sf: succeeds and is hidden from public claim sets
+            RewardApplyResult sfRes = applier.apply(sfBundle, aliceCtx).join();
+            assertFalse(sfRes.hasFailures());
+            assertTrue(sfRes.newlyClaimedKeys().isEmpty());
+            assertTrue(repoClaimed.contains(synKey));
+            RewardApplyResult sfRepeat = applier.apply(sfBundle, aliceCtx).join();
+            assertTrue(sfRepeat.appliedGrants().isEmpty());
+            assertTrue(sfRepeat.skippedClaimKeys().isEmpty());
+
+            // #16, #22, #38, #15, D1: durable plan saves step order, tolerates notifier exception, handles sync script throw, resumes partial item 10->6->4
+            RewardBundle initialCombo = new RewardBundle("combo", alice, List.of(
+                    new ContentUnlockGrant("hard_mode", true, "", "", "", "", "", "", "durable_plan"),
+                    new CurrencyGrant("gold", 10L, "durable_plan"),
+                    new VanillaItemGrant("DIAMOND", 10, "durable_plan"),
+                    new ScriptHookGrant("async_hook", Map.of("x", 1), "durable_plan")
+            ));
+            RewardApplyResult r1 = applier.apply(initialCombo, aliceCtx).join();
+            assertTrue(r1.hasFailures());
+            assertTrue(storedPlans.containsKey("durable_plan"));
+            assertTrue(scriptThreads.contains("test-script-exec"));
+
+            // Re-evaluated bundle has reversed/different grants, yet Retry ignores it and resumes remaining 4 DIAMOND from saved plan!
+            RewardBundle alteredRetryBundle = new RewardBundle("combo", alice, List.of(
+                    new VanillaItemGrant("EMERALD", 99, "durable_plan"),
+                    new CurrencyGrant("gold", 999L, "durable_plan")
+            ));
+            failClaimOnce.set(true); // #18: claim key persistence fails once -> surfaces in failedClaimKeys while keeping plan
+            RewardApplyResult r2ClaimFail = applier.apply(alteredRetryBundle, aliceCtx).join();
+            assertTrue(r2ClaimFail.hasFailures());
+            assertEquals(Set.of("durable_plan"), r2ClaimFail.failedClaimKeys());
+            assertTrue(storedPlans.containsKey("durable_plan"));
+
+            // #15: sync exception in repeater does not stall queue or break apply
+            RewardApplyResult syncThrowRes = applier.apply(new RewardBundle(
+                    "rep", alice, List.of(new ScriptHookGrant("sync_boom", Map.of(), null))), aliceCtx).join();
+            assertEquals(1, syncThrowRes.failedGrants().size());
+
+            // D2: resumePendingPlans finalizes durable_plan (steps already done, only final claim left!), retains M2 CUSTOM_ITEM plan, skips v=99
+            storedPlans.put("future_v99", "{\"v\":99,\"planKey\":\"future_v99\"}");
+            RewardApplyResult m2Custom = applier.apply(new RewardBundle(
+                    "m2_tbl", alice, List.of(new CustomItemGrant("m2_relic", 1, "m2_plan"))), aliceCtx).join();
+            assertTrue(m2Custom.hasFailures());
+            assertTrue(storedPlans.containsKey("m2_plan"));
+
+            List<RewardApplyResult> resumed = applier.resumePendingPlans(alice, "Alice").join();
+            assertFalse(storedPlans.containsKey("durable_plan"));
+            assertTrue(repoClaimed.contains("durable_plan"));
+            assertTrue(storedPlans.containsKey("m2_plan"));
+            assertEquals("{\"v\":99,\"planKey\":\"future_v99\"}", storedPlans.get("future_v99"));
+            assertTrue(resumed.stream().anyMatch(r -> r.newlyClaimedKeys().contains("durable_plan")));
+            verify(partialDelivery, times(0)).deliverVanillaItemDetailed(alice, "EMERALD", 99);
+            verify(partialDelivery, times(1)).deliverVanillaItemDetailed(alice, "DIAMOND", 10);
+            verify(partialDelivery, times(1)).deliverVanillaItemDetailed(alice, "DIAMOND", 4);
+        } finally {
+            customExec.shutdownNow();
+        }
+
+        // #26: ImmutableSnapshots scalars & strict mutable value rejection
+        StringBuilder sb = new StringBuilder("hello");
+        Map<String, Object> frozen = net.sabafly.dragonraid.api.util.ImmutableSnapshots.copyStringMap(Map.of(
+                "dec", new java.math.BigDecimal("12.34"),
+                "big", new java.math.BigInteger("999999999999999999"),
+                "cs", sb
+        ));
+        sb.append("-mutated");
+        assertEquals("hello", frozen.get("cs"));
+        assertThrows(IllegalArgumentException.class, () -> net.sabafly.dragonraid.api.util.ImmutableSnapshots.copyStringMap(
+                Map.of("bad", new java.util.concurrent.atomic.AtomicInteger(1))));
+    }
+
+    private static void stubPlanPersistence(
+            PlayerProgressionRepository repo,
+            UUID playerId,
+            Map<String, String> plans) {
+        when(repo.loadRewardPlan(eq(playerId), any())).thenAnswer(inv ->
+                CompletableFuture.completedFuture(Optional.ofNullable(plans.get(inv.<String>getArgument(1)))));
+        when(repo.saveRewardPlanIfAbsent(eq(playerId), any(), any(), any(), any(Long.class))).thenAnswer(inv ->
+                CompletableFuture.completedFuture(plans.putIfAbsent(inv.getArgument(2), inv.getArgument(3)) == null));
+        when(repo.updateRewardPlanProgress(eq(playerId), any(), any(), any(Long.class))).thenAnswer(inv -> {
+            plans.put(inv.getArgument(1), inv.getArgument(2));
+            return CompletableFuture.completedFuture(null);
+        });
+        when(repo.deleteRewardPlan(eq(playerId), any())).thenAnswer(inv -> {
+            plans.remove(inv.<String>getArgument(1));
+            return CompletableFuture.completedFuture(null);
+        });
+        when(repo.loadAllRewardPlans(playerId)).thenAnswer(inv ->
+                CompletableFuture.completedFuture(Map.copyOf(plans)));
     }
 }

@@ -19,6 +19,7 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 import net.sabafly.dragonraid.api.achievement.AchievementDefinition;
 import net.sabafly.dragonraid.api.achievement.AchievementTriggerSpec;
 import net.sabafly.dragonraid.api.achievement.AchievementTriggerType;
@@ -65,6 +66,7 @@ public final class DefaultRaidAchievementService implements RaidAchievementServi
     private final Set<String> pendingGrants = ConcurrentHashMap.newKeySet();
     private final Map<String, Set<UUID>> inMemoryPendingServerFirst = new ConcurrentHashMap<>();
     private final Set<String> claimedServerFirst = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, String> lastKnownNames = new ConcurrentHashMap<>();
 
     public DefaultRaidAchievementService() {
         this(
@@ -297,6 +299,9 @@ public final class DefaultRaidAchievementService implements RaidAchievementServi
         if (snap.outcome() != EncounterOutcome.VICTORY || snap.participantMetrics().isEmpty()) {
             return CompletableFuture.completedFuture(List.of());
         }
+        for (ParticipantCombatMetrics metrics : snap.participantMetrics().values()) {
+            rememberPlayerName(metrics.playerId(), metrics.playerName());
+        }
         CatalogState catalog = captureCatalogState();
         Collection<UUID> allParticipants = List.copyOf(snap.participantMetrics().keySet());
         List<CompletableFuture<List<AchievementUnlockedEvent>>> allFutures = new ArrayList<>();
@@ -304,43 +309,74 @@ public final class DefaultRaidAchievementService implements RaidAchievementServi
         for (AchievementDefinition def : catalog.definitions().values()) {
             boolean hasServerFirst = def.triggers().stream()
                     .anyMatch(t -> t.type() == AchievementTriggerType.SERVER_FIRST);
-            if (hasServerFirst) {
-                allFutures.add(evaluateServerFirstTrigger(def, snap, allParticipants, catalog.rewardTables()));
-            }
+            boolean hasNormalEncounterTrigger = def.triggers().stream()
+                    .anyMatch(t -> t.type() != AchievementTriggerType.SERVER_FIRST);
 
-            List<CompletableFuture<Optional<AchievementUnlockedEvent>>> participantFutures = new ArrayList<>();
-            for (ParticipantCombatMetrics metrics : snap.participantMetrics().values()) {
-                UUID playerId = metrics.playerId();
-                if (hasUnlocked(playerId, def.id()) || !prerequisitesSatisfied(playerId, def)) {
-                    continue;
+            if (hasServerFirst) {
+                CompletableFuture<ServerFirstEvaluation> sfEval =
+                        evaluateServerFirstTrigger(def, snap, allParticipants, catalog.rewardTables());
+                if (hasNormalEncounterTrigger) {
+                    allFutures.add(sfEval.thenCompose(eval -> {
+                        Set<UUID> exclude = new LinkedHashSet<>(eval.reservedRecipients());
+                        for (AchievementUnlockedEvent ev : eval.events()) {
+                            exclude.add(ev.playerId());
+                        }
+                        return evaluateNormalEncounterTriggers(def, snap, allParticipants, catalog.rewardTables(), exclude)
+                                .thenApply(normalEvents -> mergeEventLists(eval.events(), normalEvents));
+                    }));
+                } else {
+                    allFutures.add(sfEval.thenApply(ServerFirstEvaluation::events));
                 }
-                for (AchievementTriggerSpec trigger : def.triggers()) {
-                    if (trigger.type() == AchievementTriggerType.SERVER_FIRST) {
-                        continue;
-                    }
-                    if (!matchesEncounterTrigger(trigger, snap, metrics, allParticipants)) {
-                        continue;
-                    }
-                    participantFutures.add(grantAchievementInternal(
-                            playerId,
-                            metrics.playerName(),
-                            def,
-                            trigger.type(),
-                            false,
-                            Map.of("encounterId", snap.encounterId(), "difficulty", snap.difficulty().name()),
-                            catalog.rewardTables()
-                    ).thenApply(GrantOutcome::event));
-                    break;
-                }
-            }
-            if (!participantFutures.isEmpty()) {
-                allFutures.add(collectUnlockedEvents(participantFutures));
+            } else {
+                CompletableFuture<List<AchievementUnlockedEvent>> normalFuture =
+                        evaluateNormalEncounterTriggers(def, snap, allParticipants, catalog.rewardTables(), Set.of());
+                allFutures.add(normalFuture);
             }
         }
         return flattenUnlockedLists(allFutures);
     }
 
-    private CompletableFuture<List<AchievementUnlockedEvent>> evaluateServerFirstTrigger(
+    private CompletableFuture<List<AchievementUnlockedEvent>> evaluateNormalEncounterTriggers(
+            AchievementDefinition def,
+            EncounterResultSnapshot snap,
+            Collection<UUID> allParticipants,
+            @Nullable Map<String, RewardTable> rewardTables,
+            Set<UUID> excludePlayers) {
+        List<CompletableFuture<Optional<AchievementUnlockedEvent>>> participantFutures = new ArrayList<>();
+        for (ParticipantCombatMetrics metrics : snap.participantMetrics().values()) {
+            UUID playerId = metrics.playerId();
+            if (excludePlayers.contains(playerId)
+                    || hasUnlocked(playerId, def.id())
+                    || !prerequisitesSatisfied(playerId, def)) {
+                continue;
+            }
+            for (AchievementTriggerSpec trigger : def.triggers()) {
+                if (trigger.type() == AchievementTriggerType.SERVER_FIRST) {
+                    continue;
+                }
+                if (!matchesEncounterTrigger(trigger, snap, metrics, allParticipants)) {
+                    continue;
+                }
+                participantFutures.add(grantAchievementInternal(
+                        playerId,
+                        metrics.playerName(),
+                        def,
+                        trigger.type(),
+                        false,
+                        Map.of("encounterId", snap.encounterId(), "difficulty", snap.difficulty().name()),
+                        rewardTables
+                ).thenApply(GrantOutcome::event));
+                break;
+            }
+        }
+        return collectUnlockedEvents(participantFutures);
+    }
+
+    private record ServerFirstEvaluation(List<AchievementUnlockedEvent> events, Set<UUID> reservedRecipients) {
+        static final ServerFirstEvaluation EMPTY = new ServerFirstEvaluation(List.of(), Set.of());
+    }
+
+    private CompletableFuture<ServerFirstEvaluation> evaluateServerFirstTrigger(
             AchievementDefinition def,
             EncounterResultSnapshot snap,
             Collection<UUID> allParticipants,
@@ -362,69 +398,108 @@ public final class DefaultRaidAchievementService implements RaidAchievementServi
                 break;
             }
         }
-        if (eligible.isEmpty()) {
-            return CompletableFuture.completedFuture(List.of());
-        }
 
         String milestoneKey = SERVER_FIRST_PREFIX + def.id();
         List<UUID> eligibleIds = eligible.stream().map(ParticipantCombatMetrics::playerId).toList();
-        CompletableFuture<Set<UUID>> recipientsFuture = repository != null
-                ? repository.claimOrResumeServerFirstRecipients(milestoneKey, eligibleIds, clockMillis.getAsLong())
-                : CompletableFuture.completedFuture(claimOrResumeInMemoryServerFirst(milestoneKey, eligibleIds));
+        if (eligibleIds.isEmpty() && !hasMatchingServerFirstEncounter(def, snap)) {
+            return CompletableFuture.completedFuture(ServerFirstEvaluation.EMPTY);
+        }
+        CompletableFuture<Set<UUID>> recipientsFuture;
+        if (repository != null) {
+            CompletableFuture<Set<UUID>> claimFuture = eligibleIds.isEmpty()
+                    ? CompletableFuture.completedFuture(Set.of())
+                    : safeRepoFuture(
+                            () -> repository.claimOrResumeServerFirstRecipients(milestoneKey, eligibleIds, clockMillis.getAsLong()),
+                            Set.of(),
+                            "Failed to claim server-first achievement " + def.id());
+            recipientsFuture = claimFuture.thenCompose(claimed -> safeRepoFuture(
+                            () -> repository.loadPendingServerFirstRecipients(milestoneKey),
+                            Set.of(),
+                            "Failed to load pending server-first recipients for " + def.id())
+                    .thenApply(pending -> {
+                        Set<UUID> combined = new LinkedHashSet<>();
+                        if (claimed != null) {
+                            combined.addAll(claimed);
+                        }
+                        if (pending != null) {
+                            combined.addAll(pending);
+                        }
+                        return Set.copyOf(combined);
+                    }));
+        } else {
+            recipientsFuture = CompletableFuture.completedFuture(
+                    claimOrResumeInMemoryServerFirst(milestoneKey, eligibleIds));
+        }
 
         return recipientsFuture.thenCompose(recipients -> {
             if (recipients == null || recipients.isEmpty()) {
-                return CompletableFuture.completedFuture(List.<AchievementUnlockedEvent>of());
+                return CompletableFuture.completedFuture(ServerFirstEvaluation.EMPTY);
             }
             claimedServerFirst.add(milestoneKey);
+            Set<UUID> reserved = Set.copyOf(recipients);
             List<CompletableFuture<Optional<AchievementUnlockedEvent>>> grantFutures = new ArrayList<>();
-            for (ParticipantCombatMetrics winner : eligible) {
-                if (!recipients.contains(winner.playerId())) {
-                    continue;
-                }
-                CompletableFuture<Optional<AchievementUnlockedEvent>> single = grantAchievementInternal(
-                        winner.playerId(),
-                        winner.playerName(),
-                        def,
-                        AchievementTriggerType.SERVER_FIRST,
-                        true,
-                        Map.of(
+            for (UUID recipientId : recipients) {
+                ParticipantCombatMetrics metrics = snap.participantMetrics().get(recipientId);
+                @Nullable String recipientName = metrics != null ? metrics.playerName() : lastKnownNames.get(recipientId);
+                Map<String, Object> metadata = metrics != null
+                        ? Map.of(
                                 "encounterId", snap.encounterId(),
                                 "difficulty", snap.difficulty().name(),
                                 "serverFirst", true
-                        ),
+                        )
+                        : Map.of(
+                                "encounterId", snap.encounterId(),
+                                "difficulty", snap.difficulty().name(),
+                                "serverFirst", true,
+                                "resumed", true
+                        );
+                CompletableFuture<Optional<AchievementUnlockedEvent>> single = grantAchievementInternal(
+                        recipientId,
+                        recipientName,
+                        def,
+                        AchievementTriggerType.SERVER_FIRST,
+                        true,
+                        metadata,
                         rewardTables
                 ).thenCompose(outcome -> {
                     if (outcome.status() == GrantStatus.FAILED) {
                         return CompletableFuture.completedFuture(Optional.<AchievementUnlockedEvent>empty());
                     }
-                    if (repository != null) {
-                        return repository.completeServerFirstRecipient(milestoneKey, winner.playerId())
-                                .exceptionally(err -> {
-                                    logger.log(Level.WARNING,
-                                            "Failed to mark server-first recipient completed for " + def.id() + ": " + winner.playerId(),
-                                            err);
-                                    return null;
-                                })
-                                .thenApply(v -> outcome.event());
-                    }
-                    Set<UUID> inMem = inMemoryPendingServerFirst.get(milestoneKey);
-                    if (inMem != null) {
-                        inMem.remove(winner.playerId());
-                    }
-                    return CompletableFuture.completedFuture(outcome.event());
+                    return completeServerFirstRecipientSafely(milestoneKey, def.id(), recipientId)
+                            .thenApply(v -> outcome.event());
                 });
                 grantFutures.add(single);
             }
-            return collectUnlockedEvents(grantFutures);
+            return collectUnlockedEvents(grantFutures)
+                    .thenApply(events -> new ServerFirstEvaluation(events, reserved));
         }).exceptionally(ex -> {
             logger.log(Level.WARNING, "Failed to claim server-first achievement " + def.id(), ex);
-            return List.of();
+            return ServerFirstEvaluation.EMPTY;
         });
     }
 
+    private static boolean hasMatchingServerFirstEncounter(
+            AchievementDefinition def,
+            EncounterResultSnapshot snap) {
+        for (AchievementTriggerSpec trigger : def.triggers()) {
+            if (trigger.type() != AchievementTriggerType.SERVER_FIRST) {
+                continue;
+            }
+            if (!trigger.encounterId().isEmpty()
+                    && !"*".equals(trigger.encounterId())
+                    && !trigger.encounterId().equals(snap.encounterId())) {
+                continue;
+            }
+            if (trigger.difficulty() != null && trigger.difficulty() != snap.difficulty()) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
     private Set<UUID> claimOrResumeInMemoryServerFirst(String milestoneKey, List<UUID> eligibleIds) {
-        if (claimedServerFirst.add(milestoneKey)) {
+        if (!eligibleIds.isEmpty() && claimedServerFirst.add(milestoneKey)) {
             Set<UUID> pending = ConcurrentHashMap.newKeySet();
             pending.addAll(eligibleIds);
             inMemoryPendingServerFirst.put(milestoneKey, pending);
@@ -434,13 +509,140 @@ public final class DefaultRaidAchievementService implements RaidAchievementServi
         if (pending == null || pending.isEmpty()) {
             return Set.of();
         }
-        Set<UUID> resume = new LinkedHashSet<>();
-        for (UUID id : eligibleIds) {
-            if (pending.contains(id)) {
-                resume.add(id);
+        return Set.copyOf(pending);
+    }
+
+    @Override
+    public CompletableFuture<List<AchievementUnlockedEvent>> resumePendingServerFirst(
+            UUID playerId,
+            @Nullable String playerName) {
+        Objects.requireNonNull(playerId, "playerId");
+        rememberPlayerName(playerId, playerName);
+        CatalogState catalog = captureCatalogState();
+        CompletableFuture<Set<String>> repoPendingFuture = repository != null
+                ? safeRepoFuture(
+                        () -> repository.loadPendingServerFirstMilestones(playerId),
+                        Set.of(),
+                        "Failed to load pending server-first milestones for " + playerId)
+                : CompletableFuture.completedFuture(Set.of());
+
+        return repoPendingFuture.thenCompose(repoMilestones -> {
+            Set<String> allMilestones = new LinkedHashSet<>();
+            if (repoMilestones != null) {
+                allMilestones.addAll(repoMilestones);
             }
+            for (Map.Entry<String, Set<UUID>> entry : inMemoryPendingServerFirst.entrySet()) {
+                if (entry.getValue().contains(playerId)) {
+                    allMilestones.add(entry.getKey());
+                }
+            }
+            if (allMilestones.isEmpty()) {
+                return CompletableFuture.completedFuture(List.<AchievementUnlockedEvent>of());
+            }
+            List<CompletableFuture<Optional<AchievementUnlockedEvent>>> grantFutures = new ArrayList<>();
+            for (String milestoneKey : allMilestones) {
+                if (!milestoneKey.startsWith(SERVER_FIRST_PREFIX)) {
+                    continue;
+                }
+                String achievementId = milestoneKey.substring(SERVER_FIRST_PREFIX.length());
+                AchievementDefinition def = catalog.definitions().get(achievementId);
+                if (def == null) {
+                    continue;
+                }
+                String resolvedName = playerName != null ? playerName : lastKnownNames.get(playerId);
+                CompletableFuture<Optional<AchievementUnlockedEvent>> single = grantAchievementInternal(
+                        playerId,
+                        resolvedName,
+                        def,
+                        AchievementTriggerType.SERVER_FIRST,
+                        true,
+                        Map.of("serverFirst", true, "resumed", true),
+                        catalog.rewardTables()
+                ).thenCompose(outcome -> {
+                    if (outcome.status() == GrantStatus.FAILED) {
+                        return CompletableFuture.completedFuture(Optional.<AchievementUnlockedEvent>empty());
+                    }
+                    return completeServerFirstRecipientSafely(milestoneKey, def.id(), playerId)
+                            .thenApply(v -> outcome.event());
+                });
+                grantFutures.add(single);
+            }
+            return collectUnlockedEvents(grantFutures);
+        });
+    }
+
+    private CompletableFuture<Void> completeServerFirstRecipientSafely(
+            String milestoneKey,
+            String achievementId,
+            UUID recipientId) {
+        if (repository == null) {
+            Set<UUID> inMem = inMemoryPendingServerFirst.get(milestoneKey);
+            if (inMem != null) {
+                inMem.remove(recipientId);
+            }
+            return CompletableFuture.completedFuture(null);
         }
-        return Set.copyOf(resume);
+        try {
+            CompletableFuture<Void> future = repository.completeServerFirstRecipient(milestoneKey, recipientId);
+            if (future == null) {
+                Set<UUID> inMem = inMemoryPendingServerFirst.get(milestoneKey);
+                if (inMem != null) {
+                    inMem.remove(recipientId);
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+            return future.exceptionally(err -> {
+                logger.log(Level.WARNING,
+                        "Failed to mark server-first recipient completed for " + achievementId + ": " + recipientId,
+                        err);
+                return null;
+            });
+        } catch (Throwable ex) {
+            logger.log(Level.WARNING,
+                    "Failed to mark server-first recipient completed for " + achievementId + ": " + recipientId,
+                    ex);
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    private <T> CompletableFuture<T> safeRepoFuture(
+            Supplier<CompletableFuture<T>> call,
+            T fallback,
+            String errorMessage) {
+        try {
+            CompletableFuture<T> future = call.get();
+            if (future == null) {
+                return CompletableFuture.completedFuture(fallback);
+            }
+            return future.exceptionally(ex -> {
+                logger.log(Level.WARNING, errorMessage, ex);
+                return fallback;
+            });
+        } catch (Throwable ex) {
+            logger.log(Level.WARNING, errorMessage, ex);
+            return CompletableFuture.completedFuture(fallback);
+        }
+    }
+
+    private void rememberPlayerName(UUID playerId, @Nullable String playerName) {
+        if (playerId != null && playerName != null && !playerName.isBlank()) {
+            lastKnownNames.put(playerId, playerName.trim());
+        }
+    }
+
+    private static List<AchievementUnlockedEvent> mergeEventLists(
+            List<AchievementUnlockedEvent> first,
+            List<AchievementUnlockedEvent> second) {
+        if (first.isEmpty()) {
+            return second;
+        }
+        if (second.isEmpty()) {
+            return first;
+        }
+        List<AchievementUnlockedEvent> merged = new ArrayList<>(first.size() + second.size());
+        merged.addAll(first);
+        merged.addAll(second);
+        return List.copyOf(merged);
     }
 
     private static CompletableFuture<List<AchievementUnlockedEvent>> flattenUnlockedLists(

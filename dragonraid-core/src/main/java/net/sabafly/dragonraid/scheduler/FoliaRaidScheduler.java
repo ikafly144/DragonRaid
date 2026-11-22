@@ -303,11 +303,18 @@ public final class FoliaRaidScheduler implements RaidScheduler {
             return TaskHandle.retired();
         }
         tracked.attach(scheduled);
+        if (scheduled.isCancelled()) {
+            tracked.markCancelledFromDelegate();
+            return new FoliaTaskHandle(tracked);
+        }
         if (!tracked.isDone()) {
             activeTasks.add(tracked);
-            // Guard against synchronous completion between scheduling and add.
+            // Guard against synchronous completion or cancellation between scheduling and add.
             if (tracked.isDone()) {
                 activeTasks.remove(tracked);
+            } else if (scheduled.isCancelled()) {
+                activeTasks.remove(tracked);
+                tracked.markCancelledFromDelegate();
             }
         }
         return new FoliaTaskHandle(tracked);
@@ -359,17 +366,32 @@ public final class FoliaRaidScheduler implements RaidScheduler {
                 delegate.cancel();
             }
             if (!finished.get() && cancelled.compareAndSet(false, true)) {
-                List<Runnable> callbacks;
-                synchronized (cancelCallbacks) {
-                    callbacks = List.copyOf(cancelCallbacks);
-                    cancelCallbacks.clear();
-                }
-                for (Runnable callback : callbacks) {
-                    try {
-                        callback.run();
-                    } catch (RuntimeException ignored) {
-                        // Do not abort subsequent cancellation listeners.
-                    }
+                fireCancelCallbacks(null);
+            }
+        }
+
+        private void markCancelledFromDelegate() {
+            registry.remove(this);
+            if (!finished.get() && cancelled.compareAndSet(false, true)) {
+                fireCancelCallbacks(null);
+            }
+        }
+
+        private void fireCancelCallbacks(Runnable extraCallback) {
+            List<Runnable> callbacks;
+            synchronized (cancelCallbacks) {
+                callbacks = new ArrayList<>(cancelCallbacks.size() + (extraCallback != null ? 1 : 0));
+                callbacks.addAll(cancelCallbacks);
+                cancelCallbacks.clear();
+            }
+            if (extraCallback != null) {
+                callbacks.add(extraCallback);
+            }
+            for (Runnable callback : callbacks) {
+                try {
+                    callback.run();
+                } catch (RuntimeException ignored) {
+                    // Do not abort subsequent cancellation listeners.
                 }
             }
         }
@@ -386,19 +408,31 @@ public final class FoliaRaidScheduler implements RaidScheduler {
             if (callback == null || finished.get()) {
                 return;
             }
-            boolean runImmediately;
+            boolean runSingleImmediately = false;
+            boolean drainAllIncludingExtra = false;
             synchronized (cancelCallbacks) {
                 if (finished.get()) {
                     return;
                 }
                 if (cancelled.get()) {
-                    runImmediately = true;
+                    runSingleImmediately = true;
                 } else {
-                    cancelCallbacks.add(callback);
-                    runImmediately = false;
+                    ScheduledTask delegate = delegateRef.get();
+                    if (delegate != null && delegate.isCancelled()) {
+                        registry.remove(this);
+                        if (cancelled.compareAndSet(false, true)) {
+                            drainAllIncludingExtra = true;
+                        } else {
+                            runSingleImmediately = true;
+                        }
+                    } else {
+                        cancelCallbacks.add(callback);
+                    }
                 }
             }
-            if (runImmediately) {
+            if (drainAllIncludingExtra) {
+                fireCancelCallbacks(callback);
+            } else if (runSingleImmediately) {
                 callback.run();
             }
         }

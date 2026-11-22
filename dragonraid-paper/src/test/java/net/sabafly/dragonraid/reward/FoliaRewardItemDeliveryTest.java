@@ -18,10 +18,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 import net.sabafly.dragonraid.api.item.CustomItemDefinition;
 import net.sabafly.dragonraid.api.item.RaidItemService;
+import net.sabafly.dragonraid.api.reward.ItemDeliveryResult;
 import net.sabafly.dragonraid.scheduler.RaidScheduler;
 import net.sabafly.dragonraid.scheduler.TaskHandle;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.junit.jupiter.api.Test;
 
@@ -72,7 +74,15 @@ class FoliaRewardItemDeliveryTest {
                 });
 
         FoliaRewardItemDelivery delivery = new FoliaRewardItemDelivery(
-                scheduler, id -> playerId.equals(id) ? lookupRef.get() : null, null, Logger.getLogger("item-test"));
+                scheduler,
+                id -> playerId.equals(id) ? lookupRef.get() : null,
+                null,
+                Logger.getLogger("item-test"),
+                (mat, count) -> {
+                    ItemStack stack = mock(ItemStack.class);
+                    org.mockito.Mockito.lenient().when(stack.getAmount()).thenReturn(count);
+                    return stack;
+                });
 
         Material mockDiamond = mock(Material.class);
         when(mockDiamond.isItem()).thenReturn(true);
@@ -98,6 +108,7 @@ class FoliaRewardItemDeliveryTest {
             CompletableFuture<Boolean> logoutFuture = delivery.deliverVanillaItem(playerId, "DIAMOND", 1);
             assertFalse(logoutFuture.isDone());
             capturedTask.get().run();
+            assertTrue(logoutFuture.isDone());
             assertFalse(logoutFuture.join());
             verify(inventory, never()).addItem(any());
 
@@ -106,13 +117,34 @@ class FoliaRewardItemDeliveryTest {
             CompletableFuture<Boolean> retiredFuture = delivery.deliverVanillaItem(playerId, "DIAMOND", 1);
             assertFalse(retiredFuture.isDone());
             capturedRetired.get().run();
+            assertTrue(retiredFuture.isDone());
             assertFalse(retiredFuture.join());
 
             // TaskHandle cancelled via onCancel -> returns false
             CompletableFuture<Boolean> cancelledFuture = delivery.deliverVanillaItem(playerId, "DIAMOND", 1);
             assertFalse(cancelledFuture.isDone());
             capturedCancelCallback.get().run();
+            assertTrue(cancelledFuture.isDone());
             assertFalse(cancelledFuture.join());
+
+            // #23: Reject excessive stack count before scheduling side effects
+            int overLimitAmount = (FoliaRewardItemDelivery.MAX_DELIVERY_STACKS + 1) * 64;
+            ItemDeliveryResult overLimitRes = delivery.deliverVanillaItemDetailed(playerId, "DIAMOND", overLimitAmount).join();
+            assertFalse(overLimitRes.completed());
+            org.junit.jupiter.api.Assertions.assertEquals(0, overLimitRes.deliveredAmount());
+
+            // #22: Partial batch delivery reports exact delivered count when batch 2 throws
+            when(inventory.addItem(any()))
+                    .thenReturn(new java.util.HashMap<>())
+                    .thenThrow(new IllegalStateException("inventory fail on batch 2"));
+            CompletableFuture<ItemDeliveryResult> partialFuture =
+                    delivery.deliverVanillaItemDetailed(playerId, "DIAMOND", 128);
+            capturedTask.get().run();
+            assertTrue(partialFuture.isDone());
+            ItemDeliveryResult partialRes = partialFuture.join();
+            assertFalse(partialRes.completed());
+            org.junit.jupiter.api.Assertions.assertEquals(64, partialRes.deliveredAmount());
+            org.junit.jupiter.api.Assertions.assertEquals(64, partialRes.remainingAmount());
         }
     }
 }

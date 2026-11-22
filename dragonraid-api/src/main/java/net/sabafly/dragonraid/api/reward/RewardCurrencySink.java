@@ -16,4 +16,14 @@ public interface RewardCurrencySink {
             String currencyId,
             long amount
     );
+
+    default CompletableFuture<Boolean> grantCurrencyIdempotent(
+            UUID playerId,
+            @Nullable String playerName,
+            String currencyId,
+            long amount,
+            @Nullable String idempotencyKey,
+            long claimedAtEpochMillis) {
+        return grantCurrency(playerId, playerName, currencyId, amount);
+    }
 }

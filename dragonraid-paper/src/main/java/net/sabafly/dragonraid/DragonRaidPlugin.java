@@ -82,10 +82,16 @@ import net.sabafly.dragonraid.visual.PacketEventsTelegraphService;
 import net.sabafly.dragonraid.visual.SoulMarkerService;
 import net.sabafly.dragonraid.visual.SpatialTelegraphService;
 import java.nio.file.Path;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * Main Folia plugin entrypoint for DragonRaid.
@@ -125,6 +131,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
     private ContentUnlockNotifier contentUnlockNotifier;
     private RewardItemDelivery rewardItemDelivery;
     private ContentPackLoader contentPackLoader;
+    private ExecutorService scriptHookExecutor;
 
     @Override
     public void onEnable() {
@@ -202,24 +209,50 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 itemService,
                 getLogger()
             );
-            RewardCurrencySink currencySink = (playerId, playerName, currencyId, amount) -> {
-                if (economyService.getCurrency(currencyId).isPresent()) {
-                    return economyService.depositAsync(playerId, playerName, currencyId, amount);
+            RewardCurrencySink currencySink = new RewardCurrencySink() {
+                @Override
+                public CompletableFuture<Boolean> grantCurrency(
+                        UUID playerId,
+                        @Nullable String playerName,
+                        String currencyId,
+                        long amount) {
+                    return grantCurrencyIdempotent(playerId, playerName, currencyId, amount, null, 0L);
                 }
-                return playerDataRepository.addCurrency(playerId, playerName, currencyId, amount)
-                        .thenApply(PointTransactionResult::success);
+
+                @Override
+                public CompletableFuture<Boolean> grantCurrencyIdempotent(
+                        UUID playerId,
+                        @Nullable String playerName,
+                        String currencyId,
+                        long amount,
+                        @Nullable String idempotencyKey,
+                        long claimedAtEpochMillis) {
+                    if (economyService.getCurrency(currencyId).isPresent()) {
+                        return economyService.depositIdempotentAsync(
+                                playerId, playerName, currencyId, amount, idempotencyKey, claimedAtEpochMillis);
+                    }
+                    return playerDataRepository.addCurrencyWithCapsIdempotent(
+                                    playerId, playerName, currencyId, amount,
+                                    0L, 0L, "unbounded", idempotencyKey, claimedAtEpochMillis)
+                            .thenApply(PointTransactionResult::success);
+                }
             };
             this.achievementService = new DefaultRaidAchievementService(
                 playerDataRepository,
                 scriptHookRegistry,
                 serviceRegistry,
-                event -> getServer().getPluginManager().callEvent(event),
+                event -> raidScheduler.runGlobal(() -> getServer().getPluginManager().callEvent(event)),
                 System::currentTimeMillis,
                 getLogger()
             );
             this.achievementService.setCatalogSnapshotSupplier(
                 () -> this.contentPackLoader != null ? this.contentPackLoader.catalogSnapshot() : ContentPackCatalogSnapshot.empty()
             );
+            this.scriptHookExecutor = Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "DragonRaid-Script");
+                thread.setDaemon(true);
+                return thread;
+            });
             DefaultRewardApplier rewardApplier = new DefaultRewardApplier(
                 contentUnlockService,
                 contentFinderService,
@@ -230,7 +263,8 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 playerDataRepository,
                 serviceRegistry,
                 System::currentTimeMillis,
-                getLogger()
+                getLogger(),
+                scriptHookExecutor
             );
             this.rewardService = new DefaultRaidRewardService(
                 new PureRewardTableEvaluator(scriptHookRegistry, serviceRegistry),
@@ -334,6 +368,8 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 contentUnlockService,
                 vanillaEndProgressionPolicy,
                 endPortalListener,
+                rewardService,
+                rewardDispatchListener,
                 getLogger()
             );
 
@@ -398,6 +434,17 @@ public final class DragonRaidPlugin extends JavaPlugin {
                 encounterManager.shutdown();
             } catch (RuntimeException ex) {
                 getLogger().log(Level.WARNING, "Failed to shut down raid encounter manager", ex);
+            }
+        }
+        if (scriptHookExecutor != null) {
+            scriptHookExecutor.shutdown();
+            try {
+                if (!scriptHookExecutor.awaitTermination(3L, TimeUnit.SECONDS)) {
+                    scriptHookExecutor.shutdownNow();
+                }
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                scriptHookExecutor.shutdownNow();
             }
         }
         // Close repositories and shared database first so queued/sync DB writes flush before asyncScheduler tasks cancel.

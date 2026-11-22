@@ -41,6 +41,11 @@ public interface VanillaEndProgressionPolicy {
         return false;
     }
 
+    default boolean hasApplicableWorldProgressionHook(
+            String encounterId, @Nullable EncounterDifficulty difficulty, boolean firstClear) {
+        return hasMatchingClearHook(encounterId, difficulty);
+    }
+
     default void markPackLoadFailed(@Nullable String reason) {
     }
 

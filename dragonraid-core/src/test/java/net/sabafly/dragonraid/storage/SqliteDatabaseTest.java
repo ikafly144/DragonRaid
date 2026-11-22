@@ -96,6 +96,19 @@ class SqliteDatabaseTest {
         }
     }
 
+    @Test
+    void reentrantSupplyAsyncOnDbWorkerThread_executesInlineWithoutDeadlock() throws Exception {
+        Path dbPath = tempDir.resolve("reentrant.db");
+        ExecutorService singleWorker = Executors.newSingleThreadExecutor(r -> new Thread(r, "db-worker-test"));
+        try (SqliteDatabase db = new SqliteDatabase(dbPath, 2, singleWorker, Duration.ofSeconds(5))) {
+            String result = db.supplyAsync(() ->
+                    db.supplyAsync(() -> "nested_ok").join()).get(2, TimeUnit.SECONDS);
+            assertEquals("nested_ok", result);
+        } finally {
+            singleWorker.shutdownNow();
+        }
+    }
+
     private static void assertEqualsOrCancelled(String result) {
         assertTrue("ok".equals(result));
     }

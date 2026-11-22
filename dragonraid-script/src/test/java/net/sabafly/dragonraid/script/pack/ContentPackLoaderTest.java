@@ -503,6 +503,64 @@ class ContentPackLoaderTest {
         assertThrows(ContentPackException.class, () -> ContentPackYamlLoader.loadPack(p4));
     }
 
+    @Test
+    void rejectsCrossEntryContentAndBlueprintCollision_andDetectsStaticPlusStagedExtensionCycle(@TempDir Path localRoot)
+            throws Exception {
+        net.sabafly.dragonraid.api.finder.ContentFinderService finder =
+                mock(net.sabafly.dragonraid.api.finder.ContentFinderService.class);
+        net.sabafly.dragonraid.api.achievement.RaidAchievementService ach =
+                mock(net.sabafly.dragonraid.api.achievement.RaidAchievementService.class);
+        net.sabafly.dragonraid.api.reward.RaidRewardService reward =
+                mock(net.sabafly.dragonraid.api.reward.RaidRewardService.class);
+        net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy policy =
+                mock(net.sabafly.dragonraid.api.progression.VanillaEndProgressionPolicy.class);
+
+        DefaultContentPackLoader loader = new DefaultContentPackLoader(
+                localRoot, finder, ach, reward, policy, Logger.getLogger("collision-test"));
+
+        // #25: cross-entry blueprintId == another entry's contentId rejected
+        Path collisionPack = localRoot.resolve("collision");
+        writePack(collisionPack, "id: collision\nenabled: true\n", """
+                contents:
+                  - id: entry_a
+                    display-name-key: k.a
+                    blueprint-id: shared_key
+                  - id: shared_key
+                    display-name-key: k.b
+                    blueprint-id: bp_b
+                """, null, null, null);
+        assertThrows(ContentPackException.class, loader::reload);
+
+        deleteRecursive(collisionPack);
+
+        // #27: static extension + staged pack extension merge forms cycle and is rejected before commit
+        RewardTable staticTarget = new RewardTable("t_static", List.of(
+                net.sabafly.dragonraid.api.reward.RewardPool.allOf(
+                        "base", null, List.of(),
+                        List.of(net.sabafly.dragonraid.api.reward.RewardEntrySpec.empty(1)))));
+        RewardTableExtension staticExt = new RewardTableExtension(
+                "ext_static_to_pack", "static", "t_static", 10, false,
+                List.of(net.sabafly.dragonraid.api.reward.RewardPool.allOf(
+                        "s_ref", null, List.of(),
+                        List.of(net.sabafly.dragonraid.api.reward.RewardEntrySpec.tableRef("t_pack", 1, 0.0, List.of(), List.of())))));
+        when(reward.staticTables()).thenReturn(List.of(staticTarget));
+        when(reward.staticTableIds()).thenReturn(Set.of("t_static"));
+        when(reward.staticExtensions()).thenReturn(List.of(staticExt));
+
+        Path extCyclePack = localRoot.resolve("ext_cycle");
+        writePack(extCyclePack, "id: ext_cycle\nenabled: true\n", null, null, """
+                reward-tables:
+                  - id: t_pack
+                    pools:
+                      - rolls: 1
+                        entries:
+                          - type: TABLE_REF
+                            target: t_static
+                """, null);
+        ContentPackException cycleEx = assertThrows(ContentPackException.class, loader::reload);
+        assertTrue(cycleEx.getMessage().contains("Circular TABLE_REF"));
+    }
+
     private static void deleteRecursive(Path dir) throws Exception {
         if (!Files.exists(dir)) {
             return;

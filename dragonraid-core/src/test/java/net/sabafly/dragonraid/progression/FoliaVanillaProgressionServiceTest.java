@@ -2,6 +2,7 @@ package net.sabafly.dragonraid.progression;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -12,6 +13,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.nio.file.Path;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 import net.sabafly.dragonraid.config.ConfigManager;
@@ -221,12 +223,67 @@ class FoliaVanillaProgressionServiceTest {
         );
 
         assertFalse(service.synchronizeDragonDefeated("missing_world", true, true, true).join());
-        assertEquals(0, service.expandEndGateways("missing_world", 1, 20).join());
+        CompletionException expandEx = assertThrows(
+                CompletionException.class,
+                () -> service.expandEndGateways("missing_world", 1, 20).join());
+        assertTrue(expandEx.getCause() instanceof IllegalStateException);
+        CompletionException targetEx = assertThrows(
+                CompletionException.class,
+                () -> service.expandEndGatewaysToTarget("missing_world", 5, 20).join());
+        assertTrue(targetEx.getCause() instanceof IllegalStateException);
+
+        // Missing DragonBattle also fails exceptionally rather than reporting 0 spawned
+        World noBattleWorld = mock(World.class);
+        when(noBattleWorld.getEnderDragonBattle()).thenReturn(null);
+        FoliaVanillaProgressionService noBattleService = new FoliaVanillaProgressionService(
+                configManager, scheduler, name -> "no_battle".equals(name) ? noBattleWorld : null, Logger.getLogger("test"));
+        CompletionException noBattleEx = assertThrows(
+                CompletionException.class,
+                () -> noBattleService.expandEndGatewaysToTarget("no_battle", 2, 20).join());
+        assertTrue(noBattleEx.getCause() instanceof IllegalStateException);
 
         assertTrue(service.synchronizeDragonDefeated("custom_end", false, true, false).join());
         verify(liveDragon, never()).remove();
         verify(battle, never()).generateEndPortal(true);
         verify(battle, never()).setPreviouslyKilled(true);
         assertTrue(service.isVanillaDragonPreviouslyKilled("custom_end").join());
+    }
+
+    @Test
+    void expandEndGatewaysToTarget_respectsTargetAndPreventsChildScheduleAfterCancel() {
+        World world = mock(World.class);
+        DragonBattle battle = mock(DragonBattle.class);
+        EnderDragon dragon = mock(EnderDragon.class);
+        when(world.getName()).thenReturn("world_the_end");
+        when(world.getEnderDragonBattle()).thenReturn(battle);
+        when(battle.getEnderDragon()).thenReturn(dragon);
+        when(battle.getEndPortalLocation()).thenReturn(new Location(world, 0.0, 64.0, 0.0));
+        AtomicInteger gateways = new AtomicInteger(1);
+        when(battle.getGatewayCount()).thenAnswer(inv -> gateways.get());
+        when(battle.spawnNewGateway()).thenAnswer(inv -> {
+            gateways.incrementAndGet();
+            return true;
+        });
+
+        FoliaVanillaProgressionService syncSvc = new FoliaVanillaProgressionService(
+                configManager, scheduler, name -> world, Logger.getLogger("test"));
+        var targetRes = syncSvc.expandEndGatewaysToTarget("world_the_end", 3, 20).join();
+        assertEquals(2, targetRes.spawned());
+        assertEquals(3, targetRes.finalGatewayCount());
+
+        // Cancel pending parent operation while region task finishes concurrently -> child entity removal must NOT run
+        java.util.concurrent.atomic.AtomicReference<Runnable> regionTask = new java.util.concurrent.atomic.AtomicReference<>();
+        RaidScheduler manualScheduler = mock(RaidScheduler.class);
+        when(manualScheduler.runAtRegion(any(Location.class), any(Runnable.class))).thenAnswer(inv -> {
+            regionTask.set(inv.getArgument(1));
+            return mock(TaskHandle.class);
+        });
+        FoliaVanillaProgressionService raceSvc = new FoliaVanillaProgressionService(
+                configManager, manualScheduler, name -> world, Logger.getLogger("test"));
+        var cancelledOp = raceSvc.synchronizeDragonDefeated("world_the_end", true, false, true);
+        raceSvc.cancelPendingTasks();
+        assertTrue(cancelledOp.isCompletedExceptionally());
+        regionTask.get().run();
+        verify(manualScheduler, never()).runAtEntity(any(), any(), any());
     }
 }

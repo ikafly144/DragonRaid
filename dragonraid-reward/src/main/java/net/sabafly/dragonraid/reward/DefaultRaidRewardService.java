@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -14,8 +15,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.function.LongSupplier;
 import java.util.logging.Logger;
 import java.util.random.RandomGenerator;
@@ -76,6 +79,33 @@ public final class DefaultRaidRewardService implements RaidRewardService {
             LongSupplier clockMillis,
             Logger logger) {
         this(
+                unlockService,
+                contentFinderService,
+                unlockNotifier,
+                currencySink,
+                itemDelivery,
+                scriptHookRegistry,
+                progressionRepository,
+                serviceRegistry,
+                clockMillis,
+                logger,
+                null
+        );
+    }
+
+    public DefaultRaidRewardService(
+            @Nullable ContentUnlockService unlockService,
+            @Nullable ContentFinderService contentFinderService,
+            @Nullable ContentUnlockNotifier unlockNotifier,
+            @Nullable RewardCurrencySink currencySink,
+            @Nullable RewardItemDelivery itemDelivery,
+            @Nullable ScriptHookRegistry scriptHookRegistry,
+            @Nullable PlayerProgressionRepository progressionRepository,
+            @Nullable RaidServiceRegistry serviceRegistry,
+            LongSupplier clockMillis,
+            Logger logger,
+            @Nullable Executor scriptExecutor) {
+        this(
                 new PureRewardTableEvaluator(scriptHookRegistry, serviceRegistry),
                 new DefaultRewardApplier(
                         unlockService,
@@ -87,7 +117,8 @@ public final class DefaultRaidRewardService implements RaidRewardService {
                         progressionRepository,
                         serviceRegistry,
                         clockMillis,
-                        logger
+                        logger,
+                        scriptExecutor
                 )
         );
     }
@@ -245,6 +276,15 @@ public final class DefaultRaidRewardService implements RaidRewardService {
         return apply(bundle, context);
     }
 
+    @Override
+    public CompletableFuture<List<RewardApplyResult>> resumePendingPlans(UUID playerId, @Nullable String playerName) {
+        Objects.requireNonNull(playerId, "playerId");
+        if (applier instanceof DefaultRewardApplier defaultApplier) {
+            return defaultApplier.resumePendingPlans(playerId, playerName);
+        }
+        return CompletableFuture.completedFuture(List.of());
+    }
+
     private static Map<String, RewardTable> mergeAndValidate(
             Map<String, RewardTable> statics,
             Map<String, RewardTable> packs,
@@ -306,24 +346,37 @@ public final class DefaultRaidRewardService implements RaidRewardService {
         }
     }
 
+    private record DfsFrame(String node, Iterator<String> neighbors) {
+    }
+
     private static void dfsDetectCycle(
-            String current,
+            String start,
             Map<String, Set<String>> edges,
             Map<String, Integer> visitState,
-            Deque<String> stack) {
-        visitState.put(current, 1);
-        stack.addLast(current);
-        for (String next : edges.getOrDefault(current, Set.of())) {
+            Deque<String> path) {
+        Deque<DfsFrame> frames = new ArrayDeque<>();
+        visitState.put(start, 1);
+        path.addLast(start);
+        frames.addLast(new DfsFrame(start, edges.getOrDefault(start, Set.of()).iterator()));
+        while (!frames.isEmpty()) {
+            DfsFrame top = frames.peekLast();
+            if (!top.neighbors().hasNext()) {
+                frames.removeLast();
+                path.removeLast();
+                visitState.put(top.node(), 2);
+                continue;
+            }
+            String next = top.neighbors().next();
             int state = visitState.getOrDefault(next, 0);
             if (state == 1) {
                 throw new IllegalStateException(
-                        "Circular reward table reference detected: " + String.join(" -> ", stack) + " -> " + next);
+                        "Circular reward table reference detected: " + String.join(" -> ", path) + " -> " + next);
             }
             if (state == 0 && edges.containsKey(next)) {
-                dfsDetectCycle(next, edges, visitState, stack);
+                visitState.put(next, 1);
+                path.addLast(next);
+                frames.addLast(new DfsFrame(next, edges.getOrDefault(next, Set.of()).iterator()));
             }
         }
-        stack.removeLast();
-        visitState.put(current, 2);
     }
 }

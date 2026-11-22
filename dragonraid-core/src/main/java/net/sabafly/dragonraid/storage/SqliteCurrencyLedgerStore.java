@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.temporal.IsoFields;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -28,9 +29,17 @@ public final class SqliteCurrencyLedgerStore implements CurrencyLedgerStore {
 
     @Override
     public long balance(UUID playerId, String currencyId) {
+        return balanceAsync(playerId, currencyId).join();
+    }
+
+    @Override
+    public CompletableFuture<Long> balanceAsync(UUID playerId, String currencyId) {
         Objects.requireNonNull(playerId, "playerId");
         Objects.requireNonNull(currencyId, "currencyId");
-        return repository.getCurrencyBalance(playerId, currencyId).join();
+        if (currencyId.isBlank()) {
+            return CompletableFuture.completedFuture(0L);
+        }
+        return repository.getCurrencyBalance(playerId, currencyId);
     }
 
     @Override
@@ -48,39 +57,56 @@ public final class SqliteCurrencyLedgerStore implements CurrencyLedgerStore {
             @Nullable String playerName,
             CurrencyDefinition definition,
             long amount) {
+        return depositWithCapsIdempotentAsync(playerId, playerName, definition, amount, null, 0L);
+    }
+
+    @Override
+    public CompletableFuture<Boolean> depositWithCapsIdempotentAsync(
+            UUID playerId,
+            @Nullable String playerName,
+            CurrencyDefinition definition,
+            long amount,
+            @Nullable String idempotencyKey,
+            long claimedAtEpochMillis) {
         Objects.requireNonNull(playerId, "playerId");
         Objects.requireNonNull(definition, "definition");
         if (amount <= 0L) {
             return CompletableFuture.completedFuture(false);
         }
         String weekKey = currentIsoWeekKey(clockMillis.getAsLong());
-        return repository.addCurrencyWithCaps(
+        return repository.addCurrencyWithCapsIdempotent(
                 playerId,
                 playerName,
                 definition.currencyId(),
                 amount,
                 definition.maxBalance(),
                 definition.weeklyCap(),
-                weekKey
+                weekKey,
+                idempotencyKey,
+                claimedAtEpochMillis
         ).thenApply(PointTransactionResult::success);
     }
 
     @Override
     public boolean withdraw(UUID playerId, String currencyId, long amount) {
+        return withdrawAsync(playerId, currencyId, amount).join();
+    }
+
+    @Override
+    public CompletableFuture<Boolean> withdrawAsync(UUID playerId, String currencyId, long amount) {
         Objects.requireNonNull(playerId, "playerId");
         Objects.requireNonNull(currencyId, "currencyId");
-        if (amount <= 0L) {
-            return false;
+        if (amount <= 0L || currencyId.isBlank()) {
+            return CompletableFuture.completedFuture(false);
         }
         return repository.trySpendCurrency(playerId, currencyId, amount)
-                .thenApply(PointTransactionResult::success)
-                .join();
+                .thenApply(PointTransactionResult::success);
     }
 
     static String currentIsoWeekKey(long epochMillis) {
         ZonedDateTime utc = Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC);
         int year = utc.get(IsoFields.WEEK_BASED_YEAR);
         int week = utc.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR);
-        return String.format("%04d-W%02d", year, week);
+        return String.format(Locale.ROOT, "%04d-W%02d", year, week);
     }
 }
