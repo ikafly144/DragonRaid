@@ -574,7 +574,9 @@ final class YamlConfigLoader {
             PluginConfig.ReviveSettings revive = readRevive(root, fileName);
             PluginConfig.ProtectionSettings protection = readProtection(root, fileName);
             PluginConfig.VisualSettings visuals = readVisuals(root, fileName);
-            return new PluginConfig(language, database, world, regions, scaling, encounter, revive, protection, visuals);
+            PluginConfig.PartySettings party = readParty(root, fileName);
+            PluginConfig.FinderSettings finder = readFinder(root, fileName);
+            return new PluginConfig(language, database, world, regions, scaling, encounter, revive, protection, visuals, party, finder);
         }
 
         private PluginConfig.LanguageSettings readLanguage(ConfigurationNode root, String fileName) {
@@ -776,6 +778,80 @@ final class YamlConfigLoader {
                     ConfigValidation.requirePositive(
                             ConfigValidation.requireDouble(vis, fileName, "max-render-distance"),
                             fileName, "visuals.max-render-distance"));
+        }
+
+        private PluginConfig.PartySettings readParty(ConfigurationNode root, String fileName) {
+            ConfigurationNode partyNode = root.node("party");
+            PluginConfig.PartySettings defs = PluginConfig.PartySettings.defaults();
+            if (partyNode.virtual()) {
+                return defs;
+            }
+            if (!partyNode.isMap()) {
+                throw new ConfigException(fileName, "party", "Invalid party configuration section");
+            }
+            int maxSize = partyNode.node("max-size").virtual()
+                    ? defs.maxSize()
+                    : ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(partyNode, fileName, "max-size"),
+                            fileName, "party.max-size");
+            int inviteTimeout = partyNode.node("invite-timeout-seconds").virtual()
+                    ? defs.inviteTimeoutSeconds()
+                    : ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireInt(partyNode, fileName, "invite-timeout-seconds"),
+                            fileName, "party.invite-timeout-seconds");
+            int disconnectGrace = partyNode.node("disconnect-grace-seconds").virtual()
+                    ? defs.disconnectGraceSeconds()
+                    : ConfigValidation.requireNonNegative(
+                            ConfigValidation.requireInt(partyNode, fileName, "disconnect-grace-seconds"),
+                            fileName, "party.disconnect-grace-seconds");
+            boolean hudDefault = partyNode.node("hud-enabled-default").virtual()
+                    ? defs.hudEnabledDefault()
+                    : ConfigValidation.requireBoolean(partyNode, fileName, "hud-enabled-default");
+            int hudInterval = partyNode.node("hud-update-interval-ticks").virtual()
+                    ? defs.hudUpdateIntervalTicks()
+                    : ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(partyNode, fileName, "hud-update-interval-ticks"),
+                            fileName, "party.hud-update-interval-ticks");
+            int hudMaxMembers = partyNode.node("hud-max-members-shown").virtual()
+                    ? defs.hudMaxMembersShown()
+                    : ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(partyNode, fileName, "hud-max-members-shown"),
+                            fileName, "party.hud-max-members-shown");
+            return new PluginConfig.PartySettings(
+                    maxSize, inviteTimeout, disconnectGrace, hudDefault, hudInterval, hudMaxMembers);
+        }
+
+        private PluginConfig.FinderSettings readFinder(ConfigurationNode root, String fileName) {
+            ConfigurationNode finderNode = root.node("finder");
+            PluginConfig.FinderSettings defs = PluginConfig.FinderSettings.defaults();
+            if (finderNode.virtual()) {
+                return defs;
+            }
+            if (!finderNode.isMap()) {
+                throw new ConfigException(fileName, "finder", "Invalid finder configuration section");
+            }
+            int timeoutSeconds = finderNode.node("ready-check-timeout-seconds").virtual()
+                    ? defs.readyCheckTimeoutSeconds()
+                    : ConfigValidation.requirePositive(
+                            ConfigValidation.requireInt(finderNode, fileName, "ready-check-timeout-seconds"),
+                            fileName, "finder.ready-check-timeout-seconds");
+            boolean skipSolo = finderNode.node("skip-ready-check-for-solo").virtual()
+                    ? defs.skipReadyCheckForSolo()
+                    : ConfigValidation.requireBoolean(finderNode, fileName, "skip-ready-check-for-solo");
+            String sound = finderNode.node("commence-sound").virtual()
+                    ? defs.commenceSound()
+                    : ConfigValidation.requireString(finderNode, fileName, "commence-sound");
+            float pitch = finderNode.node("commence-sound-pitch").virtual()
+                    ? defs.commenceSoundPitch()
+                    : (float) ConfigValidation.requirePositive(
+                            ConfigValidation.requireDouble(finderNode, fileName, "commence-sound-pitch"),
+                            fileName, "finder.commence-sound-pitch");
+            float volume = finderNode.node("commence-sound-volume").virtual()
+                    ? defs.commenceSoundVolume()
+                    : (float) ConfigValidation.requirePositive(
+                            ConfigValidation.requireDouble(finderNode, fileName, "commence-sound-volume"),
+                            fileName, "finder.commence-sound-volume");
+            return new PluginConfig.FinderSettings(timeoutSeconds, skipSolo, sound, pitch, volume);
         }
 
         @Override

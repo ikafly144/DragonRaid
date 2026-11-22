@@ -1,6 +1,7 @@
 package net.sabafly.dragonraid.encounter;
 
 import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import net.sabafly.dragonraid.api.script.EncounterBlueprint;
@@ -59,6 +60,53 @@ public interface RaidEncounterManager {
      * for an explicit party of online players.
      */
     default boolean startEncounter(EncounterBlueprint blueprint, Collection<? extends Player> players) {
+        return startEncounter(blueprint, players, Map.of());
+    }
+
+    /**
+     * Initiates a data-driven encounter directly from the given {@link EncounterBlueprint}
+     * for an explicit party of online players, preserving per-player pre-entry return locations.
+     */
+    default boolean startEncounter(
+            EncounterBlueprint blueprint,
+            Collection<? extends Player> players,
+            Map<UUID, Location> returnLocations) {
+        return false;
+    }
+
+    /**
+     * Retries the active wipe-standby duty in the same temporary instance upon requester's command.
+     */
+    default boolean retryEncounter(Player requester) {
+        return false;
+    }
+
+    /**
+     * Withdraws {@code player} safely from active combat or post-wipe standby back to their
+     * pre-entry location, destroying the temporary instance if no participants remain.
+     */
+    default boolean leaveEncounter(Player player) {
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if any active raid attempt, countdown, or wipe-standby instance occupies the duty slot.
+     */
+    default boolean hasActiveDutySession() {
+        return state() != RaidState.IDLE;
+    }
+
+    /**
+     * Returns {@code true} if {@code playerId} is currently locked in active raid combat or post-wipe standby.
+     */
+    default boolean isInDutyOrInstance(UUID playerId) {
+        return isParticipant(playerId);
+    }
+
+    /**
+     * Returns {@code true} if {@code playerId} is currently inside a temporary instance awaiting {@code /cf retry}.
+     */
+    default boolean isInWipeStandby(UUID playerId) {
         return false;
     }
 

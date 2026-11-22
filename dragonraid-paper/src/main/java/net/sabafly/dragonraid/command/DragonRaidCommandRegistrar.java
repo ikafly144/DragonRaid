@@ -492,13 +492,7 @@ public final class DragonRaidCommandRegistrar {
     }
 
     private int requirePlayer(CommandSourceStack source, Consumer<Player> action) {
-        CommandSender sender = source.getSender();
-        if (!(sender instanceof Player player)) {
-            handler.onPlayerOnly(sender);
-            return 0;
-        }
-        action.accept(player);
-        return Command.SINGLE_SUCCESS;
+        return CommandSupport.requirePlayer(source, handler::onPlayerOnly, action);
     }
 
     private static boolean isTargetingSelf(CommandSender sender, String target) {
@@ -509,33 +503,14 @@ public final class DragonRaidCommandRegistrar {
         Collection<String> candidates,
         SuggestionsBuilder builder
     ) {
-        String remaining = builder.getRemaining().toLowerCase(Locale.ROOT);
-        for (String candidate : candidates) {
-            if (candidate.toLowerCase(Locale.ROOT).startsWith(remaining)) {
-                builder.suggest(candidate);
-            }
-        }
-        return builder.buildFuture();
+        return CommandSupport.suggestMatching(candidates, builder);
     }
 
     private static CompletableFuture<Suggestions> suggestMatchingEscaped(
         Collection<String> candidates,
         SuggestionsBuilder builder
     ) {
-        String rawRemaining = builder.getRemaining();
-        String remainingLower = rawRemaining.toLowerCase(Locale.ROOT);
-        String unquotedLower = (!rawRemaining.isEmpty()
-                && (rawRemaining.charAt(0) == '"' || rawRemaining.charAt(0) == '\''))
-                ? remainingLower.substring(1)
-                : remainingLower;
-        for (String candidate : candidates) {
-            String escaped = StringArgumentType.escapeIfRequired(candidate);
-            if (candidate.toLowerCase(Locale.ROOT).startsWith(unquotedLower)
-                    || escaped.toLowerCase(Locale.ROOT).startsWith(remainingLower)) {
-                builder.suggest(escaped);
-            }
-        }
-        return builder.buildFuture();
+        return CommandSupport.suggestMatchingEscaped(candidates, builder);
     }
 
     private static Collection<String> onlinePlayerNames() {

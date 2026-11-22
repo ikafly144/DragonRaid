@@ -54,6 +54,11 @@ class ContentPackLoaderTest {
                     display-name-key: content.raid_b
                     blueprint-id: bp_b
                     required-unlock-key: raid_b
+                    unlock-policy: LEADER_ONLY
+                    hidden-until-unlocked: true
+                    description-key: content.raid_b.desc
+                    icon: DRAGON_HEAD
+                    category: raid
                     min-players: 1
                     max-players: 8
                     min-average-item-level: 100
@@ -229,7 +234,14 @@ class ContentPackLoaderTest {
         assertEquals(1, report.totalRewardExtensions());
 
         assertEquals(2, committedContents.size());
-        assertEquals(List.of("rew_b"), committedContents.get(1).clearRewards());
+        ContentEntrySpec raidBSpec = committedContents.get(1);
+        assertEquals(List.of("rew_b"), raidBSpec.clearRewards());
+        assertEquals(net.sabafly.dragonraid.api.finder.ContentUnlockPolicy.LEADER_ONLY, raidBSpec.unlockPolicy());
+        assertTrue(raidBSpec.hiddenUntilUnlocked());
+        assertEquals("content.raid_b.desc", raidBSpec.descriptionKey());
+        assertEquals("DRAGON_HEAD", raidBSpec.iconMaterial());
+        assertEquals("raid", raidBSpec.category());
+        assertEquals(net.sabafly.dragonraid.api.finder.ContentUnlockPolicy.ALL_MEMBERS, committedContents.get(0).unlockPolicy());
         assertEquals(2, committedAchievements.size());
         assertEquals(List.of("rew_a"), committedAchievements.get(0).rewards());
         assertEquals(AchievementTriggerType.END_PORTAL_TOUCH, committedAchievements.get(0).triggers().get(0).type());

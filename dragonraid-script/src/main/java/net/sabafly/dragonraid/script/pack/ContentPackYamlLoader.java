@@ -169,8 +169,32 @@ final class ContentPackYamlLoader {
         int maxPlayers = optionalInt(packId, file, node.node("max-players"), 8);
         int minIlvl = optionalInt(packId, file, node.node("min-average-item-level"), 0);
         List<String> clearRewards = parseStringList(packId, file, node.node("clear-rewards"));
+        net.sabafly.dragonraid.api.finder.ContentUnlockPolicy unlockPolicy = optionalEnum(
+                packId,
+                file,
+                node.node("unlock-policy"),
+                net.sabafly.dragonraid.api.finder.ContentUnlockPolicy.class
+        );
+        boolean hiddenUntilUnlocked = optionalBoolean(packId, file, node.node("hidden-until-unlocked"), false);
+        String descriptionKey = optionalString(packId, file, node.node("description-key"), "");
+        String icon = optionalString(packId, file, node.node("icon"), ContentEntrySpec.DEFAULT_ICON_MATERIAL);
+        String category = optionalString(packId, file, node.node("category"), "");
         try {
-            return new ContentEntrySpec(id, displayNameKey, blueprintId, unlockKey, minPlayers, maxPlayers, minIlvl, clearRewards);
+            return new ContentEntrySpec(
+                    id,
+                    displayNameKey,
+                    blueprintId,
+                    unlockKey,
+                    minPlayers,
+                    maxPlayers,
+                    minIlvl,
+                    clearRewards,
+                    unlockPolicy,
+                    hiddenUntilUnlocked,
+                    descriptionKey,
+                    icon,
+                    category
+            );
         } catch (IllegalArgumentException ex) {
             throw new ContentPackException(packId, file, nodePath(node), ex.getMessage(), ex);
         }

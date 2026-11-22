@@ -118,3 +118,18 @@ visuals:
   soul-marker-glow: true
   tether-particle-step: 0.5
   max-render-distance: 96.0
+
+party:
+  max-size: 8
+  invite-timeout-seconds: 60
+  disconnect-grace-seconds: 120
+  hud-enabled-default: true
+  hud-update-interval-ticks: 10
+  hud-max-members-shown: 8
+
+finder:
+  ready-check-timeout-seconds: 30
+  skip-ready-check-for-solo: false
+  commence-sound: "minecraft:block.bell.use"
+  commence-sound-pitch: 1.4
+  commence-sound-volume: 1.0

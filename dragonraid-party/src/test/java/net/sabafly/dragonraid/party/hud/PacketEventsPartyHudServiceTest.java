@@ -1,0 +1,177 @@
+package net.sabafly.dragonraid.party.hud;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import net.sabafly.dragonraid.api.party.PartyCombatStatusProvider;
+import net.sabafly.dragonraid.api.party.PartyMemberCombatState;
+import net.sabafly.dragonraid.api.party.PartyRoleProvider;
+import net.sabafly.dragonraid.api.party.PartyRoleTag;
+import net.sabafly.dragonraid.api.party.RaidParty;
+import net.sabafly.dragonraid.party.DefaultRaidPartyService;
+import net.sabafly.dragonraid.scheduler.RaidScheduler;
+import net.sabafly.dragonraid.scheduler.TaskHandle;
+import org.bukkit.entity.Player;
+import org.junit.jupiter.api.Test;
+
+class PacketEventsPartyHudServiceTest {
+
+    private static final PlainTextComponentSerializer PLAIN = PlainTextComponentSerializer.plainText();
+
+    private static final class RecordingTransport implements PacketEventsPartyHudService.ScoreboardPacketTransport {
+        final List<String> ops = new ArrayList<>();
+
+        @Override
+        public void createObjective(Player viewer, String objectiveName, Component displayName) {
+            ops.add(viewer.getName() + ":CREATE:" + PLAIN.serialize(displayName));
+        }
+
+        @Override
+        public void updateObjective(Player viewer, String objectiveName, Component displayName) {
+            ops.add(viewer.getName() + ":UPDATE_OBJ:" + PLAIN.serialize(displayName));
+        }
+
+        @Override
+        public void removeObjective(Player viewer, String objectiveName) {
+            ops.add(viewer.getName() + ":REMOVE");
+        }
+
+        @Override
+        public void displaySidebar(Player viewer, int position, String objectiveName) {
+            ops.add(viewer.getName() + ":DISPLAY:" + position);
+        }
+
+        @Override
+        public void updateLine(Player viewer, String objectiveName, String lineKey, int score, Component displayName) {
+            ops.add(viewer.getName() + ":LINE:" + lineKey + "=" + PLAIN.serialize(displayName));
+        }
+
+        @Override
+        public void resetLine(Player viewer, String objectiveName, String lineKey) {
+            ops.add(viewer.getName() + ":RESET:" + lineKey);
+        }
+    }
+
+    @Test
+    void sendsMinimalDeltaPacketsRespectsRoleProviderAndCleansUpOnToggleOrDisband() {
+        DefaultRaidPartyService partyService = new DefaultRaidPartyService();
+        RecordingTransport transport = new RecordingTransport();
+
+        Map<UUID, Player> online = new ConcurrentHashMap<>();
+        RaidScheduler scheduler = mock(RaidScheduler.class);
+        lenient().when(scheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+
+        UUID leaderId = UUID.randomUUID();
+        UUID memberId = UUID.randomUUID();
+        Player leader = mockPlayer(leaderId, "LeaderOne", 20.0, 20.0, false);
+        Player member = mockPlayer(memberId, "ShieldTwo", 16.0, 20.0, true);
+        online.put(leaderId, leader);
+        online.put(memberId, member);
+
+        Map<UUID, PartyMemberCombatState> states = new ConcurrentHashMap<>();
+        states.put(leaderId, PartyMemberCombatState.ALIVE);
+        states.put(memberId, PartyMemberCombatState.ALIVE);
+        PartyCombatStatusProvider combatProvider = new PartyCombatStatusProvider() {
+            @Override
+            public boolean isInActiveEncounter(UUID playerId) {
+                return true;
+            }
+
+            @Override
+            public PartyMemberCombatState combatState(UUID playerId, boolean isOnline) {
+                return isOnline ? states.getOrDefault(playerId, PartyMemberCombatState.OUT_OF_COMBAT) : PartyMemberCombatState.OFFLINE;
+            }
+
+            @Override
+            public int remainingRevives(UUID playerId) {
+                return 3;
+            }
+        };
+
+        PartyRoleProvider roleProvider = id -> id.equals(memberId)
+                ? Optional.of(new PartyRoleTag("tank", Component.text("[TNK]")))
+                : Optional.empty();
+
+        PacketEventsPartyHudService hud = new PacketEventsPartyHudService(
+                partyService,
+                combatProvider,
+                roleProvider,
+                scheduler,
+                online::get,
+                transport,
+                Logger.getLogger("test"),
+                true,
+                8
+        );
+        partyService.addListener(hud);
+
+        RaidParty party = partyService.createParty(leaderId);
+        assertTrue(partyService.invite(leaderId, memberId));
+        assertTrue(partyService.acceptInvite(memberId, party.partyId()));
+
+        // Initial render occurred on JOINED; verify leader star, role tag, shield icon, and revives footer
+        assertTrue(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderOne:CREATE:")));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderOne:DISPLAY:1")));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.contains("★LeaderOne")));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.contains("[TNK] •ShieldTwo") && s.contains("🛡")));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.contains("蘇生残: 3")));
+
+        // Zero packets when nothing changed on tickAll
+        transport.ops.clear();
+        hud.tickAll();
+        assertTrue(transport.ops.isEmpty(), "Expected 0 delta packets when state unchanged, got: " + transport.ops);
+
+        // Downed member triggers only changed row updates
+        states.put(memberId, PartyMemberCombatState.DOWNED);
+        hud.tickAll();
+        assertTrue(transport.ops.stream().anyMatch(s -> s.contains("☠DOWN")));
+        assertFalse(transport.ops.stream().anyMatch(s -> s.contains("CREATE")));
+        assertFalse(transport.ops.stream().anyMatch(s -> s.contains("UPDATE_OBJ")));
+
+        // Disabling HUD removes objective for that viewer only
+        transport.ops.clear();
+        hud.setHudEnabled(memberId, false);
+        assertFalse(hud.isHudEnabled(memberId));
+        assertTrue(transport.ops.contains("ShieldTwo:REMOVE"));
+        assertFalse(transport.ops.contains("LeaderOne:REMOVE"));
+
+        // Removing member resets shrunken line for leader
+        transport.ops.clear();
+        assertTrue(partyService.kick(leaderId, memberId));
+        assertTrue(transport.ops.stream().anyMatch(s -> s.startsWith("LeaderOne:RESET:")));
+
+        // Disband removes objective for remaining leader
+        transport.ops.clear();
+        assertTrue(partyService.disband(leaderId));
+        assertTrue(transport.ops.contains("LeaderOne:REMOVE"));
+    }
+
+    @SuppressWarnings("deprecation")
+    private static Player mockPlayer(UUID id, String name, double hp, double maxHp, boolean blocking) {
+        Player p = mock(Player.class);
+        when(p.getUniqueId()).thenReturn(id);
+        when(p.getName()).thenReturn(name);
+        when(p.isOnline()).thenReturn(true);
+        when(p.getHealth()).thenReturn(hp);
+        when(p.getMaxHealth()).thenReturn(maxHp);
+        when(p.isBlocking()).thenReturn(blocking);
+        return p;
+    }
+}
