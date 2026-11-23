@@ -2086,6 +2086,321 @@ class RaidEncounterManagerTest {
         }
     }
 
+    @Test
+    void wipeStandbyPreservesReturnOnlyCleanupAcrossRetryDisconnectAndShutdown() {
+        World overworld = mock(World.class);
+        UUID overworldId = UUID.randomUUID();
+        lenient().when(overworld.getUID()).thenReturn(overworldId);
+        lenient().when(overworld.getName()).thenReturn("world");
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_standby_ret");
+        Location instSafe = new Location(instWorld, 0.5, 65.0, 24.5);
+        lenient().when(regionService.isRaidWorld(instWorld)).thenReturn(true);
+        lenient().when(regionService.safeZoneSpawnLocation(instWorld)).thenReturn(instSafe);
+
+        net.sabafly.dragonraid.instance.RaidInstanceManager instanceMgr =
+                mock(net.sabafly.dragonraid.instance.RaidInstanceManager.class);
+        net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance inst =
+                new net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance(
+                        instWorld, new Location(instWorld, 0.0, 64.0, 0.0), 40.0, List.of());
+        AtomicBoolean instActive = new AtomicBoolean(false);
+        lenient().when(instanceMgr.getOrCreateInstance()).thenAnswer(inv -> {
+            instActive.set(true);
+            return CompletableFuture.completedFuture(inst);
+        });
+        lenient().when(instanceMgr.activeInstance()).thenAnswer(inv -> instActive.get() ? inst : null);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenAnswer(inv -> instActive.get() ? instWorld : inv.getArgument(0));
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.destroyInstance(any(), any())).thenAnswer(inv -> {
+            instActive.set(false);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        DragonBossController bossCtrl = mock(DragonBossController.class);
+        lenient().when(bossCtrl.bindOrSpawn(any(), any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.cleanup(anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
+
+        Path dbPath = tempDir.resolve("standby-return-preservation.db");
+        Location retA = new Location(overworld, 42.5, 68.0, -91.25, 180.0f, 5.0f);
+        EncounterBlueprint bp = sampleBlueprint("dragon_normal", EncounterDifficulty.NORMAL);
+
+        try (SqliteDatabase db = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(db);
+            DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                    configManager, messageService, scheduler, regionService, blockTracker, soulMarkerService,
+                    repo, null, bossCtrl, null, blueprintRegistry, gimmickActionRegistry, instanceMgr,
+                    Logger.getLogger("StandbyReturnTest"), () -> endWorld, () -> onlinePlayers.values(),
+                    id -> onlinePlayers.get(id), nowMillis::get);
+            mgr.setWorldLookup(id -> overworldId.equals(id) ? overworld : endWorld.getUID().equals(id) ? endWorld : null);
+
+            Player alice = addPlayer("Alice", retA);
+            UUID aliceId = alice.getUniqueId();
+            when(alice.getWorld()).thenReturn(overworld);
+
+            assertTrue(mgr.startEncounter(bp, List.of(alice), Map.of(aliceId, retA)));
+            when(alice.getWorld()).thenReturn(instWorld);
+
+            // Solo wipe enters standby: flags are restored, AND return-only record MUST remain persisted in SQLite
+            mgr.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+            capturedDelayedTasks.getLast().run();
+            assertTrue(mgr.isInWipeStandby(aliceId));
+
+            PendingPlayerCleanup duringStandby = repo.loadPendingPlayerCleanupsSync().get(aliceId);
+            assertTrue(duringStandby != null && !duringStandby.restoreFlags() && duringStandby.hasReturnLocation(),
+                    "Standby must retain a return-only cleanup record");
+            assertEquals(overworldId, duringStandby.returnWorldId());
+            assertEquals(42.5, duringStandby.returnX());
+
+            // Retry encounter from standby carries the return location forward; second wipe still retains it
+            assertTrue(mgr.retryEncounter(alice));
+            assertEquals(RaidState.ACTIVE, mgr.state());
+            mgr.onPlayerDamage(alice, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+            capturedDelayedTasks.getLast().run();
+            assertTrue(mgr.isInWipeStandby(aliceId));
+            PendingPlayerCleanup afterSecondWipe = repo.loadPendingPlayerCleanupsSync().get(aliceId);
+            assertTrue(afterSecondWipe != null && !afterSecondWipe.restoreFlags() && afterSecondWipe.hasReturnLocation());
+
+            // Solo player disconnects during standby -> standbySession & instance are destroyed, return record survives
+            when(alice.isOnline()).thenReturn(false);
+            mgr.onPlayerQuit(alice);
+            assertFalse(mgr.isInWipeStandby(aliceId));
+            assertFalse(mgr.hasActiveDutySession());
+            assertTrue(repo.loadPendingPlayerCleanupsSync().containsKey(aliceId));
+
+            // Reconnecting after standby ended returns Alice to her pre-entry Overworld location and deletes record
+            when(alice.isOnline()).thenReturn(true);
+            org.mockito.Mockito.clearInvocations(alice);
+            when(alice.teleportAsync(retA)).thenReturn(CompletableFuture.completedFuture(true));
+            mgr.onPlayerJoin(alice);
+            verify(alice).teleportAsync(retA);
+            verify(alice, never()).setGameMode(any());
+            assertTrue(repo.loadPendingPlayerCleanupsSync().isEmpty());
+        }
+    }
+
+    @Test
+    void activeInstanceSingleReadInDutyCheckAndStandbyJoinSurvivesConcurrentMemberLeave() {
+        World overworld = mock(World.class);
+        UUID overworldId = UUID.randomUUID();
+        lenient().when(overworld.getUID()).thenReturn(overworldId);
+        lenient().when(overworld.getName()).thenReturn("world");
+        World instWorld = mock(World.class);
+        lenient().when(instWorld.getUID()).thenReturn(UUID.randomUUID());
+        lenient().when(instWorld.getName()).thenReturn("dragonraid_instance_standby_join");
+        Location instSafe = new Location(instWorld, 0.5, 65.0, 24.5);
+        lenient().when(regionService.isRaidWorld(instWorld)).thenReturn(true);
+        lenient().when(regionService.safeZoneSpawnLocation(instWorld)).thenReturn(instSafe);
+
+        net.sabafly.dragonraid.instance.RaidInstanceManager instanceMgr =
+                mock(net.sabafly.dragonraid.instance.RaidInstanceManager.class);
+        net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance inst =
+                new net.sabafly.dragonraid.instance.RaidInstanceManager.RaidInstance(
+                        instWorld, new Location(instWorld, 0.0, 64.0, 0.0), 40.0, List.of());
+        AtomicBoolean instActive = new AtomicBoolean(false);
+        lenient().when(instanceMgr.getOrCreateInstance()).thenAnswer(inv -> {
+            instActive.set(true);
+            return CompletableFuture.completedFuture(inst);
+        });
+        lenient().when(instanceMgr.activeInstance()).thenAnswer(inv -> instActive.get() ? inst : null);
+        lenient().when(instanceMgr.activeCombatWorld(any())).thenAnswer(inv -> instActive.get() ? instWorld : inv.getArgument(0));
+        lenient().when(instanceMgr.isInstanceWorld(instWorld)).thenReturn(true);
+        lenient().when(instanceMgr.destroyInstance(any(), any())).thenAnswer(inv -> {
+            instActive.set(false);
+            return CompletableFuture.completedFuture(null);
+        });
+
+        DragonBossController bossCtrl = mock(DragonBossController.class);
+        lenient().when(bossCtrl.bindOrSpawn(any(), any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.bindOrSpawn(any(), anyDouble())).thenReturn(CompletableFuture.completedFuture(null));
+        lenient().when(bossCtrl.cleanup(anyBoolean())).thenReturn(CompletableFuture.completedFuture(null));
+
+        AtomicBoolean queueJoinTasks = new AtomicBoolean(false);
+        List<Runnable> queuedJoinEntityTasks = new ArrayList<>();
+        RaidScheduler customScheduler = mock(RaidScheduler.class);
+        lenient().when(customScheduler.runAtEntity(any(), any())).thenAnswer(inv -> {
+            Runnable r = inv.getArgument(1);
+            if (queueJoinTasks.get()) {
+                queuedJoinEntityTasks.add(r);
+            } else {
+                r.run();
+            }
+            return TaskHandle.retired();
+        });
+        lenient().when(customScheduler.runAtEntity(any(), any(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(1).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(customScheduler.runAtRegion(any(World.class), anyInt(), anyInt(), any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(3).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(customScheduler.runGlobal(any())).thenAnswer(inv -> {
+            inv.<Runnable>getArgument(0).run();
+            return TaskHandle.retired();
+        });
+        lenient().when(customScheduler.runGlobalTimer(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            capturedGlobalTimers.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+        lenient().when(customScheduler.runGlobalLater(any(), anyLong())).thenAnswer(inv -> {
+            capturedDelayedTasks.add(inv.getArgument(0));
+            return mock(TaskHandle.class);
+        });
+
+        RaidRecoveryRepository recRepo = mock(RaidRecoveryRepository.class);
+        DefaultRaidEncounterManager mgr = new DefaultRaidEncounterManager(
+                configManager, messageService, customScheduler, regionService, blockTracker, soulMarkerService,
+                recRepo, null, bossCtrl, null, blueprintRegistry, gimmickActionRegistry, instanceMgr,
+                Logger.getLogger("StandbyJoinRaceTest"), () -> endWorld, () -> onlinePlayers.values(),
+                id -> onlinePlayers.get(id), nowMillis::get);
+
+        Location retA = new Location(overworld, 10.0, 64.0, 10.0);
+        Location retB = new Location(overworld, 20.0, 64.0, 20.0);
+        Location retC = new Location(overworld, 30.0, 64.0, 30.0);
+        Player alice = addPlayer("Alice", retA);
+        Player bob = addPlayer("Bob", retB);
+        Player charlie = addPlayer("Charlie", retC);
+        when(alice.getWorld()).thenReturn(overworld);
+        when(bob.getWorld()).thenReturn(overworld);
+        when(charlie.getWorld()).thenReturn(overworld);
+        EncounterBlueprint bp = sampleBlueprint("dragon_normal", EncounterDifficulty.NORMAL);
+
+        assertTrue(mgr.startEncounter(bp, List.of(alice, bob, charlie),
+                Map.of(alice.getUniqueId(), retA, bob.getUniqueId(), retB, charlie.getUniqueId(), retC)));
+        when(alice.getWorld()).thenReturn(instWorld);
+        when(bob.getWorld()).thenReturn(instWorld);
+        when(charlie.getWorld()).thenReturn(instWorld);
+
+        // Alice goes offline (downed on disconnect), then Bob and Charlie wipe into standby
+        when(alice.isOnline()).thenReturn(false);
+        mgr.onPlayerQuit(alice);
+        mgr.onPlayerDamage(bob, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        mgr.onPlayerDamage(charlie, mockDamageEvent(50.0, EntityDamageEvent.DamageCause.ENTITY_ATTACK));
+        capturedDelayedTasks.getLast().run();
+        assertTrue(mgr.isInWipeStandby(alice.getUniqueId()));
+        assertTrue(mgr.isInWipeStandby(bob.getUniqueId()));
+        assertTrue(mgr.isInWipeStandby(charlie.getUniqueId()));
+
+        // #3: Alice logs back in (queuing her join task); BEFORE it runs, Bob leaves standby (recreating standbySession)
+        when(alice.isOnline()).thenReturn(true);
+        org.mockito.Mockito.clearInvocations(alice, recRepo);
+        queueJoinTasks.set(true);
+        mgr.onPlayerJoin(alice);
+        assertEquals(1, queuedJoinEntityTasks.size());
+
+        queueJoinTasks.set(false);
+        assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(bob));
+        assertTrue(mgr.isInWipeStandby(alice.getUniqueId()));
+        assertTrue(mgr.isInWipeStandby(charlie.getUniqueId()));
+
+        // Now Alice's queued join entity task executes -> must keep Alice in standby instance, NOT evict to retA!
+        queuedJoinEntityTasks.removeFirst().run();
+        verify(alice).teleportAsync(instSafe);
+        verify(alice, never()).teleportAsync(retA);
+        verify(recRepo, never()).deletePendingPlayerCleanupAsync(alice.getUniqueId());
+        verify(recRepo).upsertPendingPlayerCleanupAsync(org.mockito.ArgumentMatchers.argThat(
+                (PendingPlayerCleanup p) -> p.playerId().equals(alice.getUniqueId())
+                        && !p.restoreFlags() && p.hasReturnLocation()));
+
+        // #2: Single read of activeInstance() in isInDutyOrInstance even if activeInstance() becomes null mid-check
+        when(alice.getWorld()).thenReturn(overworld);
+        mgr.leaveEncounterDetailed(charlie);
+        AtomicInteger activeCalls = new AtomicInteger();
+        when(instanceMgr.activeInstance()).thenAnswer(inv -> activeCalls.incrementAndGet() == 1 ? inst : null);
+        // Remove Alice from standby by leaving, with failed teleport so pendingCleanupPlayers is checked
+        when(alice.teleportAsync(retA)).thenReturn(CompletableFuture.completedFuture(false));
+        mgr.leaveEncounterDetailed(alice);
+        activeCalls.set(0);
+        assertFalse(mgr.isInDutyOrInstance(alice.getUniqueId()));
+        assertEquals(1, activeCalls.get(), "isInDutyOrInstance must read activeInstance() at most once");
+    }
+
+    @Test
+    void unloadedReturnWorldPreservesReturnOnlyCleanupOnJoinAndLeaveUntilWorldLoads() {
+        World overworld = mock(World.class);
+        UUID overworldId = UUID.randomUUID();
+        lenient().when(overworld.getUID()).thenReturn(overworldId);
+        lenient().when(overworld.getName()).thenReturn("world");
+
+        World dynamicWorld = mock(World.class);
+        UUID dynamicWorldId = UUID.randomUUID();
+        lenient().when(dynamicWorld.getUID()).thenReturn(dynamicWorldId);
+        lenient().when(dynamicWorld.getName()).thenReturn("dynamic_lobby");
+
+        AtomicBoolean dynamicWorldLoaded = new AtomicBoolean(false);
+        Path dbPath = tempDir.resolve("unloaded-return-world.db");
+        UUID aliceId = UUID.randomUUID();
+
+        try (SqliteDatabase db = new SqliteDatabase(dbPath, 2, Runnable::run)) {
+            SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(db);
+            repo.upsertPendingPlayerCleanupAsync(new PendingPlayerCleanup(
+                    aliceId, "SURVIVAL", false, true, false, true, true,
+                    dynamicWorldId, 77.5, 80.0, -22.5, 45.0f, 0.0f)).join();
+
+            DefaultRaidEncounterManager mgr = newTestManager(
+                    scheduler, blockTracker, repo, Logger.getLogger("UnloadedReturnWorldTest"));
+            mgr.setWorldLookup(id -> {
+                if (dynamicWorldId.equals(id)) {
+                    return dynamicWorldLoaded.get() ? dynamicWorld : null;
+                }
+                if (overworldId.equals(id)) {
+                    return overworld;
+                }
+                return endWorld.getUID().equals(id) ? endWorld : null;
+            });
+
+            Player alice = mock(Player.class);
+            when(alice.getUniqueId()).thenReturn(aliceId);
+            when(alice.getName()).thenReturn("Alice");
+            when(alice.isOnline()).thenReturn(true);
+            when(alice.getWorld()).thenReturn(overworld);
+            when(alice.getLocation()).thenReturn(new Location(overworld, 0.0, 64.0, 0.0));
+            when(alice.getGameMode()).thenReturn(GameMode.SPECTATOR);
+            lenient().when(alice.locale()).thenReturn(Locale.US);
+            lenient().when(alice.teleportAsync(any())).thenReturn(CompletableFuture.completedFuture(true));
+            onlinePlayers.put(aliceId, alice);
+
+            // 1. Join in normal world while dynamicWorld is unloaded -> restores flags, does NOT delete return record!
+            mgr.onPlayerJoin(alice);
+            verify(alice).setGameMode(GameMode.SURVIVAL);
+            verify(alice, never()).teleportAsync(any());
+
+            PendingPlayerCleanup afterFirstJoin = repo.loadPendingPlayerCleanupsSync().get(aliceId);
+            assertTrue(afterFirstJoin != null && !afterFirstJoin.restoreFlags() && afterFirstJoin.hasReturnLocation(),
+                    "Unresolved return world must be preserved as return-only record");
+            assertEquals(dynamicWorldId, afterFirstJoin.returnWorldId());
+            assertEquals(77.5, afterFirstJoin.returnX());
+
+            // 2. Join inside raid world while dynamicWorld is still unloaded -> no fallback teleport, record kept
+            org.mockito.Mockito.clearInvocations(alice);
+            when(alice.getWorld()).thenReturn(endWorld);
+            when(alice.getLocation()).thenReturn(new Location(endWorld, 0.0, 64.0, 0.0));
+            mgr.onPlayerJoin(alice);
+            verify(alice, never()).setGameMode(any());
+            verify(alice, never()).teleportAsync(any());
+            assertTrue(repo.loadPendingPlayerCleanupsSync().containsKey(aliceId));
+
+            // 3. /cf leave while dynamicWorld is still unloaded -> notifies failure and preserves original coordinates
+            net.kyori.adventure.text.Component tpFailedMsg = messageService.render(alice, "finder.leave-teleport-failed");
+            org.mockito.Mockito.clearInvocations(alice);
+            assertEquals(RaidEncounterManager.LeaveEncounterResult.LEFT, mgr.leaveEncounterDetailed(alice));
+            verify(alice).sendMessage(tpFailedMsg);
+            verify(alice, never()).teleportAsync(any());
+            assertEquals(dynamicWorldId, repo.loadPendingPlayerCleanupsSync().get(aliceId).returnWorldId());
+
+            // 4. Now dynamicWorld is loaded -> next join (or /cf leave) teleports to exact coordinates and deletes record
+            dynamicWorldLoaded.set(true);
+            org.mockito.Mockito.clearInvocations(alice);
+            Location expectedDynamicDest = new Location(dynamicWorld, 77.5, 80.0, -22.5, 45.0f, 0.0f);
+            mgr.onPlayerJoin(alice);
+            verify(alice).teleportAsync(expectedDynamicDest);
+            verify(alice, never()).setGameMode(any());
+            assertTrue(repo.loadPendingPlayerCleanupsSync().isEmpty());
+        }
+    }
+
     private void startActiveEncounter(Player initiator, BossConfig.Difficulty difficulty) {
         manager.adminStart(initiator, difficulty);
         Runnable countdown = capturedGlobalTimers.get(capturedGlobalTimers.size() - 1);

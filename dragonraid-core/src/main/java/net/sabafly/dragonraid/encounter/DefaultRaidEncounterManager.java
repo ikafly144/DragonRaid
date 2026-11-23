@@ -523,10 +523,12 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             Player player = playerLookup.apply(playerId);
             if (player != null && player.isOnline() && player.getWorld() != null) {
                 World world = player.getWorld();
-                if (instanceManager != null && (instanceManager.isInstanceWorld(world)
-                        || (instanceManager.activeInstance() != null
-                        && instanceManager.activeInstance().world().equals(world)))) {
-                    return true;
+                if (instanceManager != null) {
+                    RaidInstanceManager.RaidInstance activeInst = instanceManager.activeInstance();
+                    if (instanceManager.isInstanceWorld(world)
+                            || (activeInst != null && world.equals(activeInst.world()))) {
+                        return true;
+                    }
                 }
                 if (state != RaidState.IDLE && regionService.isRaidWorld(world)) {
                     return true;
@@ -559,9 +561,11 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             if (!standby.memberIds().contains(requesterId)) {
                 return false;
             }
-            if (instanceManager != null && instanceManager.activeInstance() != null
-                    && standby.instance() != null && !standby.instance().equals(instanceManager.activeInstance())) {
-                return false;
+            if (instanceManager != null) {
+                RaidInstanceManager.RaidInstance activeInst = instanceManager.activeInstance();
+                if (activeInst != null && standby.instance() != null && !standby.instance().equals(activeInst)) {
+                    return false;
+                }
             }
             for (UUID memberId : standby.memberIds()) {
                 if (disconnectedDutyMembers.contains(memberId)) {
@@ -571,6 +575,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 if (onlineMember != null && onlineMember.isOnline()) {
                     retryParty.add(onlineMember);
                     Location ret = standby.returnLocations().get(memberId);
+                    if (ret == null) {
+                        ret = resolveSavedReturnLocation(pendingCleanupPlayers.get(memberId));
+                    }
                     if (ret != null) {
                         retryReturns.put(memberId, ret.clone());
                     }
@@ -787,8 +794,29 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         // Case 3: Retry pending failed withdrawal return
         SavedCleanupRecord pendingReturn = pendingCleanupPlayers.get(playerId);
         if (pendingReturn != null && (pendingReturn.hasReturnLocation() || pendingReturn.teleportToSafeZone())) {
-            Location retryDest = resolveSavedReturnLocation(pendingReturn);
-            if (retryDest == null) {
+            Location retryDest;
+            if (pendingReturn.hasReturnLocation()) {
+                retryDest = resolveSavedReturnLocation(pendingReturn);
+                if (retryDest == null || retryDest.getWorld() == null) {
+                    scheduler.runAtEntity(player, () -> {
+                        if (pendingReturn.restoreFlags()) {
+                            pendingReturn.applyTo(player);
+                        }
+                        SavedCleanupRecord unresolvedReturnOnly = pendingReturn.asReturnOnly();
+                        pendingCleanupPlayers.compute(playerId,
+                                (k, cur) -> (cur == null || cur.equals(pendingReturn)) ? unresolvedReturnOnly : cur);
+                        if (recoveryRepository != null
+                                && unresolvedReturnOnly.equals(pendingCleanupPlayers.get(playerId))) {
+                            recoveryRepository.upsertPendingPlayerCleanupAsync(
+                                    unresolvedReturnOnly.toPendingCleanup(playerId));
+                        }
+                        if (player.isOnline()) {
+                            messageService.send(player, "finder.leave-teleport-failed");
+                        }
+                    });
+                    return LeaveEncounterResult.LEFT;
+                }
+            } else {
                 retryDest = resolveReturnLocation(playerId, null, defaultFallback);
             }
             RaidInstanceManager.RaidInstance currentInst = null;
@@ -1129,6 +1157,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 RaidParticipant participant = new RaidParticipant(memberId, member.getName());
                 participant.setOnline(true);
                 Location preEntryLoc = returnLocations.get(memberId);
+                if (preEntryLoc == null && staleCleanup != null) {
+                    preEntryLoc = resolveSavedReturnLocation(staleCleanup);
+                }
                 if (preEntryLoc != null && isValidReturnLocation(preEntryLoc)) {
                     Location copy = preEntryLoc.clone();
                     participant.setPreEntryReturnLocation(copy);
@@ -1140,12 +1171,14 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     if (staleCleanup != null) {
                         staleCleanup.applyTo(member);
                         pendingCleanupPlayers.remove(memberId, staleCleanup);
-                        deletePlayerCleanupAsync(memberId);
                     }
                     synchronized (stateLock) {
                         if ((state != RaidState.ACTIVE && state != RaidState.WIPING)
                                 || encounterGeneration.get() != activationGen
                                 || participants.get(memberId) != participant) {
+                            if (staleCleanup != null && !staleCleanup.hasReturnLocation()) {
+                                deletePlayerCleanupAsync(memberId);
+                            }
                             return;
                         }
                         participant.captureOriginalState(
@@ -2078,12 +2111,26 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                 if (cleanup.restoreFlags()) {
                     cleanup.applyTo(player);
                 }
-                if (standbyNow != null && standbyNow.memberIds().contains(id) && standbyNow == this.standbySession) {
-                    if (pendingCleanupPlayers.remove(id, cleanup)) {
+                DutyStandbySession currentStandby;
+                synchronized (stateLock) {
+                    currentStandby = this.standbySession;
+                }
+                if (standbyNow != null
+                        && currentStandby != null
+                        && currentStandby.memberIds().contains(id)
+                        && Objects.equals(standbyNow.instance(), currentStandby.instance())) {
+                    if (cleanup.hasReturnLocation()) {
+                        SavedCleanupRecord standbyReturnOnly = cleanup.asReturnOnly();
+                        pendingCleanupPlayers.compute(id,
+                                (k, cur) -> (cur == null || cur.equals(cleanup)) ? standbyReturnOnly : cur);
+                        if (recoveryRepository != null && standbyReturnOnly.equals(pendingCleanupPlayers.get(id))) {
+                            recoveryRepository.upsertPendingPlayerCleanupAsync(standbyReturnOnly.toPendingCleanup(id));
+                        }
+                    } else if (pendingCleanupPlayers.remove(id, cleanup)) {
                         deletePlayerCleanupAsync(id);
                     }
-                    if (standbyNow.instance() != null) {
-                        Location standbySpawn = regionService.safeZoneSpawnLocation(standbyNow.instance().world());
+                    if (currentStandby.instance() != null) {
+                        Location standbySpawn = regionService.safeZoneSpawnLocation(currentStandby.instance().world());
                         if (standbySpawn != null && standbySpawn.getWorld() != null) {
                             player.teleportAsync(standbySpawn);
                         }
@@ -2091,9 +2138,22 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     updateSnapshot(player);
                     return;
                 }
-                Location savedReturn = resolveSavedReturnLocation(cleanup);
-                Location targetDest = savedReturn;
-                if (targetDest == null && cleanup.teleportToSafeZone()) {
+                Location targetDest = null;
+                if (cleanup.hasReturnLocation()) {
+                    Location savedReturn = resolveSavedReturnLocation(cleanup);
+                    if (savedReturn == null || savedReturn.getWorld() == null) {
+                        SavedCleanupRecord unresolvedReturnOnly = cleanup.asReturnOnly();
+                        pendingCleanupPlayers.compute(id,
+                                (k, cur) -> (cur == null || cur.equals(cleanup)) ? unresolvedReturnOnly : cur);
+                        if (recoveryRepository != null && unresolvedReturnOnly.equals(pendingCleanupPlayers.get(id))) {
+                            recoveryRepository.upsertPendingPlayerCleanupAsync(
+                                    unresolvedReturnOnly.toPendingCleanup(id));
+                        }
+                        updateSnapshot(player);
+                        return;
+                    }
+                    targetDest = savedReturn;
+                } else if (cleanup.teleportToSafeZone()) {
                     World endWorld = endWorldSupplier.get();
                     boolean inRaidOrInstance = regionService.isRaidWorld(player.getWorld())
                             || (instanceManager != null && instanceManager.isInstanceWorld(player.getWorld()));
@@ -2476,11 +2536,20 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             countdownTask = null;
             monitorTask = null;
             wipeTask = null;
+            DutyStandbySession standbyAtShutdown = standbySession;
             standbySession = null;
             endingWipeMemberIds.clear();
             disconnectedDutyMembers.clear();
             encounterGeneration.incrementAndGet();
             state = RaidState.ENDING;
+            if (standbyAtShutdown != null && standbyAtShutdown.returnLocations() != null) {
+                for (Map.Entry<UUID, Location> entry : standbyAtShutdown.returnLocations().entrySet()) {
+                    Location retLoc = entry.getValue();
+                    if (retLoc != null && retLoc.getWorld() != null) {
+                        pendingCleanupPlayers.putIfAbsent(entry.getKey(), SavedCleanupRecord.returnOnly(retLoc));
+                    }
+                }
+            }
             for (RaidParticipant participant : participants.values()) {
                 UUID id = participant.playerId();
                 Location returnLoc = activeReturnLocations.getOrDefault(id, participant.preEntryReturnLocation());
@@ -2560,6 +2629,9 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
             UUID id = participant.playerId();
             Player player = playerLookup.apply(id);
             Location returnLoc = activeReturnLocations.getOrDefault(id, participant.preEntryReturnLocation());
+            SavedCleanupRecord returnOnlyRecord = (returnLoc != null && returnLoc.getWorld() != null)
+                    ? SavedCleanupRecord.returnOnly(returnLoc)
+                    : null;
             SavedCleanupRecord cleanupRecord = participant.isStateCaptured()
                     ? SavedCleanupRecord.withFlags(
                             participant.previousGameMode(),
@@ -2569,7 +2641,7 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                             instanceSafeSpawn != null,
                             returnLoc
                     )
-                    : null;
+                    : returnOnlyRecord;
             if (player != null && player.isOnline()) {
                 if (cleanupRecord != null) {
                     pendingCleanupPlayers.put(id, cleanupRecord);
@@ -2582,12 +2654,20 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
                     if (instanceSafeSpawn != null) {
                         player.teleportAsync(instanceSafeSpawn);
                     }
-                    if (cleanupRecord != null) {
-                        pendingCleanupPlayers.remove(id, cleanupRecord);
+                    if (returnOnlyRecord != null) {
+                        pendingCleanupPlayers.compute(id,
+                                (k, cur) -> (cur == null || cur.equals(cleanupRecord)) ? returnOnlyRecord : cur);
+                        if (recoveryRepository != null && returnOnlyRecord.equals(pendingCleanupPlayers.get(id))) {
+                            recoveryRepository.upsertPendingPlayerCleanupAsync(returnOnlyRecord.toPendingCleanup(id));
+                        }
                     } else {
-                        pendingCleanupPlayers.remove(id);
+                        if (cleanupRecord != null) {
+                            pendingCleanupPlayers.remove(id, cleanupRecord);
+                        } else {
+                            pendingCleanupPlayers.remove(id);
+                        }
+                        deletePlayerCleanupAsync(id);
                     }
-                    deletePlayerCleanupAsync(id);
                     updateSnapshot(player);
                 }, () -> {
                     if (cleanupRecord != null && recoveryRepository != null) {
@@ -3812,6 +3892,27 @@ public final class DefaultRaidEncounterManager implements RaidEncounterManager {
         boolean hasReturnLocation() {
             return (cachedReturnLocation != null && cachedReturnLocation.getWorld() != null)
                     || (returnWorldId != null && returnX != null && returnY != null && returnZ != null);
+        }
+
+        SavedCleanupRecord asReturnOnly() {
+            Location copy = (cachedReturnLocation != null && cachedReturnLocation.getWorld() != null)
+                    ? cachedReturnLocation.clone()
+                    : null;
+            return new SavedCleanupRecord(
+                    null,
+                    false,
+                    true,
+                    false,
+                    teleportToSafeZone,
+                    false,
+                    copy,
+                    returnWorldId,
+                    returnX,
+                    returnY,
+                    returnZ,
+                    returnYaw,
+                    returnPitch
+            );
         }
 
         void applyTo(Player player) {
