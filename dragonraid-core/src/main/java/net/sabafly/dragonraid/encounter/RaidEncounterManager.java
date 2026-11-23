@@ -83,6 +83,7 @@ public interface RaidEncounterManager {
 
     enum LeaveEncounterResult {
         LEFT,
+        RETURN_WORLD_UNAVAILABLE,
         ENDING_IN_PROGRESS,
         NOT_IN_DUTY
     }

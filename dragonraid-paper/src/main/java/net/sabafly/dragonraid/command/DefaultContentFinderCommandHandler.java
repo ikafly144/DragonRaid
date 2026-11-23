@@ -165,6 +165,9 @@ public final class DefaultContentFinderCommandHandler implements ContentFinderCo
         }
         switch (result) {
             case LEFT -> messageService.send(player, "finder.leave-success");
+            case RETURN_WORLD_UNAVAILABLE -> {
+                // Failure guidance (finder.leave-teleport-failed) is already sent by the encounter manager.
+            }
             case ENDING_IN_PROGRESS -> messageService.send(player, "finder.leave-ending-in-progress");
             case NOT_IN_DUTY -> messageService.send(player, "finder.leave-not-in-duty");
         }

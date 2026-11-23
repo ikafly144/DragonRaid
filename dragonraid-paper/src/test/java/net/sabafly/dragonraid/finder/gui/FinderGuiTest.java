@@ -403,5 +403,12 @@ class FinderGuiTest {
         ArgumentCaptor<Component> msgCaptor = ArgumentCaptor.forClass(Component.class);
         verify(viewer).sendMessage(msgCaptor.capture());
         assertTrue(PLAIN.serialize(msgCaptor.getValue()).contains("finishing cleanup"));
+
+        // Round 4 #1: RETURN_WORLD_UNAVAILABLE must NOT send finder.leave-success from command handler
+        when(encounterManager.leaveEncounterDetailed(viewer))
+                .thenReturn(RaidEncounterManager.LeaveEncounterResult.RETURN_WORLD_UNAVAILABLE);
+        org.mockito.Mockito.clearInvocations(viewer);
+        handler.leaveEncounter(viewer);
+        verify(viewer, never()).sendMessage(any(Component.class));
     }
 }
