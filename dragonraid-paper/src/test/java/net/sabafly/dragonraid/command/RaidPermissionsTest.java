@@ -28,6 +28,8 @@ class RaidPermissionsTest {
         assertEquals("dragonraid.shop", RaidPermissions.SHOP);
         assertEquals("dragonraid.stats", RaidPermissions.STATS);
         assertEquals("dragonraid.stats.others", RaidPermissions.STATS_OTHERS);
+        assertEquals("dragonraid.party", RaidPermissions.PARTY);
+        assertEquals("dragonraid.finder", RaidPermissions.FINDER);
         assertEquals("dragonraid.bypass.end_gate", RaidPermissions.BYPASS_END_GATE);
         assertEquals("dragonraid.admin", RaidPermissions.ADMIN);
         assertEquals("dragonraid.admin.region", RaidPermissions.ADMIN_REGION);
@@ -40,8 +42,8 @@ class RaidPermissionsTest {
         assertEquals("dragonraid.admin.achievement", RaidPermissions.ADMIN_ACHIEVEMENT);
         assertEquals("dragonraid.admin.progression", RaidPermissions.ADMIN_PROGRESSION);
         assertEquals("dragonraid.admin.reward", RaidPermissions.ADMIN_REWARD);
-        assertEquals(16, RaidPermissions.ALL_NODES.size());
-        assertEquals(16, Set.copyOf(RaidPermissions.ALL_NODES).size());
+        assertEquals(18, RaidPermissions.ALL_NODES.size());
+        assertEquals(18, Set.copyOf(RaidPermissions.ALL_NODES).size());
     }
 
     @Test
@@ -94,12 +96,14 @@ class RaidPermissionsTest {
         RaidPermissions.registerDefaults(pluginManager);
         RaidPermissions.registerDefaults(pluginManager);
 
-        verify(pluginManager, times(16)).addPermission(any(Permission.class));
+        verify(pluginManager, times(18)).addPermission(any(Permission.class));
         for (String node : RaidPermissions.ALL_NODES) {
             assertNotNull(registered.get(node), "Missing registered permission: " + node);
         }
         assertEquals(PermissionDefault.TRUE, registered.get(RaidPermissions.USE).getDefault());
         assertEquals(PermissionDefault.TRUE, registered.get(RaidPermissions.SHOP).getDefault());
+        assertEquals(PermissionDefault.TRUE, registered.get(RaidPermissions.PARTY).getDefault());
+        assertEquals(PermissionDefault.TRUE, registered.get(RaidPermissions.FINDER).getDefault());
         assertEquals(PermissionDefault.FALSE, registered.get(RaidPermissions.BYPASS_END_GATE).getDefault());
         assertEquals(PermissionDefault.OP, registered.get(RaidPermissions.ADMIN).getDefault());
         assertEquals(PermissionDefault.OP, registered.get(RaidPermissions.STATS_OTHERS).getDefault());

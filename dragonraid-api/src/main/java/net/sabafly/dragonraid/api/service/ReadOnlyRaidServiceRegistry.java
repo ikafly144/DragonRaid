@@ -16,12 +16,18 @@ import net.sabafly.dragonraid.api.achievement.AchievementUnlockedEvent;
 import net.sabafly.dragonraid.api.achievement.RaidAchievementService;
 import net.sabafly.dragonraid.api.economy.CurrencyDefinition;
 import net.sabafly.dragonraid.api.economy.RaidEconomyService;
+import net.sabafly.dragonraid.api.finder.ContentEligibilityResult;
 import net.sabafly.dragonraid.api.finder.ContentEntrySpec;
 import net.sabafly.dragonraid.api.finder.ContentFinderService;
 import net.sabafly.dragonraid.api.finder.ContentUnlockService;
+import net.sabafly.dragonraid.api.finder.ReadyCheckListener;
+import net.sabafly.dragonraid.api.finder.ReadyCheckSession;
 import net.sabafly.dragonraid.api.item.CustomItemDefinition;
 import net.sabafly.dragonraid.api.item.RaidItemService;
 import net.sabafly.dragonraid.api.pack.ContentPackCatalogSnapshot;
+import net.sabafly.dragonraid.api.party.PartyChangeListener;
+import net.sabafly.dragonraid.api.party.PartyChatChannel;
+import net.sabafly.dragonraid.api.party.PartyInvite;
 import net.sabafly.dragonraid.api.party.RaidParty;
 import net.sabafly.dragonraid.api.party.RaidPartyService;
 import net.sabafly.dragonraid.api.progression.VanillaEndAccessDecision;
@@ -315,6 +321,51 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
         }
 
         @Override
+        public ContentEligibilityResult evaluateEligibility(UUID initiatorId, String contentId) {
+            return delegate.evaluateEligibility(initiatorId, contentId);
+        }
+
+        @Override
+        public Optional<ReadyCheckSession> startReadyCheck(UUID initiatorId, String contentId) {
+            throw readOnlyError("ContentFinderService.startReadyCheck");
+        }
+
+        @Override
+        public boolean respondReadyCheck(UUID playerId, boolean accepted) {
+            throw readOnlyError("ContentFinderService.respondReadyCheck");
+        }
+
+        @Override
+        public boolean respondReadyCheck(UUID playerId, UUID expectedSessionId, boolean accepted) {
+            throw readOnlyError("ContentFinderService.respondReadyCheck");
+        }
+
+        @Override
+        public boolean cancelReadyCheck(UUID actorId) {
+            throw readOnlyError("ContentFinderService.cancelReadyCheck");
+        }
+
+        @Override
+        public Optional<ReadyCheckSession> activeReadyCheck(UUID playerId) {
+            return delegate.activeReadyCheck(playerId);
+        }
+
+        @Override
+        public void tickReadyChecks() {
+            throw readOnlyError("ContentFinderService.tickReadyChecks");
+        }
+
+        @Override
+        public void addReadyCheckListener(ReadyCheckListener listener) {
+            throw readOnlyError("ContentFinderService.addReadyCheckListener");
+        }
+
+        @Override
+        public void removeReadyCheckListener(ReadyCheckListener listener) {
+            throw readOnlyError("ContentFinderService.removeReadyCheckListener");
+        }
+
+        @Override
         public boolean unregisterContent(String contentId) {
             throw readOnlyError("ContentFinderService.unregisterContent");
         }
@@ -535,6 +586,86 @@ public final class ReadOnlyRaidServiceRegistry implements RaidServiceRegistry {
         @Override
         public boolean disband(UUID leaderId) {
             throw readOnlyError("RaidPartyService.disband");
+        }
+
+        @Override
+        public Optional<RaidParty> partyById(UUID partyId) {
+            return delegate.partyById(partyId);
+        }
+
+        @Override
+        public int maxPartySize() {
+            return delegate.maxPartySize();
+        }
+
+        @Override
+        public boolean declineInvite(UUID playerId, UUID partyId) {
+            throw readOnlyError("RaidPartyService.declineInvite");
+        }
+
+        @Override
+        public List<PartyInvite> pendingInvites(UUID targetId) {
+            return delegate.pendingInvites(targetId);
+        }
+
+        @Override
+        public int expireInvites() {
+            throw readOnlyError("RaidPartyService.expireInvites");
+        }
+
+        @Override
+        public boolean markDisconnected(UUID playerId) {
+            throw readOnlyError("RaidPartyService.markDisconnected");
+        }
+
+        @Override
+        public boolean reconnect(UUID playerId) {
+            throw readOnlyError("RaidPartyService.reconnect");
+        }
+
+        @Override
+        public int expireDisconnectedSeats() {
+            throw readOnlyError("RaidPartyService.expireDisconnectedSeats");
+        }
+
+        @Override
+        public boolean isDisconnected(UUID playerId) {
+            return delegate.isDisconnected(playerId);
+        }
+
+        @Override
+        public Set<UUID> disconnectedMemberIds(UUID partyId) {
+            return delegate.disconnectedMemberIds(partyId);
+        }
+
+        @Override
+        public boolean isMutationLocked(UUID playerId) {
+            return delegate.isMutationLocked(playerId);
+        }
+
+        @Override
+        public PartyChatChannel chatChannel(UUID playerId) {
+            return delegate.chatChannel(playerId);
+        }
+
+        @Override
+        public void setChatChannel(UUID playerId, PartyChatChannel channel) {
+            throw readOnlyError("RaidPartyService.setChatChannel");
+        }
+
+        @Override
+        public PartyChatChannel toggleChatChannel(UUID playerId) {
+            throw readOnlyError("RaidPartyService.toggleChatChannel");
+        }
+
+        @Override
+        public void addListener(PartyChangeListener listener) {
+            throw readOnlyError("RaidPartyService.addListener");
+        }
+
+        @Override
+        public void removeListener(PartyChangeListener listener) {
+            throw readOnlyError("RaidPartyService.removeListener");
         }
     }
 

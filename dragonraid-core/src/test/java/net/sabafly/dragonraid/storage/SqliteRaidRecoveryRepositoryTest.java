@@ -170,4 +170,59 @@ class SqliteRaidRecoveryRepositoryTest {
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
         assertTrue(elapsedMs < 500L, "Rejected async delete must not stall sync replace");
     }
+
+    @Test
+    void persistsReturnLocationWithoutFlagsAndMigratesLegacySchemaAcrossReopen() throws Exception {
+        executor = Executors.newFixedThreadPool(2);
+        Path dbPath = tempDir.resolve("return-migration.db");
+
+        // Create legacy 6-column pending_player_cleanups schema and insert an existing row BEFORE repo init
+        database = new SqliteDatabase(dbPath, 2, executor);
+        UUID legacyPlayer = UUID.randomUUID();
+        database.withWriteTransaction((conn, tx) -> {
+            try (var stmt = conn.createStatement()) {
+                stmt.execute("""
+                    CREATE TABLE pending_player_cleanups (
+                        uuid TEXT PRIMARY KEY,
+                        game_mode TEXT,
+                        invisible INTEGER NOT NULL,
+                        collidable INTEGER NOT NULL,
+                        invulnerable INTEGER NOT NULL,
+                        teleport_to_safe_zone INTEGER NOT NULL
+                    )
+                    """);
+            }
+            try (var ps = conn.prepareStatement("""
+                INSERT INTO pending_player_cleanups (
+                    uuid, game_mode, invisible, collidable, invulnerable, teleport_to_safe_zone
+                ) VALUES (?, 'ADVENTURE', 1, 0, 1, 1)
+                """)) {
+                ps.setString(1, legacyPlayer.toString());
+                ps.executeUpdate();
+            }
+            return null;
+        });
+
+        SqliteRaidRecoveryRepository repo = new SqliteRaidRecoveryRepository(database);
+        Map<UUID, PendingPlayerCleanup> migrated = repo.loadPendingPlayerCleanupsSync();
+        PendingPlayerCleanup legacyLoaded = migrated.get(legacyPlayer);
+        assertEquals("ADVENTURE", legacyLoaded.gameModeName());
+        assertTrue(legacyLoaded.restoreFlags());
+        assertTrue(!legacyLoaded.hasReturnLocation());
+
+        UUID returnPlayer = UUID.randomUUID();
+        UUID worldId = UUID.randomUUID();
+        PendingPlayerCleanup returnOnly = new PendingPlayerCleanup(
+                returnPlayer, null, false, true, false, true, false,
+                worldId, 125.5, 72.0, -48.25, 90.0f, -15.0f);
+        repo.upsertPendingPlayerCleanupAsync(returnOnly).join();
+        database.close();
+
+        database = new SqliteDatabase(dbPath, 2, executor);
+        SqliteRaidRecoveryRepository reopened = new SqliteRaidRecoveryRepository(database);
+        Map<UUID, PendingPlayerCleanup> reloaded = reopened.loadPendingPlayerCleanupsSync();
+        assertEquals(legacyLoaded, reloaded.get(legacyPlayer));
+        assertEquals(returnOnly, reloaded.get(returnPlayer));
+        assertTrue(reloaded.get(returnPlayer).hasReturnLocation());
+    }
 }

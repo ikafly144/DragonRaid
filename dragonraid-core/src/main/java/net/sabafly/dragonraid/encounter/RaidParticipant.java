@@ -29,6 +29,7 @@ public final class RaidParticipant {
     private volatile long downedAtMillis;
     private volatile double reviveProgressSeconds;
     private volatile @Nullable UUID currentReviverId;
+    private volatile @Nullable Location preEntryReturnLocation;
 
     public RaidParticipant(UUID playerId, String name) {
         this.playerId = Objects.requireNonNull(playerId, "playerId");
@@ -149,5 +150,14 @@ public final class RaidParticipant {
 
     public void setCurrentReviverId(@Nullable UUID currentReviverId) {
         this.currentReviverId = currentReviverId;
+    }
+
+    public @Nullable Location preEntryReturnLocation() {
+        Location loc = this.preEntryReturnLocation;
+        return loc == null ? null : loc.clone();
+    }
+
+    public void setPreEntryReturnLocation(@Nullable Location preEntryReturnLocation) {
+        this.preEntryReturnLocation = preEntryReturnLocation == null ? null : preEntryReturnLocation.clone();
     }
 }

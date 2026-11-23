@@ -15,8 +15,15 @@ public record ContentEntrySpec(
         int minPlayers,
         int maxPlayers,
         int minAverageItemLevel,
-        List<String> clearRewards
+        List<String> clearRewards,
+        ContentUnlockPolicy unlockPolicy,
+        boolean hiddenUntilUnlocked,
+        String descriptionKey,
+        String iconMaterial,
+        String category
 ) {
+
+    public static final String DEFAULT_ICON_MATERIAL = "ENDER_EYE";
 
     public ContentEntrySpec {
         if (contentId == null || contentId.isBlank()) {
@@ -32,6 +39,10 @@ public record ContentEntrySpec(
             throw new IllegalArgumentException("minAverageItemLevel must be >= 0");
         }
         clearRewards = normalizeIdList(clearRewards);
+        unlockPolicy = unlockPolicy == null ? ContentUnlockPolicy.ALL_MEMBERS : unlockPolicy;
+        descriptionKey = descriptionKey == null ? "" : descriptionKey;
+        iconMaterial = (iconMaterial == null || iconMaterial.isBlank()) ? DEFAULT_ICON_MATERIAL : iconMaterial.trim();
+        category = category == null ? "" : category.trim();
     }
 
     public ContentEntrySpec(
@@ -43,6 +54,32 @@ public record ContentEntrySpec(
             int maxPlayers,
             int minAverageItemLevel) {
         this(contentId, displayNameKey, blueprintId, requiredUnlockKey, minPlayers, maxPlayers, minAverageItemLevel, List.of());
+    }
+
+    public ContentEntrySpec(
+            String contentId,
+            String displayNameKey,
+            String blueprintId,
+            String requiredUnlockKey,
+            int minPlayers,
+            int maxPlayers,
+            int minAverageItemLevel,
+            List<String> clearRewards) {
+        this(
+                contentId,
+                displayNameKey,
+                blueprintId,
+                requiredUnlockKey,
+                minPlayers,
+                maxPlayers,
+                minAverageItemLevel,
+                clearRewards,
+                ContentUnlockPolicy.ALL_MEMBERS,
+                false,
+                "",
+                DEFAULT_ICON_MATERIAL,
+                ""
+        );
     }
 
     private static List<String> normalizeIdList(@Nullable List<String> values) {

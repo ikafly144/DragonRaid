@@ -18,6 +18,8 @@ public final class RaidPermissions {
     public static final String SHOP = "dragonraid.shop";
     public static final String STATS = "dragonraid.stats";
     public static final String STATS_OTHERS = "dragonraid.stats.others";
+    public static final String PARTY = "dragonraid.party";
+    public static final String FINDER = "dragonraid.finder";
 
     public static final String ADMIN = "dragonraid.admin";
     public static final String ADMIN_REGION = "dragonraid.admin.region";
@@ -42,6 +44,8 @@ public final class RaidPermissions {
         SHOP,
         STATS,
         STATS_OTHERS,
+        PARTY,
+        FINDER,
         BYPASS_END_GATE,
         ADMIN,
         ADMIN_REGION,
@@ -75,10 +79,6 @@ public final class RaidPermissions {
     /**
      * Checks whether {@code sender} holds {@code permission}, inheriting {@link #ADMIN}
      * for {@code dragonraid.admin.*} sub-nodes unless explicitly negated.
-     *
-     * @param sender the command sender
-     * @param permission the permission node to check
-     * @return {@code true} if permitted
      */
     public static boolean hasPermission(CommandSender sender, String permission) {
         Objects.requireNonNull(sender, "sender");
@@ -94,9 +94,6 @@ public final class RaidPermissions {
 
     /**
      * Checks whether {@code sender} can view another player's stats.
-     *
-     * @param sender the command sender
-     * @return {@code true} if permitted via {@link #STATS_OTHERS} or {@link #ADMIN}
      */
     public static boolean hasStatsOthersPermission(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
@@ -108,9 +105,6 @@ public final class RaidPermissions {
 
     /**
      * Checks whether {@code sender} has {@link #ADMIN} or any {@code dragonraid.admin.*} permission.
-     *
-     * @param sender the command sender
-     * @return {@code true} if any admin command is accessible
      */
     public static boolean hasAnyAdminPermission(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
@@ -127,9 +121,6 @@ public final class RaidPermissions {
 
     /**
      * Checks whether {@code sender} has access to the root {@code /dragonraid} command.
-     *
-     * @param sender the command sender
-     * @return {@code true} if the sender holds {@link #USE} or any subcommand permission
      */
     public static boolean hasAnyCommandAccess(CommandSender sender) {
         Objects.requireNonNull(sender, "sender");
@@ -137,14 +128,14 @@ public final class RaidPermissions {
             || sender.hasPermission(SHOP)
             || sender.hasPermission(STATS)
             || sender.hasPermission(STATS_OTHERS)
+            || sender.hasPermission(PARTY)
+            || sender.hasPermission(FINDER)
             || hasAnyAdminPermission(sender);
     }
 
     /**
      * Registers DragonRaid permission definitions and default values idempotently
      * with the given {@link PluginManager}.
-     *
-     * @param pluginManager the Bukkit/Folia plugin manager
      */
     public static void registerDefaults(PluginManager pluginManager) {
         Objects.requireNonNull(pluginManager, "pluginManager");
@@ -152,6 +143,8 @@ public final class RaidPermissions {
         registerIfAbsent(pluginManager, SHOP, "Allows opening the DragonRaid reward shop", PermissionDefault.TRUE, Map.of());
         registerIfAbsent(pluginManager, STATS, "Allows viewing own DragonRaid stats", PermissionDefault.TRUE, Map.of());
         registerIfAbsent(pluginManager, STATS_OTHERS, "Allows viewing other players' DragonRaid stats", PermissionDefault.OP, Map.of());
+        registerIfAbsent(pluginManager, PARTY, "Allows using DragonRaid party management and party chat", PermissionDefault.TRUE, Map.of());
+        registerIfAbsent(pluginManager, FINDER, "Allows using the DragonRaid Content Finder", PermissionDefault.TRUE, Map.of());
         registerIfAbsent(pluginManager, BYPASS_END_GATE, "Allows bypassing vanilla End portal entry restrictions", PermissionDefault.FALSE, Map.of());
 
         registerIfAbsent(pluginManager, ADMIN_REGION, "Allows configuring DragonRaid regions", PermissionDefault.OP, Map.of());

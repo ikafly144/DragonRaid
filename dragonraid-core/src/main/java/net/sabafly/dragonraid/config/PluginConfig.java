@@ -17,8 +17,40 @@ public record PluginConfig(
         @Setting("encounter") EncounterSettings encounter,
         @Setting("revive") ReviveSettings revive,
         @Setting("protection") ProtectionSettings protection,
-        @Setting("visuals") VisualSettings visuals
+        @Setting("visuals") VisualSettings visuals,
+        @Setting("party") PartySettings party,
+        @Setting("finder") FinderSettings finder
 ) {
+
+    public PluginConfig {
+        party = party == null ? PartySettings.defaults() : party;
+        finder = finder == null ? FinderSettings.defaults() : finder;
+    }
+
+    public PluginConfig(
+            LanguageSettings language,
+            DatabaseSettings database,
+            WorldSettings world,
+            RegionConfig regions,
+            ScalingSettings scaling,
+            EncounterSettings encounter,
+            ReviveSettings revive,
+            ProtectionSettings protection,
+            VisualSettings visuals) {
+        this(
+                language,
+                database,
+                world,
+                regions,
+                scaling,
+                encounter,
+                revive,
+                protection,
+                visuals,
+                PartySettings.defaults(),
+                FinderSettings.defaults()
+        );
+    }
 
     @ConfigSerializable
     public record LanguageSettings(
@@ -162,5 +194,32 @@ public record PluginConfig(
             @Setting("tether-particle-step") double tetherParticleStep,
             @Setting("max-render-distance") double maxRenderDistance
     ) {
+    }
+
+    @ConfigSerializable
+    public record PartySettings(
+            @Setting("max-size") int maxSize,
+            @Setting("invite-timeout-seconds") int inviteTimeoutSeconds,
+            @Setting("disconnect-grace-seconds") int disconnectGraceSeconds,
+            @Setting("hud-enabled-default") boolean hudEnabledDefault,
+            @Setting("hud-update-interval-ticks") int hudUpdateIntervalTicks,
+            @Setting("hud-max-members-shown") int hudMaxMembersShown
+    ) {
+        public static PartySettings defaults() {
+            return new PartySettings(8, 60, 120, true, 10, 8);
+        }
+    }
+
+    @ConfigSerializable
+    public record FinderSettings(
+            @Setting("ready-check-timeout-seconds") int readyCheckTimeoutSeconds,
+            @Setting("skip-ready-check-for-solo") boolean skipReadyCheckForSolo,
+            @Setting("commence-sound") String commenceSound,
+            @Setting("commence-sound-pitch") float commenceSoundPitch,
+            @Setting("commence-sound-volume") float commenceSoundVolume
+    ) {
+        public static FinderSettings defaults() {
+            return new FinderSettings(30, false, "minecraft:block.bell.use", 1.4f, 1.0f);
+        }
     }
 }

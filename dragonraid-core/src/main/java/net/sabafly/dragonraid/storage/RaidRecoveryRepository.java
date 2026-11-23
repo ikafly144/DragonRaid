@@ -32,8 +32,29 @@ public interface RaidRecoveryRepository {
             boolean invisible,
             boolean collidable,
             boolean invulnerable,
-            boolean teleportToSafeZone
+            boolean teleportToSafeZone,
+            boolean restoreFlags,
+            @Nullable UUID returnWorldId,
+            @Nullable Double returnX,
+            @Nullable Double returnY,
+            @Nullable Double returnZ,
+            @Nullable Float returnYaw,
+            @Nullable Float returnPitch
     ) {
+        public PendingPlayerCleanup(
+                UUID playerId,
+                @Nullable String gameModeName,
+                boolean invisible,
+                boolean collidable,
+                boolean invulnerable,
+                boolean teleportToSafeZone) {
+            this(playerId, gameModeName, invisible, collidable, invulnerable, teleportToSafeZone,
+                    true, null, null, null, null, null, null);
+        }
+
+        public boolean hasReturnLocation() {
+            return returnWorldId != null && returnX != null && returnY != null && returnZ != null;
+        }
     }
 
     List<PendingBlockRollback> loadPendingBlockRollbacksSync();
