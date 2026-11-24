@@ -22,4 +22,5 @@ include(
     "dragonraid-item",
     "dragonraid-stat",
     "dragonraid-paper",
+    "dragonraid-test-harness",
 )

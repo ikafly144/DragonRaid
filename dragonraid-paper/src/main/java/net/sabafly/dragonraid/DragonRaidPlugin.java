@@ -446,6 +446,12 @@ public final class DragonRaidPlugin extends JavaPlugin {
             serviceRegistry.register(RewardItemDelivery.class, rewardItemDelivery);
             serviceRegistry.register(ContentPackLoader.class, contentPackLoader);
             serviceRegistry.register(SpatialTelegraphService.class, telegraphService);
+            getServer().getServicesManager().register(
+                RaidServiceRegistry.class,
+                this.serviceRegistry,
+                this,
+                org.bukkit.plugin.ServicePriority.Normal
+            );
 
             vanillaEndProgressionPolicy.loadServerMilestones().join();
             try {
@@ -606,6 +612,7 @@ public final class DragonRaidPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        getServer().getServicesManager().unregisterAll(this);
         if (readyCheckCoordinator != null) {
             try {
                 readyCheckCoordinator.shutdown();
